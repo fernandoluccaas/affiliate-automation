@@ -16,7 +16,7 @@
     "format": "prettier --write .",
     "prisma:generate": "prisma generate --schema prisma/schema.prisma",
     "prisma:migrate": "prisma migrate dev --schema prisma/schema.prisma",
-    "db:seed": "tsx prisma/seed.ts",
+    "db:seed": "node --env-file=.env --import tsx prisma/seed.ts",
     "postinstall": "prisma generate --schema prisma/schema.prisma"
   },
   "devDependencies": {
