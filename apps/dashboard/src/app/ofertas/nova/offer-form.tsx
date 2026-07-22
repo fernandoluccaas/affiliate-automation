@@ -1,0 +1,211 @@
+"use client";
+
+import Link from "next/link";
+import { useMemo, useState, useTransition } from "react";
+import { useForm } from "react-hook-form";
+import { ArrowLeft, Save } from "lucide-react";
+import { marketplaces, stockStatuses } from "@affiliate/shared";
+import { createManualOfferAction, type CreateOfferState } from "@/lib/actions";
+import { offerFormSchema, type OfferFormValues } from "@/lib/offer-form-schema";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
+
+const defaultValues: OfferFormValues = {
+  marketplace: "SHOPEE",
+  externalProductId: "",
+  title: "",
+  description: undefined,
+  category: undefined,
+  imageUrl: undefined,
+  productUrl: "",
+  affiliateUrl: undefined,
+  originalPrice: 0,
+  currentPrice: 0,
+  couponCode: undefined,
+  couponExpiration: undefined,
+  commissionPercentage: undefined,
+  rating: undefined,
+  salesCount: undefined,
+  freeShipping: false,
+  stockStatus: "IN_STOCK",
+};
+
+export function OfferForm() {
+  const [state, setState] = useState<CreateOfferState | null>(null);
+  const [pending, startTransition] = useTransition();
+  const {
+    register,
+    handleSubmit,
+    watch,
+    reset,
+    formState: { errors },
+  } = useForm<OfferFormValues>({
+    defaultValues,
+  });
+  const originalPrice = Number(watch("originalPrice") ?? 0);
+  const currentPrice = Number(watch("currentPrice") ?? 0);
+  const calculatedDiscount = useMemo(() => {
+    if (originalPrice <= 0 || currentPrice <= 0 || currentPrice > originalPrice) {
+      return null;
+    }
+
+    return (((originalPrice - currentPrice) / originalPrice) * 100).toFixed(2);
+  }, [currentPrice, originalPrice]);
+
+  function onSubmit(values: OfferFormValues) {
+    const parsed = offerFormSchema.safeParse(values);
+
+    if (!parsed.success) {
+      setState({
+        ok: false,
+        message: parsed.error.issues[0]?.message ?? "Dados da oferta invalidos.",
+      });
+      return;
+    }
+
+    startTransition(async () => {
+      const result = await createManualOfferAction(parsed.data);
+      setState(result);
+
+      if (result.ok) {
+        reset(defaultValues);
+      }
+    });
+  }
+
+  return (
+    <form onSubmit={handleSubmit(onSubmit)} className="grid gap-6">
+      <Card>
+        <CardHeader>
+          <CardTitle>Dados do produto</CardTitle>
+        </CardHeader>
+        <CardContent className="grid gap-4 md:grid-cols-2">
+          <Field label="Marketplace" error={errors.marketplace?.message}>
+            <Select {...register("marketplace")}>
+              {marketplaces.map((marketplace) => (
+                <option key={marketplace} value={marketplace}>
+                  {marketplace}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="ID externo" error={errors.externalProductId?.message}>
+            <Input {...register("externalProductId")} />
+          </Field>
+          <Field label="Titulo" error={errors.title?.message}>
+            <Input {...register("title")} />
+          </Field>
+          <Field label="Categoria" error={errors.category?.message}>
+            <Input {...register("category")} />
+          </Field>
+          <Field className="md:col-span-2" label="Descricao" error={errors.description?.message}>
+            <Textarea {...register("description")} />
+          </Field>
+          <Field label="Imagem" error={errors.imageUrl?.message}>
+            <Input {...register("imageUrl")} type="url" />
+          </Field>
+          <Field label="URL do produto" error={errors.productUrl?.message}>
+            <Input {...register("productUrl")} type="url" />
+          </Field>
+          <Field label="URL afiliada" error={errors.affiliateUrl?.message}>
+            <Input {...register("affiliateUrl")} type="url" />
+          </Field>
+          <Field label="Estoque" error={errors.stockStatus?.message}>
+            <Select {...register("stockStatus")}>
+              {stockStatuses.map((status) => (
+                <option key={status} value={status}>
+                  {status}
+                </option>
+              ))}
+            </Select>
+          </Field>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Preco e promocao</CardTitle>
+        </CardHeader>
+        <CardContent className="grid gap-4 md:grid-cols-3">
+          <Field label="Preco original" error={errors.originalPrice?.message}>
+            <Input {...register("originalPrice", { valueAsNumber: true })} min="0" step="0.01" type="number" />
+          </Field>
+          <Field label="Preco atual" error={errors.currentPrice?.message}>
+            <Input {...register("currentPrice", { valueAsNumber: true })} min="0" step="0.01" type="number" />
+          </Field>
+          <div className="rounded-md border bg-[var(--background)] px-3 py-2">
+            <div className="text-sm font-medium">Desconto calculado</div>
+            <div className="mt-1 text-2xl font-semibold">
+              {calculatedDiscount ? `${calculatedDiscount}%` : "-"}
+            </div>
+          </div>
+          <Field label="Cupom" error={errors.couponCode?.message}>
+            <Input {...register("couponCode")} />
+          </Field>
+          <Field label="Validade do cupom" error={errors.couponExpiration?.message}>
+            <Input {...register("couponExpiration")} type="datetime-local" />
+          </Field>
+          <Field label="Comissao (%)" error={errors.commissionPercentage?.message}>
+            <Input {...register("commissionPercentage", { valueAsNumber: true })} min="0" max="100" step="0.01" type="number" />
+          </Field>
+          <Field label="Avaliacao" error={errors.rating?.message}>
+            <Input {...register("rating", { valueAsNumber: true })} min="0" max="5" step="0.01" type="number" />
+          </Field>
+          <Field label="Vendas" error={errors.salesCount?.message}>
+            <Input {...register("salesCount", { valueAsNumber: true })} min="0" step="1" type="number" />
+          </Field>
+          <label className="flex h-10 items-center gap-2 self-end text-sm font-medium">
+            <input {...register("freeShipping")} type="checkbox" className="h-4 w-4" />
+            Frete gratis
+          </label>
+        </CardContent>
+      </Card>
+
+      {state ? (
+        <div
+          className={
+            state.ok
+              ? "rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800"
+              : "rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800"
+          }
+        >
+          {state.message}
+        </div>
+      ) : null}
+
+      <div className="flex flex-col-reverse gap-3 sm:flex-row sm:justify-between">
+        <Button asChild variant="outline">
+          <Link href="/ofertas">
+            <ArrowLeft aria-hidden="true" size={18} />
+            Voltar
+          </Link>
+        </Button>
+        <Button type="submit" disabled={pending}>
+          <Save aria-hidden="true" size={18} />
+          Salvar oferta
+        </Button>
+      </div>
+    </form>
+  );
+}
+
+type FieldProps = {
+  label: string;
+  error?: string | undefined;
+  className?: string | undefined;
+  children: React.ReactNode;
+};
+
+function Field({ label, error, className, children }: FieldProps) {
+  return (
+    <div className={`grid gap-2 ${className ?? ""}`}>
+      <Label>{label}</Label>
+      {children}
+      {error ? <p className="text-sm text-[var(--destructive)]">{error}</p> : null}
+    </div>
+  );
+}

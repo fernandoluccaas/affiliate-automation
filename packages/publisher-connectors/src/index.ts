@@ -11,7 +11,7 @@ export type PublicationPayload = {
 
 export type PublisherResult = {
   externalId?: string;
-  status: "PUBLISHED" | "FAILED";
+  status: "PUBLISHED" | "FAILED" | "EXPORTED";
   rawResponse?: unknown;
 };
 
@@ -29,15 +29,23 @@ export class ManualExportPublisher implements PublisherAdapter {
   }
 
   async publish(payload: PublicationPayload) {
-    return { externalId: payload.offerId, status: "PUBLISHED" as const };
+    return {
+      externalId: `manual-export:${payload.offerId}`,
+      status: "EXPORTED" as const,
+      rawResponse: { exportedOnly: true },
+    };
   }
 
   async getPublicationStatus(externalId: string) {
-    return { externalId, status: "PUBLISHED" as const };
+    return { externalId, status: "EXPORTED" as const, rawResponse: { exportedOnly: true } };
   }
 
   async retry(publicationId: string) {
-    return { externalId: publicationId, status: "PUBLISHED" as const };
+    return {
+      externalId: `manual-export:${publicationId}`,
+      status: "EXPORTED" as const,
+      rawResponse: { exportedOnly: true },
+    };
   }
 
   async healthCheck() {

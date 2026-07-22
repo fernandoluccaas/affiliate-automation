@@ -20,6 +20,7 @@ enum Marketplace {
 }
 
 enum OfferStatus {
+  PENDING_VALIDATION
   REJECTED_INVALID_DATA
   REJECTED_EXPIRED
   REJECTED_DUPLICATE
@@ -170,7 +171,8 @@ model Offer {
   freeShipping         Boolean     @default(false)
   stockStatus          StockStatus @default(UNKNOWN)
   score                Int?
-  status               OfferStatus @default(REJECTED_INVALID_DATA)
+  status               OfferStatus @default(PENDING_VALIDATION)
+  statusReason         String?
   collectedAt          DateTime
   verifiedAt           DateTime?
   scheduledAt          DateTime?

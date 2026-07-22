@@ -16,6 +16,20 @@
 - Normalize products, offers, campaigns and coupons.
 - Add integration health checks and import jobs.
 
+### Phase 2A - Manual Operational Pipeline
+
+Status: implemented.
+
+- Added the reusable administrative layout and real navigation.
+- Added `/ofertas` with pagination and filters by marketplace, status and category.
+- Added `/ofertas/nova` with React Hook Form, Zod and Server Action.
+- Added `ingestOffer` for manual deterministic ingestion without real marketplace, OpenAI or WhatsApp integrations.
+- Added automatic discount calculation, product upsert, offer upsert, validation, score persistence, affiliate slug generation and status selection.
+- Replaced dashboard demonstration values with PostgreSQL metrics.
+- Added health checks for application, PostgreSQL and configured Redis.
+- Corrected manual export publication semantics.
+- Added tests for discount calculation, validation, scoring, ingestion and route protection.
+
 ## Phase 3 - Validation, Deduplication and Scoring
 
 - Complete the deterministic validation pipeline.

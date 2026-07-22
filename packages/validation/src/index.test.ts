@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { validateOfferFacts } from "./index";
+import { calculateValidatedDiscount, validateOfferFacts } from "./index";
 
 const baseOffer = {
   marketplace: "SHOPEE",
@@ -24,6 +24,34 @@ describe("validateOfferFacts", () => {
     expect(validateOfferFacts({ ...baseOffer, discountPercentage: 25 })).toMatchObject({
       ok: false,
       code: "DISCOUNT_MISMATCH",
+    });
+  });
+
+  it("rejects an expired coupon deterministically", () => {
+    expect(
+      validateOfferFacts(
+        { ...baseOffer, couponExpiration: new Date("2025-12-31T23:59:59.000Z") },
+        new Date("2026-01-01T00:00:00.000Z"),
+      ),
+    ).toMatchObject({
+      ok: false,
+      code: "EXPIRED_COUPON",
+    });
+  });
+});
+
+describe("calculateValidatedDiscount", () => {
+  it("calculates discount from original and current prices", () => {
+    expect(calculateValidatedDiscount(200, 150)).toEqual({
+      ok: true,
+      discountPercentage: 25,
+    });
+  });
+
+  it("rejects invalid prices", () => {
+    expect(calculateValidatedDiscount(100, 120)).toMatchObject({
+      ok: false,
+      code: "INVALID_PRICE",
     });
   });
 });

@@ -6,10 +6,14 @@ Affiliate Automation is a production-oriented monorepo that separates user-facin
 
 Shopee and Mercado Livre integrations feed marketplace connectors. Connectors normalize external data into internal products, offers, coupons and affiliate links. Offers are persisted in PostgreSQL, validated deterministically, deduplicated, scored, associated with affiliate links, prepared by the AI copywriter, scheduled, published through channel adapters and measured through tracking and conversion imports.
 
+Phase 2A adds a manual offer pipeline before real marketplace connectors. An administrator can create an offer in `/ofertas/nova`; `ingestOffer` calculates the discount, upserts the product and offer in a transaction, validates facts with Zod and deterministic rules, calculates and persists an auditable score, creates a tracking slug and sets the final offer status automatically.
+
 ## Applications
 
 - `apps/dashboard`: Next.js 15 administrative dashboard deployed to Vercel.
 - `apps/worker`: worker entrypoint for Railway jobs, marketplace imports and automation runs.
+
+The dashboard uses a reusable administrative shell with real navigation for dashboard, offers, products, coupons, channels, integrations, publications, automations, settings and logs. Pages that are not fully implemented show empty states and do not fabricate operational data.
 
 ## Packages
 
@@ -25,6 +29,8 @@ Shopee and Mercado Livre integrations feed marketplace connectors. Connectors no
 ## Automation Boundary
 
 Workers and automation workflows must use locks and idempotency keys before mutating publication or import state. Upstash Redis is the intended distributed coordination layer. Railway runs workers and scheduled automation, with n8n reserved for external workflow orchestration where needed. The dashboard remains a control and observability plane.
+
+Manual export is not treated as publication delivery. `ManualExportPublisher` returns an exported-only status so downstream code cannot count a copied/exported message as a published message.
 
 ## AI Boundary
 

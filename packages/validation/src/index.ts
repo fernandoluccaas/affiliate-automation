@@ -79,3 +79,18 @@ export function validateOfferFacts(input: unknown, now = new Date()): Validation
 
   return { ok: true, normalizedDiscountPercentage: calculatedDiscount };
 }
+
+export function calculateValidatedDiscount(originalPrice: number, currentPrice: number) {
+  if (originalPrice <= 0 || currentPrice <= 0 || currentPrice > originalPrice) {
+    return {
+      ok: false as const,
+      code: "INVALID_PRICE" as const,
+      message: "Current price must be greater than zero and cannot exceed original price.",
+    };
+  }
+
+  return {
+    ok: true as const,
+    discountPercentage: calculateDiscountPercentage(originalPrice, currentPrice),
+  };
+}

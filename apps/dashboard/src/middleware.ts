@@ -2,9 +2,9 @@ import { jwtVerify } from "jose/jwt/verify";
 import { NextResponse, type NextRequest } from "next/server";
 import { sessionCookieName } from "./lib/session-constants";
 
-const publicPaths = ["/login", "/api/health"];
+export const publicPaths = ["/login", "/api/health"];
 
-function isPublicPath(pathname: string) {
+export function isPublicPath(pathname: string) {
   return (
     publicPaths.includes(pathname) ||
     pathname.startsWith("/_next") ||

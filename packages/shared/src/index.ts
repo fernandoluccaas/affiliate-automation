@@ -2,6 +2,7 @@ export const marketplaces = ["SHOPEE", "MERCADO_LIVRE"] as const;
 export type Marketplace = (typeof marketplaces)[number];
 
 export const offerStatuses = [
+  "PENDING_VALIDATION",
   "REJECTED_INVALID_DATA",
   "REJECTED_EXPIRED",
   "REJECTED_DUPLICATE",
