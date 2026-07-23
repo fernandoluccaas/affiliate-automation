@@ -5,17 +5,23 @@
   "type": "module",
   "scripts": {
     "dev": "tsx src/index.ts",
+    "once": "tsx src/index.ts --once",
+    "start": "tsx src/index.ts",
     "build": "tsc -p tsconfig.json",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "@affiliate/database": "0.1.0",
     "@affiliate/marketplace-connectors": "0.1.0",
+    "@affiliate/publication": "0.1.0",
     "@affiliate/publisher-connectors": "0.1.0",
+    "@affiliate/redis": "0.1.0",
     "@affiliate/scoring": "0.1.0",
     "@affiliate/validation": "0.1.0",
-    "tsx": "^4.20.3"
+    "tsx": "^4.20.3",
+    "vitest": "^3.2.4"
   },
   "devDependencies": {
     "typescript": "^5.8.3"

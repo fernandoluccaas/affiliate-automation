@@ -40,7 +40,9 @@ enum StockStatus {
 
 enum ChannelType {
   WHATSAPP_CLOUD
+  WHATSAPP_CLOUD_API
   WHATSAPP_GROUPS
+  WHATSAPP_GROUPS_API
   MANUAL_EXPORT
   TELEGRAM
 }
@@ -48,6 +50,8 @@ enum ChannelType {
 enum PublicationStatus {
   SCHEDULED
   PUBLISHED
+  EXPORTED
+  PUBLICATION_FAILED
   FAILED
   CANCELLED
 }
@@ -55,6 +59,7 @@ enum PublicationStatus {
 enum PublicationAttemptStatus {
   PENDING
   SUCCESS
+  EXPORTED
   FAILED
 }
 
@@ -109,17 +114,25 @@ model Channel {
   name                  String
   type                  ChannelType
   encryptedCredentials  String?
+  configuration         Json?
   capabilities          Json        @default("{}")
+  timezone              String      @default("America/Fortaleza")
   dailyLimit            Int         @default(10)
+  dailyPublicationLimit Int         @default(10)
   minIntervalMinutes    Int         @default(30)
+  minimumIntervalMinutes Int        @default(30)
   allowedHours          Json        @default("[]")
+  allowedStartTime      String?
+  allowedEndTime        String?
   allowedCategories     Json        @default("[]")
   allowedMarketplaces   Json        @default("[]")
   minScore              Int         @default(70)
+  minimumScore          Int         @default(70)
   minPrice              Decimal?    @db.Decimal(12, 2)
   maxPrice              Decimal?    @db.Decimal(12, 2)
   minDiscountPercentage Decimal?    @db.Decimal(5, 2)
   minRepeatDays         Int         @default(7)
+  productRepeatIntervalDays Int     @default(7)
   enabled               Boolean     @default(true)
   createdAt             DateTime    @default(now())
   updatedAt             DateTime    @updatedAt
@@ -217,6 +230,7 @@ model AffiliateLink {
   slug         String   @unique
   destination  String
   marketplace  Marketplace
+  active       Boolean  @default(true)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -251,10 +265,12 @@ model Publication {
   offerId        String
   channelId      String
   status         PublicationStatus @default(SCHEDULED)
+  idempotencyKey String            @unique
   scheduledAt    DateTime
   publishedAt    DateTime?
   externalId     String?
   messagePayload Json?
+  errorMessage   String?
   createdAt      DateTime          @default(now())
   updatedAt      DateTime          @updatedAt
 
@@ -272,6 +288,7 @@ model Publication {
 model PublicationAttempt {
   id             String                   @id @default(cuid())
   publicationId  String
+  attemptNumber  Int                      @default(1)
   status         PublicationAttemptStatus @default(PENDING)
   requestPayload Json?
   responsePayload Json?

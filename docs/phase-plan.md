@@ -30,6 +30,20 @@ Status: implemented.
 - Corrected manual export publication semantics.
 - Added tests for discount calculation, validation, scoring, ingestion and route protection.
 
+### Phase 2B - Tracking, Channels And Worker
+
+Status: implemented.
+
+- Added Redis abstraction for Upstash and local `REDIS_URL`.
+- Added functional channel CRUD for Telegram and manual export.
+- Added deterministic promotional message composition.
+- Added idempotent publication scheduling and worker jobs.
+- Added Telegram publishing through the official Bot API with image fallback.
+- Added manual export as `EXPORTED`, not external publication.
+- Added `/go/[slug]` click tracking and temporary redirects.
+- Added publication, automation and alert log admin views.
+- Added tests for message composition, channel policy, Redis locks, Telegram mock publishing, idempotent scheduling, route protection and tracking redirects.
+
 ## Phase 3 - Validation, Deduplication and Scoring
 
 - Complete the deterministic validation pipeline.

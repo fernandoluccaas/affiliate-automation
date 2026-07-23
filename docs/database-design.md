@@ -35,3 +35,33 @@ Offers default to `PENDING_VALIDATION`. The manual ingestion service then sets o
 - `REJECTED_LOW_SCORE`: valid facts with score below the minimum.
 
 `Offer.statusReason` stores the deterministic reason shown in the operational panel. `OfferScore` keeps each scoring component and the weights used for auditability.
+
+## Channel Configuration
+
+`Channel` stores publication policy:
+
+- `timezone`, `allowedStartTime`, `allowedEndTime`
+- `dailyPublicationLimit`
+- `minimumIntervalMinutes`
+- `minimumScore`
+- `minDiscountPercentage`
+- `productRepeatIntervalDays`
+- `allowedMarketplaces`
+- `allowedCategories`
+- `configuration` for server-side non-client channel settings
+
+Phase 2B supports functional `TELEGRAM` and `MANUAL_EXPORT` channels. WhatsApp API channel types are present but unavailable until a future official integration phase.
+
+## Publication And Tracking
+
+`Publication.idempotencyKey` is unique and uses `publication:{channelId}:{offerId}` to prevent duplicate scheduling. Redis locks use the same channel/offer pair while the worker schedules or publishes.
+
+Publication statuses:
+
+- `SCHEDULED`: ready for the worker.
+- `PUBLISHED`: sent through an external channel such as Telegram.
+- `EXPORTED`: generated for manual export only.
+- `FAILED`: retryable failure.
+- `PUBLICATION_FAILED`: definitive failure after configured attempts.
+
+`PublicationAttempt` stores every attempt with sanitized request/response payloads and no secrets. `AffiliateLink.active` controls whether `/go/[slug]` can redirect. `Click` stores referer and user agent, but never raw IP.

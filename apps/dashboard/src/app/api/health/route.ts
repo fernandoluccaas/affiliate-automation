@@ -1,11 +1,11 @@
 import { NextResponse } from "next/server";
-import { Redis } from "@upstash/redis";
 import { prisma } from "@affiliate/database";
+import { getRedisHealth } from "@affiliate/redis";
 
 type HealthCheck = {
   status: "ok" | "error" | "skipped";
   configured?: boolean;
-  message?: string;
+  message?: string | undefined;
 };
 
 export async function GET() {
@@ -23,25 +23,12 @@ export async function GET() {
     };
   }
 
-  const redisConfigured = Boolean(
-    process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN,
-  );
-
-  if (redisConfigured) {
-    try {
-      const redis = Redis.fromEnv();
-      await redis.ping();
-      checks.redis = { status: "ok", configured: true };
-    } catch (error) {
-      checks.redis = {
-        status: "error",
-        configured: true,
-        message: error instanceof Error ? error.message : "Redis check failed.",
-      };
-    }
-  } else {
-    checks.redis = { status: "skipped", configured: false };
-  }
+  const redis = await getRedisHealth();
+  checks.redis = {
+    status: redis.status === "ok" ? "ok" : redis.status === "unavailable" ? "skipped" : "error",
+    configured: redis.mode !== "unavailable",
+    message: redis.message,
+  };
 
   const status = Object.values(checks).some((check) => check.status === "error") ? 503 : 200;
 

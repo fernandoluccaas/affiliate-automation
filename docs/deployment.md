@@ -4,11 +4,15 @@
 
 1. Copy `.env.example` to `.env`.
 2. Fill `DATABASE_URL`, `AUTH_SECRET`, and admin seed variables.
-3. Run `docker compose up -d`.
-4. Run `npm install`.
-5. Run `npm run prisma:migrate`.
-6. Run `npm run db:seed`.
-7. Run `npm run dev`.
+3. Set `REDIS_URL="redis://localhost:6379"` for local Redis locks.
+4. Run `docker compose up -d`.
+5. Run `npm install`.
+6. Run `npm run prisma:migrate`.
+7. Run `npm run db:seed`.
+8. Run `npm run dev`.
+9. Run `npm run worker:once` for one publication cycle or `npm run worker:dev` for polling.
+
+To test tracking, open a generated `/go/[slug]` URL and confirm the dashboard click count changes.
 
 ## Vercel
 
@@ -17,6 +21,8 @@ Deploy `apps/dashboard` to Vercel. Set environment variables in Vercel project s
 ## Railway
 
 Deploy `apps/worker` to Railway with the same database, Redis and secret environment variables required by automation jobs.
+
+Set `APP_BASE_URL` to the dashboard URL so worker-generated tracking links point to production. Set `WORKER_POLL_INTERVAL_MS` and `WORKER_MAX_ATTEMPTS` as needed. For Telegram publication, set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`.
 
 ## CI
 
