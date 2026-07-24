@@ -48,9 +48,49 @@ REDIS_URL="redis://localhost:6379"
 
 `/api/health` pings whichever Redis configuration is active. When neither is configured, Redis is reported as unavailable without breaking the dashboard.
 
-## OpenAI
+## AI Copywriter
 
-The AI copywriter uses the official OpenAI SDK and the Responses API with structured JSON output:
+The AI copywriter is multi-provider. Ollama is the default local provider and OpenAI is optional.
+
+### Ollama
+
+Configure Ollama for local generation:
+
+```env
+AI_PROVIDER="ollama"
+OLLAMA_BASE_URL="http://localhost:11434"
+OLLAMA_MODEL="qwen3:4b"
+AI_COPY_ENABLED="true"
+AI_COPY_TIMEOUT_MS="30000"
+```
+
+Prepare the default model:
+
+```powershell
+ollama pull qwen3:4b
+ollama run qwen3:4b
+```
+
+The application calls the local Ollama HTTP API at `OLLAMA_BASE_URL` and uses `/api/generate` with `stream: false` and a JSON schema in `format`. It never executes the `ollama` binary or controls a terminal. Running models locally does not create token billing, although local hardware and any cloud infrastructure still have their own costs.
+
+`/integracoes` shows whether Ollama is configured, whether the HTTP service is available, the sanitized base URL, selected model and status. Ollama offline is treated as an integration status, not as an application health failure.
+
+### OpenAI
+
+OpenAI remains available only when explicitly selected:
+
+```env
+AI_PROVIDER="openai"
+OPENAI_API_KEY=""
+OPENAI_MODEL="gpt-4.1-mini"
+AI_COPY_TIMEOUT_MS="30000"
+```
+
+When `AI_PROVIDER="ollama"`, no OpenAI key is required and no OpenAI provider is selected.
+
+### Structured Copy
+
+Both providers use structured JSON output:
 
 - `headline`
 - `body`
@@ -58,15 +98,6 @@ The AI copywriter uses the official OpenAI SDK and the Responses API with struct
 - `disclosure`
 - `hashtags`
 
-Configure only server-side variables:
-
-```env
-OPENAI_API_KEY=""
-OPENAI_MODEL="gpt-4.1-mini"
-OPENAI_TIMEOUT_MS="8000"
-AI_COPY_ENABLED="true"
-```
-
 The worker sends only confirmed offer facts and the generated tracking URL. Deterministic post-validation rejects inconsistent prices, discounts, coupon claims, free-shipping claims, missing affiliate disclosure, extra URLs and unsupported urgency. Any failure uses the deterministic composer and records `DETERMINISTIC_FALLBACK` on `Publication`.
 
-`/integracoes` shows whether OpenAI is configured and enabled without exposing the key. `Testar copy` runs a server-side dry test and does not publish a message.
+`/integracoes` can test Ollama or OpenAI server-side without publishing a message. Secrets are never returned to the browser.

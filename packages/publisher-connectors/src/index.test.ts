@@ -37,6 +37,12 @@ describe("TelegramPublisher", () => {
     }).publish(payload);
 
     expect(result).toMatchObject({ status: "PUBLISHED", externalId: "123" });
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/sendPhoto"),
+      expect.objectContaining({
+        body: expect.stringContaining(payload.message),
+      }),
+    );
     expect(JSON.stringify(result.rawResponse)).not.toContain("secret-token");
   });
 

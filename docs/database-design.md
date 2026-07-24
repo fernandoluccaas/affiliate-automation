@@ -71,10 +71,11 @@ Publication statuses:
 Phase 2C stores copy-generation metadata directly on `Publication`:
 
 - `messageSource`: `AI_GENERATED` or `DETERMINISTIC_FALLBACK`.
-- `aiModel`: configured OpenAI model used for the attempt.
+- `aiProvider`: `OLLAMA`, `OPENAI` or `DETERMINISTIC`.
+- `aiModel`: configured provider model used for the attempt.
 - `aiGenerationDurationMs`: elapsed generation time when available.
 - `aiValidationPassed`: whether the generated AI copy passed deterministic checks.
 - `aiValidationReasons`: JSON list of validation or fallback reasons.
 - `generatedAt`: timestamp when message generation ran.
 
-The published/exported text remains in `messagePayload`. These fields do not store prompts, API keys or raw OpenAI responses.
+The published/exported text remains in `messagePayload`. These fields do not store prompts, API keys or raw provider responses.

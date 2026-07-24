@@ -1,12 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  AiCopywriter,
+  AiMessageValidator,
   MessageGenerationService,
-  PromotionalCopyValidator,
+  OllamaAiProvider,
+  OpenAiProvider,
   copyToMessage,
+  createAiProvider,
   getOpenAiIntegrationStatus,
   promotionalCopySchema,
   validatePromotionalCopy,
+  type AiProvider,
   type MessageGenerationInput,
   type PromotionalCopy,
 } from "./index";
@@ -34,10 +37,21 @@ const validCopy: PromotionalCopy = {
   hashtags: ["#oferta", "#audio"],
 };
 
-function writer(copy: PromotionalCopy) {
+function provider(copy: PromotionalCopy): AiProvider {
   return {
-    compose: vi.fn().mockResolvedValue(copy),
-  } as unknown as AiCopywriter;
+    provider: "OLLAMA",
+    model: "test-model",
+    generate: vi.fn().mockResolvedValue(copy),
+  };
+}
+
+function fetchResponse(body: unknown, ok = true, status = 200) {
+  return {
+    ok,
+    status,
+    statusText: ok ? "OK" : "Bad Request",
+    json: async () => body,
+  };
 }
 
 describe("promotional copy schema", () => {
@@ -54,8 +68,8 @@ describe("promotional copy schema", () => {
   });
 });
 
-describe("PromotionalCopyValidator", () => {
-  const validator = new PromotionalCopyValidator();
+describe("AiMessageValidator", () => {
+  const validator = new AiMessageValidator();
 
   it("approves copy that preserves confirmed facts", () => {
     expect(validator.validate(validCopy, input)).toEqual({ valid: true, reasons: [] });
@@ -144,13 +158,66 @@ describe("PromotionalCopyValidator", () => {
   });
 });
 
-describe("MessageGenerationService", () => {
+describe("OllamaAiProvider", () => {
+  it("returns valid JSON from Ollama HTTP structured output", async () => {
+    const fetchFn = vi.fn().mockResolvedValue(fetchResponse({ response: JSON.stringify(validCopy) }));
+    const ollama = new OllamaAiProvider({
+      baseUrl: "http://localhost:11434",
+      model: "qwen3:4b",
+      fetchFn,
+    });
+
+    await expect(ollama.generate(input)).resolves.toEqual(validCopy);
+    expect(fetchFn).toHaveBeenCalledWith(
+      "http://localhost:11434/api/generate",
+      expect.objectContaining({
+        method: "POST",
+        body: expect.stringContaining('"model":"qwen3:4b"'),
+      }),
+    );
+  });
+
+  it("throws on invalid JSON so the service can fallback", async () => {
+    const ollama = new OllamaAiProvider({
+      fetchFn: vi.fn().mockResolvedValue(fetchResponse({ response: "not-json" })),
+    });
+
+    await expect(ollama.generate(input)).rejects.toThrow();
+  });
+
+  it("throws on HTTP errors so the service can fallback", async () => {
+    const ollama = new OllamaAiProvider({
+      fetchFn: vi.fn().mockResolvedValue(fetchResponse({ error: "missing model" }, false, 404)),
+    });
+
+    await expect(ollama.generate(input)).rejects.toThrow("Ollama HTTP 404");
+  });
+
+  it("reports health without requiring the local service to be online", async () => {
+    const ollama = new OllamaAiProvider({
+      baseUrl: "http://localhost:11434/",
+      model: "qwen3:4b",
+      fetchFn: vi.fn().mockRejectedValue(new Error("offline")),
+    });
+
+    await expect(ollama.healthCheck()).resolves.toEqual(
+      expect.objectContaining({
+        configured: true,
+        available: false,
+        baseUrl: "http://localhost:11434",
+        model: "qwen3:4b",
+      }),
+    );
+  });
+});
+
+describe("OpenAiProvider", () => {
   it("uses structured output and retries once", async () => {
     const create = vi
       .fn()
       .mockRejectedValueOnce(new Error("temporary failure"))
       .mockResolvedValueOnce({ output_text: JSON.stringify(validCopy) });
-    const ai = new AiCopywriter({
+    const ai = new OpenAiProvider({
       apiKey: "test",
       client: { responses: { create } },
       model: "test-model",
@@ -158,7 +225,7 @@ describe("MessageGenerationService", () => {
       maxRetries: 1,
     });
 
-    await expect(ai.compose(input)).resolves.toEqual(validCopy);
+    await expect(ai.generate(input)).resolves.toEqual(validCopy);
     expect(create).toHaveBeenCalledTimes(2);
     expect(create).toHaveBeenLastCalledWith(
       expect.objectContaining({
@@ -170,60 +237,135 @@ describe("MessageGenerationService", () => {
       { timeout: 1234 },
     );
   });
+});
 
-  it("returns AI copy when generation and validation pass", async () => {
+describe("MessageGenerationService", () => {
+  it("selects Ollama by default and never requires an OpenAI key", async () => {
+    const fetchFn = vi.fn().mockResolvedValue(fetchResponse({ response: JSON.stringify(validCopy) }));
     const result = await new MessageGenerationService({
-      env: { OPENAI_API_KEY: "test", AI_COPY_ENABLED: "true" },
-      writer: writer(validCopy),
-      model: "test-model",
+      env: {
+        AI_PROVIDER: "ollama",
+        AI_COPY_ENABLED: "true",
+        OLLAMA_BASE_URL: "http://localhost:11434",
+        OLLAMA_MODEL: "qwen3:4b",
+      },
+      provider: new OllamaAiProvider({ fetchFn, model: "qwen3:4b" }),
     }).generate(input);
 
     expect(result.source).toBe("AI_GENERATED");
+    expect(result.aiProvider).toBe("OLLAMA");
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it("selects provider by configuration", () => {
+    expect(createAiProvider({ AI_PROVIDER: "ollama" })).toBeInstanceOf(OllamaAiProvider);
+    expect(
+      createAiProvider({ AI_PROVIDER: "openai", OPENAI_API_KEY: "test" }),
+    ).toBeInstanceOf(OpenAiProvider);
+  });
+
+  it("returns AI copy when generation and validation pass", async () => {
+    const result = await new MessageGenerationService({
+      provider: provider(validCopy),
+    }).generate(input);
+
+    expect(result.source).toBe("AI_GENERATED");
+    expect(result.aiProvider).toBe("OLLAMA");
     expect(result.aiValidationPassed).toBe(true);
     expect(result.message).toBe(copyToMessage(validCopy, input));
   });
 
-  it("falls back when AI is disabled", async () => {
+  it("falls back and does not call provider when AI is disabled", async () => {
+    const disabledProvider = provider(validCopy);
     const result = await new MessageGenerationService({
-      env: { AI_COPY_ENABLED: "false", OPENAI_API_KEY: "test" },
-      writer: writer(validCopy),
+      env: { AI_COPY_ENABLED: "false" },
+      provider: disabledProvider,
     }).generate(input);
 
     expect(result.source).toBe("DETERMINISTIC_FALLBACK");
+    expect(result.aiProvider).toBe("DETERMINISTIC");
     expect(result.aiValidationReasons).toContain("AI copy generation is disabled.");
-    expect(result.message).toContain(input.trackingUrl);
+    expect(disabledProvider.generate).not.toHaveBeenCalled();
   });
 
-  it("falls back when API key is missing", async () => {
-    const result = await new MessageGenerationService({ env: {} }).generate(input);
-
-    expect(result.source).toBe("DETERMINISTIC_FALLBACK");
-    expect(result.aiValidationReasons).toContain("OPENAI_API_KEY is not configured.");
-  });
-
-  it("falls back when OpenAI throws", async () => {
-    const brokenWriter = {
-      compose: vi.fn().mockRejectedValue(new Error("request failed")),
-    } as unknown as AiCopywriter;
-
+  it("falls back when Ollama is unavailable", async () => {
     const result = await new MessageGenerationService({
-      env: { OPENAI_API_KEY: "test" },
-      writer: brokenWriter,
+      provider: {
+        provider: "OLLAMA",
+        model: "qwen3:4b",
+        generate: vi.fn().mockRejectedValue(new Error("fetch failed")),
+      },
     }).generate(input);
 
     expect(result.source).toBe("DETERMINISTIC_FALLBACK");
-    expect(result.aiValidationReasons).toContain("request failed");
+    expect(result.aiProvider).toBe("OLLAMA");
+    expect(result.aiValidationReasons).toContain("fetch failed");
   });
 
-  it("falls back when AI copy fails deterministic validation", async () => {
+  it("falls back on timeout", async () => {
     const result = await new MessageGenerationService({
-      env: { OPENAI_API_KEY: "test" },
-      writer: writer({ ...validCopy, body: "Menor preco garantido com 90% de desconto." }),
+      provider: {
+        provider: "OLLAMA",
+        model: "qwen3:4b",
+        generate: vi.fn().mockRejectedValue(new Error("Ollama request timed out.")),
+      },
     }).generate(input);
 
     expect(result.source).toBe("DETERMINISTIC_FALLBACK");
-    expect(result.aiValidationPassed).toBe(false);
-    expect(result.aiValidationReasons.length).toBeGreaterThan(0);
+    expect(result.aiValidationReasons).toContain("Ollama request timed out.");
+  });
+
+  it("falls back on HTTP error", async () => {
+    const result = await new MessageGenerationService({
+      provider: {
+        provider: "OLLAMA",
+        model: "qwen3:4b",
+        generate: vi.fn().mockRejectedValue(new Error("Ollama HTTP 500: Server Error")),
+      },
+    }).generate(input);
+
+    expect(result.source).toBe("DETERMINISTIC_FALLBACK");
+    expect(result.aiValidationReasons).toContain("Ollama HTTP 500: Server Error");
+  });
+
+  it("falls back on invalid JSON", async () => {
+    const result = await new MessageGenerationService({
+      provider: {
+        provider: "OLLAMA",
+        model: "qwen3:4b",
+        generate: vi.fn().mockRejectedValue(new SyntaxError("Unexpected token")),
+      },
+    }).generate(input);
+
+    expect(result.source).toBe("DETERMINISTIC_FALLBACK");
+    expect(result.aiValidationReasons).toContain("Unexpected token");
+  });
+
+  it("falls back when generated copy invents price", async () => {
+    const result = await new MessageGenerationService({
+      provider: provider({ ...validCopy, body: "De R$ 299,90 por R$ 149,90." }),
+    }).generate(input);
+
+    expect(result.source).toBe("DETERMINISTIC_FALLBACK");
+    expect(result.aiValidationReasons.join(" ")).toContain("Preco nao confirmado");
+  });
+
+  it("falls back when generated copy invents coupon", async () => {
+    const result = await new MessageGenerationService({
+      provider: provider(validCopy),
+    }).generate({ ...input, couponCode: null });
+
+    expect(result.source).toBe("DETERMINISTIC_FALLBACK");
+    expect(result.aiValidationReasons.join(" ")).toContain("Cupom foi mencionado");
+  });
+
+  it("falls back when generated copy invents free shipping", async () => {
+    const result = await new MessageGenerationService({
+      provider: provider({ ...validCopy, body: `${validCopy.body} Frete gratis.` }),
+    }).generate({ ...input, freeShipping: false });
+
+    expect(result.source).toBe("DETERMINISTIC_FALLBACK");
+    expect(result.aiValidationReasons.join(" ")).toContain("Frete gratis");
   });
 
   it("does not expose API key in integration status", () => {

@@ -10,7 +10,7 @@ Phase 2A adds a manual offer pipeline before real marketplace connectors. An adm
 
 Phase 2B adds the publication and tracking loop. The worker selects active compatible channels for `READY_TO_PUBLISH` offers, creates idempotent `Publication` rows with deterministic message payloads, publishes scheduled rows through Telegram or manual export adapters, records `PublicationAttempt`, and updates publication status. `/go/[slug]` is public and records clicks before redirecting to the affiliate destination.
 
-Phase 2C adds OpenAI-assisted copy generation between channel selection and publication creation. The worker requests structured JSON copy from OpenAI only when server-side configuration is present, validates the returned text against confirmed offer facts, persists message metadata on `Publication`, and falls back to the deterministic composer without blocking Telegram, manual export, tracking or Redis locks.
+Phase 2C adds multi-provider copy generation between channel selection and publication creation. The worker requests structured JSON copy from the configured provider, validates the returned text against confirmed offer facts, persists message metadata on `Publication`, and falls back to the deterministic composer without blocking Telegram, manual export, tracking or Redis locks. Ollama is the default provider and is called over HTTP at the configured `OLLAMA_BASE_URL`; OpenAI remains optional.
 
 ## Applications
 
@@ -28,7 +28,7 @@ The dashboard uses a reusable administrative shell with real navigation for dash
 - `packages/redis`: Upstash/local Redis health checks and distributed locks.
 - `packages/scoring`: deterministic score normalization and weighted scoring.
 - `packages/validation`: Zod schemas and deterministic offer validation pipeline.
-- `packages/ai-copywriter`: OpenAI structured-output copy generation and post-generation checks.
+- `packages/ai-copywriter`: multi-provider structured-output copy generation and post-generation checks.
 - `packages/tracking`: click attribution and redirect helpers.
 - `packages/shared`: cross-package enums, types and small utilities.
 
@@ -42,9 +42,9 @@ Redis selection is server-only: Upstash is used when `UPSTASH_REDIS_REST_URL` an
 
 ## AI Boundary
 
-OpenAI receives only confirmed offer facts: title, marketplace, category, prices, discount, coupon, shipping flag, rating, sales count and tracking URL. AI output uses Structured Outputs with `headline`, `body`, `callToAction`, `disclosure` and `hashtags`.
+The selected AI provider receives only confirmed offer facts: title, marketplace, category, prices, discount, coupon, shipping flag, rating, sales count and tracking URL. AI output uses Structured Outputs with `headline`, `body`, `callToAction`, `disclosure` and `hashtags`.
 
-The deterministic validator rejects generated copy that changes prices, discount, coupon, shipping status, affiliate disclosure or tracking URL, or that adds unsupported urgency/promises. Rejected, timed out, errored, disabled or unconfigured AI generation falls back to `deterministicMessageComposer`. Publication adapters consume the same saved payload regardless of source.
+The deterministic validator rejects generated copy that changes prices, discount, coupon, shipping status, affiliate disclosure or tracking URL, or that adds unsupported urgency/promises. Rejected, timed out, errored, disabled or unconfigured AI generation falls back to `deterministicMessageComposer`. Publication adapters consume the same saved payload regardless of provider.
 
 ## Security Boundary
 

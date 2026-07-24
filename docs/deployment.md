@@ -24,7 +24,24 @@ Deploy `apps/worker` to Railway with the same database, Redis and secret environ
 
 Set `APP_BASE_URL` to the dashboard URL so worker-generated tracking links point to production. Set `WORKER_POLL_INTERVAL_MS` and `WORKER_MAX_ATTEMPTS` as needed. For Telegram publication, set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`.
 
-For AI copy generation, set `OPENAI_API_KEY` only in server/worker environments. `OPENAI_MODEL`, `OPENAI_TIMEOUT_MS` and `AI_COPY_ENABLED` are optional controls. If OpenAI is not configured, the worker uses deterministic copy and continues normal scheduling/publication.
+For AI copy generation, Ollama is the default local provider:
+
+```env
+AI_PROVIDER="ollama"
+OLLAMA_BASE_URL="http://localhost:11434"
+OLLAMA_MODEL="qwen3:4b"
+AI_COPY_ENABLED="true"
+AI_COPY_TIMEOUT_MS="30000"
+```
+
+Install the model on machines that run the worker:
+
+```powershell
+ollama pull qwen3:4b
+ollama run qwen3:4b
+```
+
+The worker calls Ollama over HTTP and falls back to deterministic copy if Ollama is unavailable. Local Ollama execution has no token billing. For OpenAI, set `AI_PROVIDER="openai"` and configure `OPENAI_API_KEY` only in server/worker environments.
 
 ## CI
 

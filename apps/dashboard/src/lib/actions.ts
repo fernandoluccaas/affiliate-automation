@@ -1,7 +1,7 @@
 "use server";
 
 import { Prisma, prisma } from "@affiliate/database";
-import { MessageGenerationService } from "@affiliate/ai-copywriter";
+import { MessageGenerationService, OllamaAiProvider, OpenAiProvider } from "@affiliate/ai-copywriter";
 import bcrypt from "bcryptjs";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
@@ -225,7 +225,16 @@ export async function testTelegramChannelAction(formData: FormData) {
 }
 
 export async function testOpenAiCopyAction() {
-  const service = new MessageGenerationService();
+  let service: MessageGenerationService;
+
+  try {
+    service = new MessageGenerationService({
+      provider: new OpenAiProvider(),
+    });
+  } catch {
+    redirect("/integracoes?message=openai-fallback");
+  }
+
   const result = await service.generate({
     title: "[TESTE] Oferta operacional",
     marketplace: "SHOPEE",
@@ -246,6 +255,34 @@ export async function testOpenAiCopyAction() {
       result.source === "AI_GENERATED" && result.aiValidationPassed
         ? "openai-ok"
         : "openai-fallback"
+    }`,
+  );
+}
+
+export async function testOllamaCopyAction() {
+  const service = new MessageGenerationService({
+    provider: new OllamaAiProvider(),
+  });
+  const result = await service.generate({
+    title: "[TESTE] Oferta operacional local",
+    marketplace: "SHOPEE",
+    category: "teste",
+    originalPrice: "199.90",
+    currentPrice: "149.90",
+    discountPercentage: "25.01",
+    couponCode: "TESTE10",
+    couponExpiration: new Date(Date.now() + 24 * 60 * 60 * 1000),
+    freeShipping: true,
+    rating: "4.8",
+    salesCount: 120,
+    trackingUrl: "https://example.com/go/teste-ollama",
+  });
+
+  redirect(
+    `/integracoes?message=${
+      result.source === "AI_GENERATED" && result.aiProvider === "OLLAMA"
+        ? "ollama-ok"
+        : "ollama-fallback"
     }`,
   );
 }

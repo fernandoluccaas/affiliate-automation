@@ -15,18 +15,20 @@ function duration(startedAt: Date, finishedAt: Date | null) {
 }
 
 export default async function AutomationsPage() {
-  const [runs, aiGenerated, deterministicFallback, aiDuration] = await Promise.all([
+  const [runs, ollamaGenerated, openAiGenerated, deterministicFallback, aiDuration] = await Promise.all([
     prisma.automationRun.findMany({
       orderBy: { startedAt: "desc" },
       take: 50,
     }),
-    prisma.publication.count({ where: { messageSource: "AI_GENERATED" } }),
+    prisma.publication.count({ where: { aiProvider: "OLLAMA", messageSource: "AI_GENERATED" } }),
+    prisma.publication.count({ where: { aiProvider: "OPENAI", messageSource: "AI_GENERATED" } }),
     prisma.publication.count({ where: { messageSource: "DETERMINISTIC_FALLBACK" } }),
     prisma.publication.aggregate({
       where: { aiGenerationDurationMs: { not: null } },
       _avg: { aiGenerationDurationMs: true },
     }),
   ]);
+  const aiGenerated = ollamaGenerated + openAiGenerated;
   const totalGeneratedMessages = aiGenerated + deterministicFallback;
   const fallbackRate =
     totalGeneratedMessages > 0
@@ -35,13 +37,21 @@ export default async function AutomationsPage() {
 
   return (
     <AdminShell currentPath="/automacoes" title="Automacoes">
-      <div className="grid gap-4 md:grid-cols-4">
+      <div className="grid gap-4 md:grid-cols-5">
         <Card>
           <CardHeader>
-            <CardTitle className="text-sm">Copies por IA</CardTitle>
+            <CardTitle className="text-sm">Copies Ollama</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-semibold">{aiGenerated}</div>
+            <div className="text-2xl font-semibold">{ollamaGenerated}</div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Copies OpenAI</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-semibold">{openAiGenerated}</div>
           </CardContent>
         </Card>
         <Card>

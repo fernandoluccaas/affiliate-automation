@@ -45,6 +45,7 @@ type PublicationWithRelations = Publication & {
 
 type GeneratedPublicationPayload = PublicationPayload & {
   messageSource: MessageGenerationResult["source"];
+  aiProvider: MessageGenerationResult["aiProvider"];
   aiModel?: string | undefined;
   aiGenerationDurationMs?: number | undefined;
   aiValidationPassed: boolean;
@@ -147,6 +148,7 @@ async function messagePayloadFor(
     message: generated.message,
     imageUrl: offer.imageUrl,
     messageSource: generated.source,
+    aiProvider: generated.aiProvider,
     aiModel: generated.aiModel,
     aiGenerationDurationMs: generated.aiGenerationDurationMs,
     aiValidationPassed: generated.aiValidationPassed,
@@ -244,6 +246,7 @@ export async function createPublicationIdempotently(
       scheduledAt: now,
       messagePayload: payload,
       messageSource: payload.messageSource,
+      aiProvider: payload.aiProvider,
       aiModel: payload.aiModel ?? null,
       aiGenerationDurationMs: payload.aiGenerationDurationMs ?? null,
       aiValidationPassed: payload.aiValidationPassed,

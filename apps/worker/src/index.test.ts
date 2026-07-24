@@ -25,6 +25,7 @@ describe("createPublicationIdempotently", () => {
       trackingUrl: "https://example.com/go/slug",
       message: "Mensagem",
       messageSource: "DETERMINISTIC_FALLBACK" as const,
+      aiProvider: "DETERMINISTIC" as const,
       aiValidationPassed: false,
       aiValidationReasons: ["OPENAI_API_KEY is not configured."],
       generatedAt: "2026-07-23T12:00:00.000Z",
@@ -41,6 +42,7 @@ describe("createPublicationIdempotently", () => {
         status: "SCHEDULED",
         scheduledAt: now,
         messageSource: "DETERMINISTIC_FALLBACK",
+        aiProvider: "DETERMINISTIC",
         aiValidationPassed: false,
       }),
     });

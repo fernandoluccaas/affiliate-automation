@@ -48,13 +48,14 @@ Status: implemented.
 
 Status: implemented.
 
-- Added OpenAI SDK integration using the Responses API with structured JSON output.
+- Added multi-provider AI copy generation with Ollama as the default local provider and OpenAI as an optional provider.
+- Added Ollama HTTP integration through configurable `OLLAMA_BASE_URL` and `OLLAMA_MODEL`.
 - Added deterministic post-validation for prices, discounts, coupon, free shipping, disclosure, unsupported urgency and tracking URL.
-- Added automatic fallback to the deterministic composer when OpenAI is disabled, unavailable, invalid or times out.
-- Persisted message source, model, duration, validation status, validation reasons and generation timestamp on `Publication`.
-- Added OpenAI operational status and a server-side test action in `/integracoes`.
-- Added real AI/fallback metrics to `/automacoes`.
-- Added unit tests for schema validation, factual validation, successful AI generation and fallback scenarios.
+- Added automatic fallback to the deterministic composer when AI is disabled, unavailable, invalid or times out.
+- Persisted message source, provider, model, duration, validation status, validation reasons and generation timestamp on `Publication`.
+- Added Ollama and OpenAI operational status plus server-side test actions in `/integracoes`.
+- Added real provider/fallback metrics to `/automacoes`.
+- Added unit tests for schema validation, provider selection, Ollama HTTP mocks, factual validation, successful generation and fallback scenarios.
 
 ## Phase 3 - Marketplace Ingestion
 

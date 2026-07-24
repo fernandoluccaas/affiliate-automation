@@ -61,6 +61,12 @@ enum MessageSource {
   DETERMINISTIC_FALLBACK
 }
 
+enum AiProviderName {
+  OLLAMA
+  OPENAI
+  DETERMINISTIC
+}
+
 enum PublicationAttemptStatus {
   PENDING
   SUCCESS
@@ -276,6 +282,7 @@ model Publication {
   externalId               String?
   messagePayload           Json?
   messageSource            MessageSource     @default(DETERMINISTIC_FALLBACK)
+  aiProvider               AiProviderName    @default(DETERMINISTIC)
   aiModel                  String?
   aiGenerationDurationMs   Int?
   aiValidationPassed       Boolean?

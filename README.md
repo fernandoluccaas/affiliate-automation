@@ -57,16 +57,26 @@ Manual export channels create `EXPORTED` publications. They do not count as exte
 
 ## AI Copywriter
 
-Phase 2C adds optional OpenAI copy generation for scheduled publications. Configure it only on the server or worker:
+Phase 2C uses a multi-provider copywriter. Ollama is the default provider and runs locally through HTTP, so local generation has no token billing. OpenAI remains available only when explicitly selected.
 
 ```env
+AI_PROVIDER="ollama"
+OLLAMA_BASE_URL="http://localhost:11434"
+OLLAMA_MODEL="qwen3:4b"
+AI_COPY_ENABLED="true"
+AI_COPY_TIMEOUT_MS="30000"
 OPENAI_API_KEY=""
 OPENAI_MODEL="gpt-4.1-mini"
-OPENAI_TIMEOUT_MS="8000"
-AI_COPY_ENABLED="true"
 ```
 
-When enabled and configured, the worker sends confirmed offer facts to OpenAI using structured JSON output. The system validates the generated copy deterministically before saving the publication. If OpenAI is disabled, missing, times out, errors or returns copy with unconfirmed facts, the worker uses the deterministic composer and keeps scheduling/publishing intact.
+Install and prepare the default local model:
+
+```powershell
+ollama pull qwen3:4b
+ollama run qwen3:4b
+```
+
+The worker sends confirmed offer facts to the selected provider using structured JSON output. The system validates the generated copy deterministically before saving the publication. If AI is disabled, Ollama is offline, a provider times out, returns invalid JSON or produces copy with unconfirmed facts, the worker uses the deterministic composer and keeps scheduling/publishing intact.
 
 ## Tracking
 

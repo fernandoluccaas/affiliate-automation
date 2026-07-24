@@ -6,8 +6,10 @@ import {
 } from "@affiliate/publication";
 import { z } from "zod";
 
+const DEFAULT_AI_PROVIDER = "ollama";
+const DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434";
 const DEFAULT_OPENAI_MODEL = "gpt-4.1-mini";
-const DEFAULT_OPENAI_TIMEOUT_MS = 8_000;
+const DEFAULT_AI_COPY_TIMEOUT_MS = 30_000;
 const DEFAULT_OPENAI_MAX_RETRIES = 1;
 
 export const promotionalCopySchema = z
@@ -38,6 +40,7 @@ export const messageGenerationInputSchema = z.object({
 export type PromotionalCopy = z.infer<typeof promotionalCopySchema>;
 export type MessageGenerationInput = z.infer<typeof messageGenerationInputSchema>;
 export type MessageSource = "AI_GENERATED" | "DETERMINISTIC_FALLBACK";
+export type AiProviderName = "OLLAMA" | "OPENAI" | "DETERMINISTIC";
 
 export type ValidationResult = {
   valid: boolean;
@@ -47,6 +50,7 @@ export type ValidationResult = {
 export type MessageGenerationResult = {
   message: string;
   source: MessageSource;
+  aiProvider: AiProviderName;
   aiModel?: string | undefined;
   aiGenerationDurationMs?: number | undefined;
   aiValidationPassed: boolean;
@@ -56,11 +60,41 @@ export type MessageGenerationResult = {
 
 export type AiCopywriterEnv = {
   [key: string]: string | undefined;
+  AI_PROVIDER?: string | undefined;
   AI_COPY_ENABLED?: string | undefined;
+  AI_COPY_TIMEOUT_MS?: string | undefined;
+  OLLAMA_BASE_URL?: string | undefined;
+  OLLAMA_MODEL?: string | undefined;
   OPENAI_API_KEY?: string | undefined;
   OPENAI_MODEL?: string | undefined;
   OPENAI_TIMEOUT_MS?: string | undefined;
 };
+
+export type AiProvider = {
+  readonly provider: Exclude<AiProviderName, "DETERMINISTIC">;
+  readonly model: string;
+  generate(input: MessageGenerationInput): Promise<PromotionalCopy>;
+  healthCheck?(): Promise<AiProviderHealth>;
+};
+
+export type AiProviderHealth = {
+  configured: boolean;
+  available: boolean;
+  provider: AiProviderName;
+  model: string;
+  baseUrl?: string | undefined;
+  status: string;
+};
+
+type FetchLike = (
+  input: string | URL,
+  init?: RequestInit,
+) => Promise<{
+  ok: boolean;
+  status: number;
+  statusText: string;
+  json: () => Promise<unknown>;
+}>;
 
 type ResponsesClient = {
   responses: {
@@ -94,21 +128,52 @@ export function isAiCopyEnabled(env: AiCopywriterEnv = process.env) {
   return env.AI_COPY_ENABLED !== "false";
 }
 
+export function getAiProviderName(env: AiCopywriterEnv = process.env) {
+  const provider = env.AI_PROVIDER?.trim().toLowerCase() || DEFAULT_AI_PROVIDER;
+  return provider === "openai" ? "openai" : "ollama";
+}
+
+export function getAiCopyTimeoutMs(env: AiCopywriterEnv = process.env) {
+  const parsed = Number(env.AI_COPY_TIMEOUT_MS ?? env.OPENAI_TIMEOUT_MS);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_AI_COPY_TIMEOUT_MS;
+}
+
+export function getOllamaBaseUrl(env: AiCopywriterEnv = process.env) {
+  return sanitizeBaseUrl(env.OLLAMA_BASE_URL || DEFAULT_OLLAMA_BASE_URL);
+}
+
+export function getOllamaModel(env: AiCopywriterEnv = process.env) {
+  return env.OLLAMA_MODEL?.trim() || "";
+}
+
 export function getOpenAiModel(env: AiCopywriterEnv = process.env) {
   return env.OPENAI_MODEL?.trim() || DEFAULT_OPENAI_MODEL;
 }
 
 export function getOpenAiTimeoutMs(env: AiCopywriterEnv = process.env) {
-  const parsed = Number(env.OPENAI_TIMEOUT_MS);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_OPENAI_TIMEOUT_MS;
+  return getAiCopyTimeoutMs(env);
 }
 
 export function getOpenAiIntegrationStatus(env: AiCopywriterEnv = process.env) {
   return {
     configured: Boolean(env.OPENAI_API_KEY?.trim()),
     enabled: isAiCopyEnabled(env),
+    provider: "OPENAI" as const,
+    selected: getAiProviderName(env) === "openai",
     model: getOpenAiModel(env),
-    timeoutMs: getOpenAiTimeoutMs(env),
+    timeoutMs: getAiCopyTimeoutMs(env),
+  };
+}
+
+export function getOllamaIntegrationStatus(env: AiCopywriterEnv = process.env) {
+  return {
+    configured: Boolean(getOllamaBaseUrl(env) && getOllamaModel(env)),
+    enabled: isAiCopyEnabled(env),
+    provider: "OLLAMA" as const,
+    selected: getAiProviderName(env) === "ollama",
+    baseUrl: getOllamaBaseUrl(env),
+    model: getOllamaModel(env),
+    timeoutMs: getAiCopyTimeoutMs(env),
   };
 }
 
@@ -154,6 +219,20 @@ function dateSummary(value: Date | string | null | undefined) {
   }).format(new Date(value));
 }
 
+function sanitizeBaseUrl(value: string) {
+  return value.trim().replace(/\/+$/, "");
+}
+
+function withTimeout(timeoutMs: number) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  return {
+    signal: controller.signal,
+    clear: () => clearTimeout(timeout),
+  };
+}
+
 function schemaForStructuredOutput() {
   return {
     type: "object",
@@ -184,6 +263,7 @@ export function buildPrompt(input: MessageGenerationInput) {
         "Include a clear affiliate disclosure.",
         "Return only JSON matching the requested schema.",
       ],
+      schema: schemaForStructuredOutput(),
       offer: {
         title: input.title,
         marketplace: input.marketplace,
@@ -204,7 +284,7 @@ export function buildPrompt(input: MessageGenerationInput) {
   );
 }
 
-export class PromotionalCopyValidator {
+export class AiMessageValidator {
   validate(copy: unknown, input: MessageGenerationInput): ValidationResult {
     const parsed = promotionalCopySchema.safeParse(copy);
 
@@ -242,7 +322,6 @@ export class PromotionalCopyValidator {
 
     const urls = text.match(/https?:\/\/[^\s)]+/g) ?? [];
     const uniqueUrls = new Set(urls.map((url) => url.replace(/[.,;]+$/, "")));
-
     const trackingUrlCount = urls.filter((url) => url.replace(/[.,;]+$/, "") === input.trackingUrl).length;
 
     if (!uniqueUrls.has(input.trackingUrl)) {
@@ -275,7 +354,11 @@ export class PromotionalCopyValidator {
       reasons.push("Divulgacao de afiliado ausente.");
     }
 
-    if (/(menor preco|melhor preco|ultimas unidades|estoque limitado|so hoje|garantid[ao]|imperdivel)/i.test(normalizedText)) {
+    if (
+      /(menor preco|melhor preco|ultimas unidades|estoque limitado|so hoje|garantid[ao]|imperdivel)/i.test(
+        normalizedText,
+      )
+    ) {
       reasons.push("Texto contem promessa ou urgencia nao confirmada.");
     }
 
@@ -285,6 +368,8 @@ export class PromotionalCopyValidator {
     };
   }
 }
+
+export class PromotionalCopyValidator extends AiMessageValidator {}
 
 export function copyToMessage(copy: PromotionalCopy, input: MessageGenerationInput) {
   const lines = [
@@ -310,9 +395,123 @@ function deterministicFallback(input: MessageGenerationInput) {
   return deterministicMessageComposer(input as MessageOffer);
 }
 
-export class AiCopywriter {
+function parseGeneratedJson(value: string) {
+  const trimmed = value.trim();
+
+  if (trimmed.startsWith("```")) {
+    return JSON.parse(trimmed.replace(/^```(?:json)?/i, "").replace(/```$/, "").trim()) as unknown;
+  }
+
+  return JSON.parse(trimmed) as unknown;
+}
+
+export class OllamaAiProvider implements AiProvider {
+  readonly provider = "OLLAMA";
+  readonly model: string;
+  private readonly baseUrl: string;
+  private readonly timeoutMs: number;
+  private readonly fetchFn: FetchLike;
+
+  constructor(
+    options: {
+      baseUrl?: string;
+      model?: string;
+      timeoutMs?: number;
+      fetchFn?: FetchLike;
+      env?: AiCopywriterEnv;
+    } = {},
+  ) {
+    const env = options.env ?? process.env;
+    this.baseUrl = sanitizeBaseUrl(options.baseUrl ?? getOllamaBaseUrl(env));
+    this.model = options.model ?? getOllamaModel(env);
+    this.timeoutMs = options.timeoutMs ?? getAiCopyTimeoutMs(env);
+    this.fetchFn = options.fetchFn ?? (fetch as FetchLike);
+  }
+
+  async generate(input: MessageGenerationInput): Promise<PromotionalCopy> {
+    const timeout = withTimeout(this.timeoutMs);
+
+    try {
+      const response = await this.fetchFn(`${this.baseUrl}/api/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: timeout.signal,
+        body: JSON.stringify({
+          model: this.model,
+          system:
+            "You are a careful affiliate copywriter. You must preserve factual accuracy and output strict JSON.",
+          prompt: buildPrompt(input),
+          stream: false,
+          format: schemaForStructuredOutput(),
+          options: { temperature: 0 },
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Ollama HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      const body = (await response.json()) as { response?: unknown };
+
+      if (typeof body.response !== "string") {
+        throw new Error("Ollama returned an invalid response.");
+      }
+
+      const parsedJson = parseGeneratedJson(body.response);
+      const parsed = promotionalCopySchema.safeParse(parsedJson);
+
+      if (!parsed.success) {
+        throw new Error(parsed.error.issues[0]?.message ?? "Generated copy is invalid.");
+      }
+
+      return parsed.data;
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        throw new Error("Ollama request timed out.");
+      }
+
+      throw error;
+    } finally {
+      timeout.clear();
+    }
+  }
+
+  async healthCheck(): Promise<AiProviderHealth> {
+    const timeout = withTimeout(Math.min(this.timeoutMs, 3_000));
+
+    try {
+      const response = await this.fetchFn(`${this.baseUrl}/api/tags`, {
+        method: "GET",
+        signal: timeout.signal,
+      });
+
+      return {
+        configured: Boolean(this.baseUrl && this.model),
+        available: response.ok,
+        provider: "OLLAMA",
+        model: this.model,
+        baseUrl: this.baseUrl,
+        status: response.ok ? "available" : `HTTP ${response.status}`,
+      };
+    } catch (error) {
+      return {
+        configured: Boolean(this.baseUrl && this.model),
+        available: false,
+        provider: "OLLAMA",
+        model: this.model,
+        baseUrl: this.baseUrl,
+        status: error instanceof Error ? error.message : "unavailable",
+      };
+    } finally {
+      timeout.clear();
+    }
+  }
+}
+
+export class OpenAiProvider implements AiProvider {
+  readonly provider = "OPENAI";
+  readonly model: string;
   private readonly client: ResponsesClient;
-  private readonly model: string;
   private readonly timeoutMs: number;
   private readonly maxRetries: number;
 
@@ -323,27 +522,29 @@ export class AiCopywriter {
       model?: string;
       timeoutMs?: number;
       maxRetries?: number;
+      env?: AiCopywriterEnv;
     } = {},
   ) {
-    const apiKey = options.apiKey ?? process.env.OPENAI_API_KEY;
+    const env = options.env ?? process.env;
+    const apiKey = options.apiKey ?? env.OPENAI_API_KEY;
 
     if (!options.client && !apiKey) {
       throw new Error("OPENAI_API_KEY is not configured.");
     }
 
     this.client = options.client ?? (new OpenAI({ apiKey }) as unknown as ResponsesClient);
-    this.model = options.model ?? getOpenAiModel();
-    this.timeoutMs = options.timeoutMs ?? getOpenAiTimeoutMs();
+    this.model = options.model ?? getOpenAiModel(env);
+    this.timeoutMs = options.timeoutMs ?? getAiCopyTimeoutMs(env);
     this.maxRetries = options.maxRetries ?? DEFAULT_OPENAI_MAX_RETRIES;
   }
 
-  async compose(input: MessageGenerationInput): Promise<PromotionalCopy> {
+  async generate(input: MessageGenerationInput): Promise<PromotionalCopy> {
     let lastError: unknown;
 
     for (let attempt = 0; attempt <= this.maxRetries; attempt += 1) {
       try {
         const response = await this.requestOnce(input);
-        const parsedJson = JSON.parse(response.output_text) as unknown;
+        const parsedJson = parseGeneratedJson(response.output_text);
         const parsed = promotionalCopySchema.safeParse(parsedJson);
 
         if (!parsed.success) {
@@ -383,13 +584,26 @@ export class AiCopywriter {
   }
 }
 
+export class AiCopywriter extends OpenAiProvider {}
+
+export function createAiProvider(env: AiCopywriterEnv = process.env): AiProvider {
+  const provider = getAiProviderName(env);
+
+  if (provider === "openai") {
+    return new OpenAiProvider({ env });
+  }
+
+  return new OllamaAiProvider({ env });
+}
+
 export class MessageGenerationService {
-  private readonly validator = new PromotionalCopyValidator();
+  private readonly validator = new AiMessageValidator();
 
   constructor(
     private readonly options: {
       env?: AiCopywriterEnv;
-      writer?: AiCopywriter;
+      provider?: AiProvider;
+      writer?: AiProvider;
       model?: string;
       timeoutMs?: number;
     } = {},
@@ -398,52 +612,50 @@ export class MessageGenerationService {
   async generate(input: MessageGenerationInput): Promise<MessageGenerationResult> {
     const parsed = messageGenerationInputSchema.parse(input);
     const env = this.options.env ?? process.env;
-    const model = this.options.model ?? getOpenAiModel(env);
 
     if (!isAiCopyEnabled(env)) {
-      return this.fallback(parsed, model, ["AI copy generation is disabled."]);
+      return this.fallback(parsed, "DETERMINISTIC", undefined, ["AI copy generation is disabled."]);
     }
 
-    if (!env.OPENAI_API_KEY?.trim() && !this.options.writer) {
-      return this.fallback(parsed, model, ["OPENAI_API_KEY is not configured."]);
-    }
-
+    const provider = this.options.provider ?? this.options.writer ?? createAiProvider(env);
     const generatedAt = new Date();
     const started = Date.now();
 
     try {
-      const writer =
-        this.options.writer ??
-        new AiCopywriter({
-          apiKey: env.OPENAI_API_KEY ?? "",
-          model,
-          timeoutMs: this.options.timeoutMs ?? getOpenAiTimeoutMs(env),
-        });
-      const copy = await writer.compose(parsed);
+      const copy = await provider.generate(parsed);
       const validation = this.validator.validate(copy, parsed);
       const duration = Date.now() - started;
 
       if (!validation.valid) {
-        return this.fallback(parsed, model, validation.reasons, duration, generatedAt);
+        return this.fallback(parsed, provider.provider, provider.model, validation.reasons, duration, generatedAt);
       }
 
       return {
         message: copyToMessage(copy, parsed),
         source: "AI_GENERATED",
-        aiModel: model,
+        aiProvider: provider.provider,
+        aiModel: provider.model,
         aiGenerationDurationMs: duration,
         aiValidationPassed: true,
         aiValidationReasons: [],
         generatedAt,
       };
     } catch (error) {
-      return this.fallback(parsed, model, [error instanceof Error ? error.message : "AI generation failed."], Date.now() - started, generatedAt);
+      return this.fallback(
+        parsed,
+        provider.provider,
+        provider.model,
+        [error instanceof Error ? error.message : "AI generation failed."],
+        Date.now() - started,
+        generatedAt,
+      );
     }
   }
 
   private fallback(
     input: MessageGenerationInput,
-    model: string,
+    provider: AiProviderName,
+    model: string | undefined,
     reasons: string[],
     durationMs?: number,
     generatedAt = new Date(),
@@ -451,6 +663,7 @@ export class MessageGenerationService {
     return {
       message: deterministicFallback(input),
       source: "DETERMINISTIC_FALLBACK",
+      aiProvider: provider === "DETERMINISTIC" ? "DETERMINISTIC" : provider,
       aiModel: model,
       aiGenerationDurationMs: durationMs,
       aiValidationPassed: false,
