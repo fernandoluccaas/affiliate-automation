@@ -24,6 +24,10 @@ describe("createPublicationIdempotently", () => {
       channelId: "channel-1",
       trackingUrl: "https://example.com/go/slug",
       message: "Mensagem",
+      messageSource: "DETERMINISTIC_FALLBACK" as const,
+      aiValidationPassed: false,
+      aiValidationReasons: ["OPENAI_API_KEY is not configured."],
+      generatedAt: "2026-07-23T12:00:00.000Z",
     };
     const now = new Date("2026-07-23T12:00:00.000Z");
 
@@ -36,6 +40,8 @@ describe("createPublicationIdempotently", () => {
         idempotencyKey: "publication:channel-1:offer-1",
         status: "SCHEDULED",
         scheduledAt: now,
+        messageSource: "DETERMINISTIC_FALLBACK",
+        aiValidationPassed: false,
       }),
     });
   });

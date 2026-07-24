@@ -24,6 +24,8 @@ Deploy `apps/worker` to Railway with the same database, Redis and secret environ
 
 Set `APP_BASE_URL` to the dashboard URL so worker-generated tracking links point to production. Set `WORKER_POLL_INTERVAL_MS` and `WORKER_MAX_ATTEMPTS` as needed. For Telegram publication, set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`.
 
+For AI copy generation, set `OPENAI_API_KEY` only in server/worker environments. `OPENAI_MODEL`, `OPENAI_TIMEOUT_MS` and `AI_COPY_ENABLED` are optional controls. If OpenAI is not configured, the worker uses deterministic copy and continues normal scheduling/publication.
+
 ## CI
 
 GitHub Actions runs install, Prisma generation, lint, typecheck and tests on pull requests and pushes to `main`.

@@ -1,6 +1,7 @@
 "use server";
 
 import { Prisma, prisma } from "@affiliate/database";
+import { MessageGenerationService } from "@affiliate/ai-copywriter";
 import bcrypt from "bcryptjs";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
@@ -221,6 +222,32 @@ export async function testTelegramChannelAction(formData: FormData) {
   const ok = await publisher.validateCredentials();
 
   redirect(`/canais?message=${ok ? "telegram-ok" : "telegram-failed"}`);
+}
+
+export async function testOpenAiCopyAction() {
+  const service = new MessageGenerationService();
+  const result = await service.generate({
+    title: "[TESTE] Oferta operacional",
+    marketplace: "SHOPEE",
+    category: "teste",
+    originalPrice: "199.90",
+    currentPrice: "149.90",
+    discountPercentage: "25.01",
+    couponCode: "TESTE10",
+    couponExpiration: new Date(Date.now() + 24 * 60 * 60 * 1000),
+    freeShipping: true,
+    rating: "4.8",
+    salesCount: 120,
+    trackingUrl: "https://example.com/go/teste-openai",
+  });
+
+  redirect(
+    `/integracoes?message=${
+      result.source === "AI_GENERATED" && result.aiValidationPassed
+        ? "openai-ok"
+        : "openai-fallback"
+    }`,
+  );
 }
 
 export async function acknowledgeAlertAction(formData: FormData) {

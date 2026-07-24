@@ -1,6 +1,7 @@
 import { prisma } from "@affiliate/database";
 import { AdminShell } from "@/components/admin-shell";
 import { EmptyState } from "@/components/empty-state";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { formatDateTime } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
@@ -14,13 +15,65 @@ function duration(startedAt: Date, finishedAt: Date | null) {
 }
 
 export default async function AutomationsPage() {
-  const runs = await prisma.automationRun.findMany({
-    orderBy: { startedAt: "desc" },
-    take: 50,
-  });
+  const [runs, aiGenerated, deterministicFallback, aiDuration] = await Promise.all([
+    prisma.automationRun.findMany({
+      orderBy: { startedAt: "desc" },
+      take: 50,
+    }),
+    prisma.publication.count({ where: { messageSource: "AI_GENERATED" } }),
+    prisma.publication.count({ where: { messageSource: "DETERMINISTIC_FALLBACK" } }),
+    prisma.publication.aggregate({
+      where: { aiGenerationDurationMs: { not: null } },
+      _avg: { aiGenerationDurationMs: true },
+    }),
+  ]);
+  const totalGeneratedMessages = aiGenerated + deterministicFallback;
+  const fallbackRate =
+    totalGeneratedMessages > 0
+      ? `${Math.round((deterministicFallback / totalGeneratedMessages) * 100)}%`
+      : "-";
 
   return (
     <AdminShell currentPath="/automacoes" title="Automacoes">
+      <div className="grid gap-4 md:grid-cols-4">
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Copies por IA</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-semibold">{aiGenerated}</div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Fallbacks</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-semibold">{deterministicFallback}</div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Taxa fallback</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-semibold">{fallbackRate}</div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Tempo medio IA</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-semibold">
+              {aiDuration._avg.aiGenerationDurationMs
+                ? `${Math.round(aiDuration._avg.aiGenerationDurationMs)} ms`
+                : "-"}
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
       {runs.length === 0 ? (
         <EmptyState
           title="Nenhuma automacao executada"

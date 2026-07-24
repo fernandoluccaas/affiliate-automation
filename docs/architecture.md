@@ -10,6 +10,8 @@ Phase 2A adds a manual offer pipeline before real marketplace connectors. An adm
 
 Phase 2B adds the publication and tracking loop. The worker selects active compatible channels for `READY_TO_PUBLISH` offers, creates idempotent `Publication` rows with deterministic message payloads, publishes scheduled rows through Telegram or manual export adapters, records `PublicationAttempt`, and updates publication status. `/go/[slug]` is public and records clicks before redirecting to the affiliate destination.
 
+Phase 2C adds OpenAI-assisted copy generation between channel selection and publication creation. The worker requests structured JSON copy from OpenAI only when server-side configuration is present, validates the returned text against confirmed offer facts, persists message metadata on `Publication`, and falls back to the deterministic composer without blocking Telegram, manual export, tracking or Redis locks.
+
 ## Applications
 
 - `apps/dashboard`: Next.js 15 administrative dashboard deployed to Vercel.
@@ -40,7 +42,9 @@ Redis selection is server-only: Upstash is used when `UPSTASH_REDIS_REST_URL` an
 
 ## AI Boundary
 
-OpenAI receives only confirmed offer facts. AI output is structured JSON and cannot invent prices, discounts, stock, ratings, commissions, shipping status or coupons. A deterministic validator compares generated copy against the persisted offer before publication.
+OpenAI receives only confirmed offer facts: title, marketplace, category, prices, discount, coupon, shipping flag, rating, sales count and tracking URL. AI output uses Structured Outputs with `headline`, `body`, `callToAction`, `disclosure` and `hashtags`.
+
+The deterministic validator rejects generated copy that changes prices, discount, coupon, shipping status, affiliate disclosure or tracking URL, or that adds unsupported urgency/promises. Rejected, timed out, errored, disabled or unconfigured AI generation falls back to `deterministicMessageComposer`. Publication adapters consume the same saved payload regardless of source.
 
 ## Security Boundary
 

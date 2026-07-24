@@ -44,17 +44,28 @@ Status: implemented.
 - Added publication, automation and alert log admin views.
 - Added tests for message composition, channel policy, Redis locks, Telegram mock publishing, idempotent scheduling, route protection and tracking redirects.
 
-## Phase 3 - Validation, Deduplication and Scoring
+### Phase 2C - AI Copywriter
 
-- Complete the deterministic validation pipeline.
-- Add duplicate detection and recent publication checks.
-- Persist auditable scoring components with configurable weights.
+Status: implemented.
 
-## Phase 4 - AI Copywriter and Publication
+- Added OpenAI SDK integration using the Responses API with structured JSON output.
+- Added deterministic post-validation for prices, discounts, coupon, free shipping, disclosure, unsupported urgency and tracking URL.
+- Added automatic fallback to the deterministic composer when OpenAI is disabled, unavailable, invalid or times out.
+- Persisted message source, model, duration, validation status, validation reasons and generation timestamp on `Publication`.
+- Added OpenAI operational status and a server-side test action in `/integracoes`.
+- Added real AI/fallback metrics to `/automacoes`.
+- Added unit tests for schema validation, factual validation, successful AI generation and fallback scenarios.
 
-- Generate structured OpenAI JSON output from confirmed offer data only.
-- Validate generated copy against offer values.
-- Implement publisher adapters and scheduling locks.
+## Phase 3 - Marketplace Ingestion
+
+- Implement officially permitted Shopee and Mercado Livre collection adapters.
+- Normalize products, offers, campaigns and coupons.
+- Add integration health checks and import jobs.
+
+## Phase 4 - Publication Expansion
+
+- Add additional official publisher adapters when credentials and APIs are available.
+- Expand scheduling controls and approval-free retry observability.
 
 ## Phase 5 - Tracking and Attribution
 

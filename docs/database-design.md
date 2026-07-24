@@ -65,3 +65,16 @@ Publication statuses:
 - `PUBLICATION_FAILED`: definitive failure after configured attempts.
 
 `PublicationAttempt` stores every attempt with sanitized request/response payloads and no secrets. `AffiliateLink.active` controls whether `/go/[slug]` can redirect. `Click` stores referer and user agent, but never raw IP.
+
+## AI Message Metadata
+
+Phase 2C stores copy-generation metadata directly on `Publication`:
+
+- `messageSource`: `AI_GENERATED` or `DETERMINISTIC_FALLBACK`.
+- `aiModel`: configured OpenAI model used for the attempt.
+- `aiGenerationDurationMs`: elapsed generation time when available.
+- `aiValidationPassed`: whether the generated AI copy passed deterministic checks.
+- `aiValidationReasons`: JSON list of validation or fallback reasons.
+- `generatedAt`: timestamp when message generation ran.
+
+The published/exported text remains in `messagePayload`. These fields do not store prompts, API keys or raw OpenAI responses.

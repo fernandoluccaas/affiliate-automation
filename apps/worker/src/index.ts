@@ -1,9 +1,9 @@
 import {
   canScheduleInWindow,
-  deterministicMessageComposer,
   isOfferCompatibleWithChannel,
   type ChannelPolicy,
 } from "@affiliate/publication";
+import { generateMessageForOffer, type MessageGenerationResult } from "@affiliate/ai-copywriter";
 import {
   ManualExportPublisher,
   TelegramPublisher,
@@ -41,6 +41,15 @@ type PublicationWithRelations = Publication & {
   offer: OfferWithLinks;
   channel: Channel;
   attempts: Array<{ id: string }>;
+};
+
+type GeneratedPublicationPayload = PublicationPayload & {
+  messageSource: MessageGenerationResult["source"];
+  aiModel?: string | undefined;
+  aiGenerationDurationMs?: number | undefined;
+  aiValidationPassed: boolean;
+  aiValidationReasons: string[];
+  generatedAt: string;
 };
 
 function emptyMetrics(): JobMetrics {
@@ -105,7 +114,10 @@ function trackingUrlForSlug(slug: string) {
   return `${getBaseUrl()}/go/${encodeURIComponent(slug)}`;
 }
 
-function messagePayloadFor(offer: OfferWithLinks, channel: Channel): PublicationPayload | null {
+async function messagePayloadFor(
+  offer: OfferWithLinks,
+  channel: Channel,
+): Promise<GeneratedPublicationPayload | null> {
   const link = offer.affiliateLinks.find((item) => item.active);
 
   if (!link) {
@@ -113,15 +125,18 @@ function messagePayloadFor(offer: OfferWithLinks, channel: Channel): Publication
   }
 
   const trackingUrl = trackingUrlForSlug(link.slug);
-  const message = deterministicMessageComposer({
+  const generated = await generateMessageForOffer({
     title: offer.title,
+    marketplace: offer.marketplace,
+    category: offer.category,
     originalPrice: offer.originalPrice.toString(),
     currentPrice: offer.currentPrice.toString(),
     discountPercentage: offer.discountPercentage.toString(),
     couponCode: offer.couponCode,
     couponExpiration: offer.couponExpiration,
     freeShipping: offer.freeShipping,
-    marketplace: offer.marketplace,
+    rating: offer.rating?.toString() ?? null,
+    salesCount: offer.salesCount,
     trackingUrl,
   });
 
@@ -129,8 +144,14 @@ function messagePayloadFor(offer: OfferWithLinks, channel: Channel): Publication
     offerId: offer.id,
     channelId: channel.id,
     trackingUrl,
-    message,
+    message: generated.message,
     imageUrl: offer.imageUrl,
+    messageSource: generated.source,
+    aiModel: generated.aiModel,
+    aiGenerationDurationMs: generated.aiGenerationDurationMs,
+    aiValidationPassed: generated.aiValidationPassed,
+    aiValidationReasons: generated.aiValidationReasons,
+    generatedAt: generated.generatedAt.toISOString(),
   };
 }
 
@@ -207,7 +228,7 @@ export async function createPublicationIdempotently(
   tx: Prisma.TransactionClient,
   offer: OfferWithLinks,
   channel: Channel,
-  payload: PublicationPayload,
+  payload: GeneratedPublicationPayload,
   now: Date,
 ) {
   const idempotencyKey = `publication:${channel.id}:${offer.id}`;
@@ -222,6 +243,12 @@ export async function createPublicationIdempotently(
       idempotencyKey,
       scheduledAt: now,
       messagePayload: payload,
+      messageSource: payload.messageSource,
+      aiModel: payload.aiModel ?? null,
+      aiGenerationDurationMs: payload.aiGenerationDurationMs ?? null,
+      aiValidationPassed: payload.aiValidationPassed,
+      aiValidationReasons: payload.aiValidationReasons,
+      generatedAt: new Date(payload.generatedAt),
     },
   });
 }
@@ -291,7 +318,7 @@ export async function scheduleReadyOffers(now = new Date()) {
         continue;
       }
 
-      const payload = messagePayloadFor(offer, channel);
+      const payload = await messagePayloadFor(offer, channel);
 
       if (!payload) {
         metrics.skipped += 1;
@@ -330,7 +357,7 @@ export async function scheduleReadyOffers(now = new Date()) {
   return metrics;
 }
 
-function payloadFromPublication(publication: PublicationWithRelations): PublicationPayload | null {
+async function payloadFromPublication(publication: PublicationWithRelations): Promise<PublicationPayload | null> {
   const payload = publication.messagePayload;
 
   if (payload && typeof payload === "object" && !Array.isArray(payload)) {
@@ -444,7 +471,7 @@ export async function publishScheduledOffers(now = new Date()) {
   });
 
   for (const publication of publications) {
-    const payload = payloadFromPublication(publication);
+    const payload = await payloadFromPublication(publication);
     const publisher = publisherForChannel(publication.channel);
 
     if (!payload || !publisher) {

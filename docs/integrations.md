@@ -50,4 +50,23 @@ REDIS_URL="redis://localhost:6379"
 
 ## OpenAI
 
-The AI copywriter uses structured JSON output with `headline`, `body`, `callToAction`, `disclosure` and `hashtags`. Deterministic post-validation rejects inconsistent generated copy.
+The AI copywriter uses the official OpenAI SDK and the Responses API with structured JSON output:
+
+- `headline`
+- `body`
+- `callToAction`
+- `disclosure`
+- `hashtags`
+
+Configure only server-side variables:
+
+```env
+OPENAI_API_KEY=""
+OPENAI_MODEL="gpt-4.1-mini"
+OPENAI_TIMEOUT_MS="8000"
+AI_COPY_ENABLED="true"
+```
+
+The worker sends only confirmed offer facts and the generated tracking URL. Deterministic post-validation rejects inconsistent prices, discounts, coupon claims, free-shipping claims, missing affiliate disclosure, extra URLs and unsupported urgency. Any failure uses the deterministic composer and records `DETERMINISTIC_FALLBACK` on `Publication`.
+
+`/integracoes` shows whether OpenAI is configured and enabled without exposing the key. `Testar copy` runs a server-side dry test and does not publish a message.

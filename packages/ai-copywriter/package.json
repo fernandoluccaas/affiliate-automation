@@ -8,12 +8,16 @@
   },
   "scripts": {
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
+    "@affiliate/publication": "0.1.0",
+    "openai": "^5.9.1",
     "zod": "^4.0.5"
   },
   "devDependencies": {
-    "typescript": "^5.8.3"
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
   }
 }

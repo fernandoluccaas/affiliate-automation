@@ -56,6 +56,11 @@ enum PublicationStatus {
   CANCELLED
 }
 
+enum MessageSource {
+  AI_GENERATED
+  DETERMINISTIC_FALLBACK
+}
+
 enum PublicationAttemptStatus {
   PENDING
   SUCCESS
@@ -261,18 +266,24 @@ model OfferScore {
 }
 
 model Publication {
-  id             String            @id @default(cuid())
-  offerId        String
-  channelId      String
-  status         PublicationStatus @default(SCHEDULED)
-  idempotencyKey String            @unique
-  scheduledAt    DateTime
-  publishedAt    DateTime?
-  externalId     String?
-  messagePayload Json?
-  errorMessage   String?
-  createdAt      DateTime          @default(now())
-  updatedAt      DateTime          @updatedAt
+  id                       String            @id @default(cuid())
+  offerId                  String
+  channelId                String
+  status                   PublicationStatus @default(SCHEDULED)
+  idempotencyKey           String            @unique
+  scheduledAt              DateTime
+  publishedAt              DateTime?
+  externalId               String?
+  messagePayload           Json?
+  messageSource            MessageSource     @default(DETERMINISTIC_FALLBACK)
+  aiModel                  String?
+  aiGenerationDurationMs   Int?
+  aiValidationPassed       Boolean?
+  aiValidationReasons      Json?
+  generatedAt              DateTime?
+  errorMessage             String?
+  createdAt                DateTime          @default(now())
+  updatedAt                DateTime          @updatedAt
 
   offer       Offer                @relation(fields: [offerId], references: [id], onDelete: Cascade)
   channel     Channel              @relation(fields: [channelId], references: [id], onDelete: Cascade)

@@ -55,6 +55,19 @@ The worker creates `Publication`, sends the message, records `PublicationAttempt
 
 Manual export channels create `EXPORTED` publications. They do not count as external publications and do not update the offer as published.
 
+## AI Copywriter
+
+Phase 2C adds optional OpenAI copy generation for scheduled publications. Configure it only on the server or worker:
+
+```env
+OPENAI_API_KEY=""
+OPENAI_MODEL="gpt-4.1-mini"
+OPENAI_TIMEOUT_MS="8000"
+AI_COPY_ENABLED="true"
+```
+
+When enabled and configured, the worker sends confirmed offer facts to OpenAI using structured JSON output. The system validates the generated copy deterministically before saving the publication. If OpenAI is disabled, missing, times out, errors or returns copy with unconfirmed facts, the worker uses the deterministic composer and keeps scheduling/publishing intact.
+
 ## Tracking
 
 Affiliate links are exposed through `/go/[slug]`. The route records a `Click` with affiliate link, offer, publication when available, channel when available, marketplace, referer and user agent. It never stores raw IP addresses. If tracking fails, the user is still redirected with a temporary HTTP redirect.
