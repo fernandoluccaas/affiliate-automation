@@ -2,6 +2,7 @@ export const marketplaces = ["SHOPEE", "MERCADO_LIVRE"] as const;
 export type Marketplace = (typeof marketplaces)[number];
 
 export const offerStatuses = [
+  "PENDING_VALIDATION",
   "REJECTED_INVALID_DATA",
   "REJECTED_EXPIRED",
   "REJECTED_DUPLICATE",
@@ -16,6 +17,14 @@ export type OfferStatus = (typeof offerStatuses)[number];
 
 export const stockStatuses = ["IN_STOCK", "OUT_OF_STOCK", "UNKNOWN"] as const;
 export type StockStatus = (typeof stockStatuses)[number];
+
+export const channelTypes = [
+  "TELEGRAM",
+  "MANUAL_EXPORT",
+  "WHATSAPP_CLOUD_API",
+  "WHATSAPP_GROUPS_API",
+] as const;
+export type ChannelType = (typeof channelTypes)[number];
 
 export function isSupportedMarketplace(value: string): value is Marketplace {
   return marketplaces.includes(value as Marketplace);

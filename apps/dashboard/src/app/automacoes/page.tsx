@@ -1,0 +1,63 @@
+import { prisma } from "@affiliate/database";
+import { AdminShell } from "@/components/admin-shell";
+import { EmptyState } from "@/components/empty-state";
+import { formatDateTime } from "@/lib/format";
+
+export const dynamic = "force-dynamic";
+
+function duration(startedAt: Date, finishedAt: Date | null) {
+  if (!finishedAt) {
+    return "-";
+  }
+
+  return `${Math.max(0, finishedAt.getTime() - startedAt.getTime())} ms`;
+}
+
+export default async function AutomationsPage() {
+  const runs = await prisma.automationRun.findMany({
+    orderBy: { startedAt: "desc" },
+    take: 50,
+  });
+
+  return (
+    <AdminShell currentPath="/automacoes" title="Automacoes">
+      {runs.length === 0 ? (
+        <EmptyState
+          title="Nenhuma automacao executada"
+          description="As execucoes do worker serao registradas aqui como AutomationRun."
+        />
+      ) : (
+        <div className="overflow-x-auto rounded-md border bg-white">
+          <table className="w-full min-w-[760px] text-left text-sm">
+            <thead className="border-b bg-[var(--muted)] text-xs uppercase text-[var(--muted-foreground)]">
+              <tr>
+                <th className="px-4 py-3">Nome</th>
+                <th className="px-4 py-3">Status</th>
+                <th className="px-4 py-3">Inicio</th>
+                <th className="px-4 py-3">Duracao</th>
+                <th className="px-4 py-3">Resultado</th>
+                <th className="px-4 py-3">Erro</th>
+              </tr>
+            </thead>
+            <tbody>
+              {runs.map((run) => (
+                <tr key={run.id} className="border-b last:border-0">
+                  <td className="px-4 py-3">{run.name}</td>
+                  <td className="px-4 py-3">{run.status}</td>
+                  <td className="px-4 py-3">{formatDateTime(run.startedAt)}</td>
+                  <td className="px-4 py-3">{duration(run.startedAt, run.finishedAt)}</td>
+                  <td className="max-w-[260px] px-4 py-3 text-xs">
+                    <pre className="whitespace-pre-wrap font-sans">
+                      {run.metrics ? JSON.stringify(run.metrics, null, 2) : "-"}
+                    </pre>
+                  </td>
+                  <td className="px-4 py-3">{run.errorMessage ?? "-"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </AdminShell>
+  );
+}

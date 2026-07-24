@@ -1,21 +1,26 @@
 "use client";
 
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, XAxis, YAxis } from "recharts";
+import type { ClickSeriesPoint } from "@/lib/dashboard-metrics";
 
-const emptySeries = [
-  { day: "Seg", clicks: 0 },
-  { day: "Ter", clicks: 0 },
-  { day: "Qua", clicks: 0 },
-  { day: "Qui", clicks: 0 },
-  { day: "Sex", clicks: 0 },
-  { day: "Sab", clicks: 0 },
-  { day: "Dom", clicks: 0 },
-];
+type DashboardChartProps = {
+  data: ClickSeriesPoint[];
+};
 
-export function DashboardChart() {
+export function DashboardChart({ data }: DashboardChartProps) {
+  const hasClicks = data.some((point) => point.clicks > 0);
+
+  if (!hasClicks) {
+    return (
+      <div className="flex h-[220px] items-center justify-center rounded-md border border-dashed bg-[var(--background)] px-4 text-center text-sm text-[var(--muted-foreground)]">
+        Nenhum clique registrado nos ultimos sete dias.
+      </div>
+    );
+  }
+
   return (
     <ResponsiveContainer width="100%" height={220}>
-      <BarChart data={emptySeries}>
+      <BarChart data={data}>
         <CartesianGrid strokeDasharray="3 3" stroke="#d8d8d0" />
         <XAxis dataKey="day" />
         <YAxis allowDecimals={false} />
