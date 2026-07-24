@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { calculateOfferScore, type ScoreInput } from "@affiliate/scoring";
 import {
   calculateValidatedDiscount,
@@ -24,6 +25,17 @@ type IngestOfferOptions = {
   minScore?: number;
 };
 
+type OfferFingerprintInput = {
+  productId: string;
+  originalPrice: number | string;
+  currentPrice: number | string;
+  couponCode?: string | null;
+  couponExpiration?: Date | string | null;
+  affiliateUrl?: string | null;
+  freeShipping: boolean;
+  stockStatus: string;
+};
+
 function statusForValidationFailure(code: ValidationFailureCode): OfferStatus {
   if (code === "EXPIRED_COUPON") {
     return "REJECTED_EXPIRED";
@@ -43,6 +55,54 @@ function buildSlug(title: string, marketplace: string, externalProductId: string
 
   const base = normalizedTitle || "oferta";
   return `${base}-${marketplace.toLowerCase()}-${externalProductId.toLowerCase()}`.slice(0, 92);
+}
+
+function normalizeDecimal(value: number | string) {
+  return Number(value).toFixed(2);
+}
+
+function normalizeCoupon(value?: string | null) {
+  return value?.trim().toLowerCase() ?? "";
+}
+
+function normalizeDate(value?: Date | string | null) {
+  if (!value) {
+    return "";
+  }
+
+  return new Date(value).toISOString();
+}
+
+function normalizeUrl(value?: string | null) {
+  if (!value?.trim()) {
+    return "";
+  }
+
+  try {
+    const url = new URL(value.trim());
+    url.protocol = url.protocol.toLowerCase();
+    url.hostname = url.hostname.toLowerCase();
+    url.hash = "";
+    url.pathname = url.pathname.replace(/\/+$/, "") || "/";
+    return url.toString().replace(/\/$/, "").toLowerCase();
+  } catch {
+    return value.trim().replace(/\/+$/, "").toLowerCase();
+  }
+}
+
+export function createOfferFingerprint(input: OfferFingerprintInput) {
+  const normalized = [
+    input.productId,
+    normalizeDecimal(input.originalPrice),
+    normalizeDecimal(input.currentPrice),
+    normalizeCoupon(input.couponCode),
+    normalizeDate(input.couponExpiration),
+    normalizeUrl(input.affiliateUrl),
+    input.freeShipping ? "true" : "false",
+    input.stockStatus,
+  ];
+
+  return createHash("sha256").update(normalized.join("|")).digest("hex");
 }
 
 async function reserveAffiliateSlug(tx: Prisma.TransactionClient, baseSlug: string) {
@@ -99,7 +159,25 @@ export async function ingestOffer(
   const now = options.now ?? new Date();
   const minScore = options.minScore ?? READY_TO_PUBLISH_MIN_SCORE;
 
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return await prisma.$transaction(async (tx) =>
+        ingestOfferInTransaction(tx, rawInput, { now, minScore }),
+      );
+    } catch (error) {
+      if (attempt === 0 && isUniqueConstraintError(error)) {
+        continue;
+      }
+
+      throw error;
+    }
+  }
+
   return prisma.$transaction(async (tx) => ingestOfferInTransaction(tx, rawInput, { now, minScore }));
+}
+
+function isUniqueConstraintError(error: unknown) {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "P2002";
 }
 
 export async function ingestOfferInTransaction(
@@ -153,7 +231,7 @@ export async function ingestOfferInTransaction(
   const duplicate = await tx.offer.findFirst({
     where: {
       marketplace: input.marketplace,
-      externalProductId: { not: input.externalProductId },
+      productId: { not: product.id },
       OR: [
         { productUrl: input.productUrl },
         ...(input.affiliateUrl ? [{ affiliateUrl: input.affiliateUrl }] : []),
@@ -162,41 +240,58 @@ export async function ingestOfferInTransaction(
     select: { id: true },
   });
 
-  const offer = await tx.offer.upsert({
-    where: {
-      marketplace_externalProductId: {
-        marketplace: input.marketplace,
-        externalProductId: input.externalProductId,
-      },
-    },
-    update: {
-      productId: product.id,
-      title: input.title,
-      description: input.description ?? null,
-      category: input.category ?? null,
-      imageUrl: input.imageUrl ?? null,
-      productUrl: input.productUrl,
-      affiliateUrl: input.affiliateUrl ?? null,
-      originalPrice: input.originalPrice,
-      currentPrice: input.currentPrice,
-      discountPercentage,
-      couponCode: input.couponCode ?? null,
-      couponExpiration: input.couponExpiration ?? null,
-      commissionPercentage: input.commissionPercentage ?? null,
-      rating: input.rating ?? null,
-      salesCount: input.salesCount ?? null,
-      freeShipping: input.freeShipping,
-      stockStatus: input.stockStatus,
-      score: null,
-      status: "PENDING_VALIDATION",
-      statusReason: null,
-      collectedAt: options.now,
-      verifiedAt: null,
-    },
-    create: {
+  const offerFingerprint = createOfferFingerprint({
+    productId: product.id,
+    originalPrice: input.originalPrice,
+    currentPrice: input.currentPrice,
+    couponCode: input.couponCode ?? null,
+    couponExpiration: input.couponExpiration ?? null,
+    affiliateUrl: input.affiliateUrl ?? null,
+    freeShipping: input.freeShipping,
+    stockStatus: input.stockStatus,
+  });
+
+  let offer = await tx.offer.findFirst({
+    where: { productId: product.id, offerFingerprint },
+  });
+  let offerIsImmutable = false;
+
+  if (offer) {
+    offerIsImmutable = await isHistoricalOffer(tx, offer.id, offer.status);
+
+    if (!offerIsImmutable) {
+      offer = await tx.offer.update({
+        where: { id: offer.id },
+        data: {
+          title: input.title,
+          description: input.description ?? null,
+          category: input.category ?? null,
+          imageUrl: input.imageUrl ?? null,
+          productUrl: input.productUrl,
+          commissionPercentage: input.commissionPercentage ?? null,
+          rating: input.rating ?? null,
+          salesCount: input.salesCount ?? null,
+          score: null,
+          status: "PENDING_VALIDATION",
+          statusReason: null,
+          collectedAt: options.now,
+          verifiedAt: null,
+        },
+      });
+    }
+  } else {
+    const lastVersion = await tx.offer.findFirst({
+      where: { productId: product.id },
+      orderBy: { version: "desc" },
+      select: { version: true },
+    });
+    offer = await tx.offer.create({
+      data: {
       marketplace: input.marketplace,
       externalProductId: input.externalProductId,
       productId: product.id,
+      version: (lastVersion?.version ?? 0) + 1,
+      offerFingerprint,
       title: input.title,
       description: input.description ?? null,
       category: input.category ?? null,
@@ -215,19 +310,22 @@ export async function ingestOfferInTransaction(
       stockStatus: input.stockStatus,
       status: "PENDING_VALIDATION",
       collectedAt: options.now,
-    },
-  });
-
-  await tx.coupon.deleteMany({ where: { offerId: offer.id } });
-
-  if (input.couponCode) {
-    await tx.coupon.create({
-      data: {
-        offerId: offer.id,
-        code: input.couponCode,
-        expiresAt: input.couponExpiration ?? null,
       },
     });
+  }
+
+  if (!offerIsImmutable) {
+    await tx.coupon.deleteMany({ where: { offerId: offer.id } });
+
+    if (input.couponCode) {
+      await tx.coupon.create({
+        data: {
+          offerId: offer.id,
+          code: input.couponCode,
+          expiresAt: input.couponExpiration ?? null,
+        },
+      });
+    }
   }
 
   const score = calculateOfferScore(
@@ -236,20 +334,22 @@ export async function ingestOfferInTransaction(
     options.now,
   );
 
-  await tx.offerScore.create({
-    data: {
-      offerId: offer.id,
-      total: score.total,
-      discountComponent: score.discountComponent,
-      commissionComponent: score.commissionComponent,
-      ratingComponent: score.ratingComponent,
-      popularityComponent: score.popularityComponent,
-      freeShippingComponent: score.freeShippingComponent,
-      couponValidityComponent: score.couponValidityComponent,
-      noveltyComponent: score.noveltyComponent,
-      weights: score.weights,
-    },
-  });
+  if (!offerIsImmutable) {
+    await tx.offerScore.create({
+      data: {
+        offerId: offer.id,
+        total: score.total,
+        discountComponent: score.discountComponent,
+        commissionComponent: score.commissionComponent,
+        ratingComponent: score.ratingComponent,
+        popularityComponent: score.popularityComponent,
+        freeShippingComponent: score.freeShippingComponent,
+        couponValidityComponent: score.couponValidityComponent,
+        noveltyComponent: score.noveltyComponent,
+        weights: score.weights,
+      },
+    });
+  }
 
   const existingAffiliateLink = await tx.affiliateLink.findFirst({
     where: { offerId: offer.id },
@@ -273,7 +373,10 @@ export async function ingestOfferInTransaction(
   let status: OfferStatus = "READY_TO_PUBLISH";
   let statusReason = "Oferta valida e pronta para publicacao.";
 
-  if (!discount.ok) {
+  if (offerIsImmutable) {
+    status = offer.status;
+    statusReason = offer.statusReason ?? "Oferta historica preservada sem sobrescrita.";
+  } else if (!discount.ok) {
     status = "REJECTED_INVALID_DATA";
     statusReason = discount.message;
   } else if (duplicate) {
@@ -294,15 +397,17 @@ export async function ingestOfferInTransaction(
     }
   }
 
-  await tx.offer.update({
-    where: { id: offer.id },
-    data: {
-      status,
-      statusReason,
-      score: score.total,
-      verifiedAt: options.now,
-    },
-  });
+  if (!offerIsImmutable) {
+    await tx.offer.update({
+      where: { id: offer.id },
+      data: {
+        status,
+        statusReason,
+        score: score.total,
+        verifiedAt: options.now,
+      },
+    });
+  }
 
   return {
     ok: status === "READY_TO_PUBLISH",
@@ -313,4 +418,17 @@ export async function ingestOfferInTransaction(
     discountPercentage,
     affiliateLinkSlug,
   };
+}
+
+async function isHistoricalOffer(
+  tx: Prisma.TransactionClient,
+  offerId: string,
+  status: OfferStatus,
+) {
+  if (status === "PUBLISHED") {
+    return true;
+  }
+
+  const publicationCount = await tx.publication.count({ where: { offerId } });
+  return publicationCount > 0;
 }

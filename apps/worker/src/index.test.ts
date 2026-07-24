@@ -16,6 +16,18 @@ describe("createPublicationIdempotently", () => {
     const tx = { publication: { upsert } } as unknown as Prisma.TransactionClient;
     const offer = {
       id: "offer-1",
+      title: "Oferta v1",
+      externalProductId: "sku-1",
+      marketplace: "SHOPEE",
+      category: "Casa",
+      originalPrice: 100,
+      currentPrice: 40,
+      discountPercentage: 60,
+      couponCode: "PROMO10",
+      couponExpiration: new Date("2026-07-24T12:00:00.000Z"),
+      freeShipping: true,
+      affiliateUrl: "https://example.com/affiliate",
+      version: 1,
       affiliateLinks: [],
     } as unknown as Offer & { affiliateLinks: [] };
     const channel = { id: "channel-1" } as Channel;
@@ -44,7 +56,63 @@ describe("createPublicationIdempotently", () => {
         messageSource: "DETERMINISTIC_FALLBACK",
         aiProvider: "DETERMINISTIC",
         aiValidationPassed: false,
+        offerTitleSnapshot: "Oferta v1",
+        productExternalIdSnapshot: "sku-1",
+        offerVersionSnapshot: 1,
+        trackingUrlSnapshot: "https://example.com/go/slug",
       }),
     });
+  });
+
+  it("uses different idempotency keys for different Offer versions", async () => {
+    const upsert = vi.fn().mockResolvedValue({ id: "publication" });
+    const tx = { publication: { upsert } } as unknown as Prisma.TransactionClient;
+    const channel = { id: "channel-1" } as Channel;
+    const payload = {
+      offerId: "offer-1",
+      channelId: "channel-1",
+      trackingUrl: "https://example.com/go/slug",
+      message: "Mensagem",
+      messageSource: "DETERMINISTIC_FALLBACK" as const,
+      aiProvider: "DETERMINISTIC" as const,
+      aiValidationPassed: false,
+      aiValidationReasons: [],
+      generatedAt: "2026-07-23T12:00:00.000Z",
+    };
+    const now = new Date("2026-07-23T12:00:00.000Z");
+    const baseOffer = {
+      title: "Oferta",
+      externalProductId: "sku-1",
+      marketplace: "SHOPEE",
+      originalPrice: 100,
+      currentPrice: 40,
+      discountPercentage: 60,
+      freeShipping: false,
+      affiliateLinks: [],
+    };
+
+    await createPublicationIdempotently(
+      tx,
+      { ...baseOffer, id: "offer-v1", version: 1 } as unknown as Offer & { affiliateLinks: [] },
+      channel,
+      { ...payload, offerId: "offer-v1" },
+      now,
+    );
+    await createPublicationIdempotently(
+      tx,
+      { ...baseOffer, id: "offer-v2", version: 2 } as unknown as Offer & { affiliateLinks: [] },
+      channel,
+      { ...payload, offerId: "offer-v2" },
+      now,
+    );
+
+    expect(upsert).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ where: { idempotencyKey: "publication:channel-1:offer-v1" } }),
+    );
+    expect(upsert).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ where: { idempotencyKey: "publication:channel-1:offer-v2" } }),
+    );
   });
 });

@@ -95,6 +95,10 @@ export function OfferForm() {
           </Field>
           <Field label="ID externo" error={errors.externalProductId?.message}>
             <Input {...register("externalProductId")} />
+            <p className="text-xs text-[var(--muted-foreground)]">
+              Identificador unico do produto dentro do marketplace. Utilize o mesmo ID somente
+              quando se tratar realmente do mesmo produto.
+            </p>
           </Field>
           <Field label="Titulo" error={errors.title?.message}>
             <Input {...register("title")} />

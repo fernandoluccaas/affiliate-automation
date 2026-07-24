@@ -22,7 +22,30 @@ Monetary and percentage values use Prisma `Decimal`. Discount percentage is calc
 
 ## Duplicate Controls
 
-`Offer` has a unique constraint on `(marketplace, externalProductId)`. `Product` has the same external identity constraint. `AffiliateLink.slug` is unique. Phase 2A also rejects manual offers with the same marketplace and URL when the external product ID is different.
+`Product` has the marketplace identity constraint on `(marketplace, externalProductId)`. `Offer` is versioned per Product with unique constraints on `(productId, version)` and `(productId, offerFingerprint)`. `AffiliateLink.slug` is unique and belongs to one Offer version. Phase 2A also rejects manual offers with the same marketplace and URL when the external product ID is different.
+
+## Product, Offer And Publication
+
+`Product` is identity. It can update current product metadata without rewriting historical publications.
+
+`Offer` is a commercial snapshot/version. `offerFingerprint` is a SHA-256 hash over normalized material condition fields:
+
+- `productId`
+- `originalPrice` with two decimal places
+- `currentPrice` with two decimal places
+- normalized `couponCode`
+- UTC `couponExpiration`
+- normalized `affiliateUrl`
+- `freeShipping`
+- `stockStatus`
+
+`collectedAt`, `createdAt`, `updatedAt`, score and operational status are not part of the fingerprint.
+
+The first Offer for a Product is `version = 1`. A new material condition for the same Product receives the next version. A published Offer, exported Offer or any Offer with a `Publication` is treated as historical and is not overwritten by later ingestion.
+
+`Publication` is an immutable historical snapshot. At scheduling time it stores `offerTitleSnapshot`, `productExternalIdSnapshot`, `marketplaceSnapshot`, `categorySnapshot`, price snapshots, coupon snapshots, `freeShippingSnapshot`, `affiliateUrlSnapshot`, `trackingUrlSnapshot` and `offerVersionSnapshot`. `/publicacoes` reads these fields to show what was actually sent.
+
+Backfill for old rows uses the best deterministic data available at migration time. For historical rows already semantically mixed before the migration, the system does not invent missing facts or use AI reconstruction. The title snapshot can be extracted from the saved message when the first message line is deterministic; other fields fall back to the then-current related Offer.
 
 ## Offer Lifecycle
 

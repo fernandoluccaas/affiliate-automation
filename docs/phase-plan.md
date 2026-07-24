@@ -57,6 +57,17 @@ Status: implemented.
 - Added real provider/fallback metrics to `/automacoes`.
 - Added unit tests for schema validation, provider selection, Ollama HTTP mocks, factual validation, successful generation and fallback scenarios.
 
+### Phase 2C Maintenance - Historical Immutability
+
+Status: implemented.
+
+- Split Product identity, Offer commercial version and Publication historical snapshot semantics.
+- Added `Offer.version` and deterministic `offerFingerprint`.
+- Removed destructive Offer upsert by marketplace/external product ID.
+- Added immutable Publication snapshot fields and refactored `/publicacoes` to read them.
+- Preserved per-Offer AffiliateLink tracking so later Offer versions do not rewrite earlier tracking.
+- Added migration/backfill for existing Offers and Publications with documented limitations for already-corrupted historical rows.
+
 ## Phase 3 - Marketplace Ingestion
 
 - Implement officially permitted Shopee and Mercado Livre collection adapters.

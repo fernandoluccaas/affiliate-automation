@@ -64,6 +64,8 @@ export default async function OffersPage({ searchParams }: OffersPageProps) {
       select: {
         id: true,
         marketplace: true,
+        externalProductId: true,
+        version: true,
         title: true,
         category: true,
         originalPrice: true,
@@ -134,6 +136,8 @@ export default async function OffersPage({ searchParams }: OffersPageProps) {
               <tr>
                 <th className="px-4 py-3 font-semibold">Titulo</th>
                 <th className="px-4 py-3 font-semibold">Marketplace</th>
+                <th className="px-4 py-3 font-semibold">ID externo</th>
+                <th className="px-4 py-3 font-semibold">Versao</th>
                 <th className="px-4 py-3 font-semibold">Categoria</th>
                 <th className="px-4 py-3 font-semibold">Precos</th>
                 <th className="px-4 py-3 font-semibold">Desconto</th>
@@ -156,6 +160,8 @@ export default async function OffersPage({ searchParams }: OffersPageProps) {
                     ) : null}
                   </td>
                   <td className="px-4 py-3">{offer.marketplace}</td>
+                  <td className="px-4 py-3">{offer.externalProductId}</td>
+                  <td className="px-4 py-3">v{offer.version}</td>
                   <td className="px-4 py-3">{offer.category ?? "-"}</td>
                   <td className="px-4 py-3">
                     <div>{formatCurrency(offer.currentPrice)}</div>

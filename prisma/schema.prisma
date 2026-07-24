@@ -178,6 +178,8 @@ model Offer {
   marketplace          Marketplace
   externalProductId    String
   productId            String?
+  version              Int         @default(1)
+  offerFingerprint     String
   title                String
   description          String?
   category             String?
@@ -213,9 +215,11 @@ model Offer {
   conversions    Conversion[]
   commissions    Commission[]
 
-  @@unique([marketplace, externalProductId])
+  @@unique([productId, version])
+  @@unique([productId, offerFingerprint])
   @@index([status, score])
   @@index([marketplace, category])
+  @@index([marketplace, externalProductId])
   @@index([scheduledAt])
   @@index([publishedAt])
 }
@@ -288,6 +292,19 @@ model Publication {
   aiValidationPassed       Boolean?
   aiValidationReasons      Json?
   generatedAt              DateTime?
+  offerTitleSnapshot       String
+  productExternalIdSnapshot String
+  marketplaceSnapshot      Marketplace
+  categorySnapshot         String?
+  originalPriceSnapshot    Decimal           @db.Decimal(12, 2)
+  currentPriceSnapshot     Decimal           @db.Decimal(12, 2)
+  discountPercentageSnapshot Decimal          @db.Decimal(5, 2)
+  couponCodeSnapshot       String?
+  couponExpirationSnapshot DateTime?
+  freeShippingSnapshot     Boolean
+  affiliateUrlSnapshot     String?
+  trackingUrlSnapshot      String
+  offerVersionSnapshot     Int
   errorMessage             String?
   createdAt                DateTime          @default(now())
   updatedAt                DateTime          @updatedAt

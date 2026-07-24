@@ -6,11 +6,21 @@ Affiliate Automation is a production-oriented monorepo that separates user-facin
 
 Shopee and Mercado Livre integrations feed marketplace connectors. Connectors normalize external data into internal products, offers, coupons and affiliate links. Offers are persisted in PostgreSQL, validated deterministically, deduplicated, scored, associated with affiliate links, prepared by the AI copywriter, scheduled, published through channel adapters and measured through tracking and conversion imports.
 
-Phase 2A adds a manual offer pipeline before real marketplace connectors. An administrator can create an offer in `/ofertas/nova`; `ingestOffer` calculates the discount, upserts the product and offer in a transaction, validates facts with Zod and deterministic rules, calculates and persists an auditable score, creates a tracking slug and sets the final offer status automatically.
+Phase 2A adds a manual offer pipeline before real marketplace connectors. An administrator can create an offer in `/ofertas/nova`; `ingestOffer` calculates the discount, upserts the product identity, creates or reuses a versioned offer snapshot by fingerprint in a transaction, validates facts with Zod and deterministic rules, calculates and persists an auditable score, creates a tracking slug for that Offer and sets the final offer status automatically.
 
 Phase 2B adds the publication and tracking loop. The worker selects active compatible channels for `READY_TO_PUBLISH` offers, creates idempotent `Publication` rows with deterministic message payloads, publishes scheduled rows through Telegram or manual export adapters, records `PublicationAttempt`, and updates publication status. `/go/[slug]` is public and records clicks before redirecting to the affiliate destination.
 
 Phase 2C adds multi-provider copy generation between channel selection and publication creation. The worker requests structured JSON copy from the configured provider, validates the returned text against confirmed offer facts, persists message metadata on `Publication`, and falls back to the deterministic composer without blocking Telegram, manual export, tracking or Redis locks. Ollama is the default provider and is called over HTTP at the configured `OLLAMA_BASE_URL`; OpenAI remains optional.
+
+## Historical Immutability
+
+`Product`, `Offer` and `Publication` have different ownership:
+
+- `Product` is the marketplace identity. It can update current metadata such as title, category, image and product URL.
+- `Offer` is a versioned commercial snapshot for a Product. Material conditions generate an `offerFingerprint`; a new fingerprint creates the next version for the same Product.
+- `Publication` is the immutable snapshot of what was scheduled or sent. It stores title, external product ID, marketplace, category, prices, discount, coupon, free shipping, affiliate URL, tracking URL and Offer version at scheduling time.
+
+Historical pages must read publication snapshots for published content. They must not use mutable `Product` or current `Offer` joins to represent what was already sent.
 
 ## Applications
 

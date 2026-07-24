@@ -29,9 +29,17 @@ Phase 2A supports manual offer ingestion:
 2. Fill the marketplace, product data, prices, coupon and commercial fields.
 3. Submit the form.
 4. The system calculates the discount internally.
-5. `ingestOffer` validates facts, calculates score, persists `OfferScore`, creates an affiliate slug and sets the final status.
+5. `ingestOffer` validates facts, calculates score, persists `OfferScore`, creates an affiliate slug for that Offer version and sets the final status.
 
 Valid offers above the minimum score become `READY_TO_PUBLISH`. Invalid, expired, duplicate or low-score offers are rejected with a deterministic reason.
+
+Product, Offer and Publication are intentionally separate:
+
+- `Product`: permanent marketplace identity, keyed by `marketplace + externalProductId`.
+- `Offer`: commercial snapshot/version for that product, keyed by a deterministic `offerFingerprint`.
+- `Publication`: immutable snapshot of what was scheduled/sent to a channel.
+
+Example: the same `Product` can have `Offer v1` at `R$ 329,90` and later `Offer v2` at `R$ 245,90`. Publishing v2 never rewrites the historical publication for v1.
 
 ## Publication Flow
 
@@ -51,7 +59,7 @@ To test Telegram:
 6. Create a valid offer in `/ofertas/nova`.
 7. Run `npm run worker:once`.
 
-The worker creates `Publication`, sends the message, records `PublicationAttempt`, and updates the dashboard with real publication and click data.
+The worker creates `Publication` with historical snapshots, sends the saved message, records `PublicationAttempt`, and updates the dashboard with real publication and click data.
 
 Manual export channels create `EXPORTED` publications. They do not count as external publications and do not update the offer as published.
 

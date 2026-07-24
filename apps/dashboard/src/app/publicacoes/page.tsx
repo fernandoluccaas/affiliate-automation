@@ -1,7 +1,8 @@
 import { prisma } from "@affiliate/database";
 import { AdminShell } from "@/components/admin-shell";
 import { EmptyState } from "@/components/empty-state";
-import { formatDateTime } from "@/lib/format";
+import { formatCurrency, formatDateTime, formatPercentage } from "@/lib/format";
+import { publicationTitleSnapshot } from "@/lib/publication-snapshot";
 
 export const dynamic = "force-dynamic";
 
@@ -10,7 +11,6 @@ export default async function PublicationsPage() {
     orderBy: { scheduledAt: "desc" },
     take: 50,
     include: {
-      offer: { select: { title: true, status: true } },
       channel: { select: { name: true, type: true } },
       attempts: { orderBy: { attemptedAt: "desc" } },
     },
@@ -27,11 +27,15 @@ export default async function PublicationsPage() {
         />
       ) : (
         <div className="overflow-x-auto rounded-md border bg-white">
-          <table className="w-full min-w-[980px] text-left text-sm">
+          <table className="w-full min-w-[1320px] text-left text-sm">
             <thead className="border-b bg-[var(--muted)] text-xs uppercase text-[var(--muted-foreground)]">
               <tr>
                 <th className="px-4 py-3">Status</th>
-                <th className="px-4 py-3">Oferta</th>
+                <th className="px-4 py-3">Oferta publicada</th>
+                <th className="px-4 py-3">Versao</th>
+                <th className="px-4 py-3">Precos publicados</th>
+                <th className="px-4 py-3">Desconto</th>
+                <th className="px-4 py-3">Cupom</th>
                 <th className="px-4 py-3">Canal</th>
                 <th className="px-4 py-3">Mensagem</th>
                 <th className="px-4 py-3">Agendada</th>
@@ -54,7 +58,37 @@ export default async function PublicationsPage() {
                 return (
                   <tr key={publication.id} className="border-b last:border-0">
                     <td className="px-4 py-3">{publication.status}</td>
-                    <td className="px-4 py-3">{publication.offer.title}</td>
+                    <td className="max-w-[260px] px-4 py-3">
+                      <div className="font-medium">{publicationTitleSnapshot(publication)}</div>
+                      <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                        {publication.marketplaceSnapshot} - {publication.productExternalIdSnapshot}
+                        {publication.categorySnapshot ? ` - ${publication.categorySnapshot}` : ""}
+                      </div>
+                      <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                        {publication.trackingUrlSnapshot}
+                      </div>
+                    </td>
+                    <td className="px-4 py-3">v{publication.offerVersionSnapshot}</td>
+                    <td className="px-4 py-3">
+                      <div>{formatCurrency(publication.currentPriceSnapshot)}</div>
+                      <div className="text-xs text-[var(--muted-foreground)]">
+                        De {formatCurrency(publication.originalPriceSnapshot)}
+                      </div>
+                    </td>
+                    <td className="px-4 py-3">
+                      {formatPercentage(publication.discountPercentageSnapshot)}%
+                    </td>
+                    <td className="px-4 py-3">
+                      {publication.couponCodeSnapshot ?? "-"}
+                      {publication.couponExpirationSnapshot ? (
+                        <div className="text-xs text-[var(--muted-foreground)]">
+                          ate {formatDateTime(publication.couponExpirationSnapshot)}
+                        </div>
+                      ) : null}
+                      {publication.freeShippingSnapshot ? (
+                        <div className="text-xs text-[var(--muted-foreground)]">Frete gratis</div>
+                      ) : null}
+                    </td>
                     <td className="px-4 py-3">
                       {publication.channel.name} ({publication.channel.type})
                     </td>
