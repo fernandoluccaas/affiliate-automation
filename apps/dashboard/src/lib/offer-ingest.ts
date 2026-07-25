@@ -16,7 +16,8 @@ type IngestOfferResult = {
   status: OfferStatus;
   statusReason: string;
   score?: number;
-  discountPercentage?: number;
+  scoreCompletenessPercentage?: number;
+  discountPercentage?: number | null;
   affiliateLinkSlug?: string;
 };
 
@@ -27,12 +28,12 @@ type IngestOfferOptions = {
 
 type OfferFingerprintInput = {
   productId: string;
-  originalPrice: number | string;
+  originalPrice?: number | string | null;
   currentPrice: number | string;
   couponCode?: string | null;
   couponExpiration?: Date | string | null;
   affiliateUrl?: string | null;
-  freeShipping: boolean;
+  shippingStatus: string;
   stockStatus: string;
 };
 
@@ -57,7 +58,11 @@ function buildSlug(title: string, marketplace: string, externalProductId: string
   return `${base}-${marketplace.toLowerCase()}-${externalProductId.toLowerCase()}`.slice(0, 92);
 }
 
-function normalizeDecimal(value: number | string) {
+function normalizeDecimal(value?: number | string | null) {
+  if (value === null || value === undefined) {
+    return "";
+  }
+
   return Number(value).toFixed(2);
 }
 
@@ -98,7 +103,7 @@ export function createOfferFingerprint(input: OfferFingerprintInput) {
     normalizeCoupon(input.couponCode),
     normalizeDate(input.couponExpiration),
     normalizeUrl(input.affiliateUrl),
-    input.freeShipping ? "true" : "false",
+    input.shippingStatus,
     input.stockStatus,
   ];
 
@@ -118,10 +123,14 @@ async function reserveAffiliateSlug(tx: Prisma.TransactionClient, baseSlug: stri
   return `${baseSlug}-${Date.now()}`;
 }
 
-function scoreInputFromOffer(input: OfferFormValues, discountPercentage: number, now: Date) {
+function scoreInputFromOffer(
+  input: OfferFormValues,
+  discountPercentage: number | null,
+  now: Date,
+) {
   const scoreInput: ScoreInput = {
     discountPercentage,
-    freeShipping: input.freeShipping,
+    shippingStatus: input.shippingStatus,
     collectedAt: now,
   };
 
@@ -144,10 +153,15 @@ function scoreInputFromOffer(input: OfferFormValues, discountPercentage: number,
   return scoreInput;
 }
 
-function buildValidationInput(input: OfferFormValues, discountPercentage: number, now: Date) {
+function buildValidationInput(
+  input: OfferFormValues,
+  discountPercentage: number | null,
+  now: Date,
+) {
   return {
     ...input,
     discountPercentage,
+    freeShipping: input.shippingStatus === "FREE",
     collectedAt: now,
   };
 }
@@ -197,7 +211,8 @@ export async function ingestOfferInTransaction(
 
   const input = parsed.data;
   const discount = calculateValidatedDiscount(input.originalPrice, input.currentPrice);
-  const discountPercentage = discount.ok ? discount.discountPercentage : 0;
+  const discountPercentage = discount.ok ? discount.discountPercentage : null;
+  const freeShipping = input.shippingStatus === "FREE";
 
   const product = await tx.product.upsert({
     where: {
@@ -242,12 +257,12 @@ export async function ingestOfferInTransaction(
 
   const offerFingerprint = createOfferFingerprint({
     productId: product.id,
-    originalPrice: input.originalPrice,
+    originalPrice: input.originalPrice ?? null,
     currentPrice: input.currentPrice,
     couponCode: input.couponCode ?? null,
     couponExpiration: input.couponExpiration ?? null,
     affiliateUrl: input.affiliateUrl ?? null,
-    freeShipping: input.freeShipping,
+    shippingStatus: input.shippingStatus,
     stockStatus: input.stockStatus,
   });
 
@@ -271,7 +286,10 @@ export async function ingestOfferInTransaction(
           commissionPercentage: input.commissionPercentage ?? null,
           rating: input.rating ?? null,
           salesCount: input.salesCount ?? null,
+          freeShipping,
+          shippingStatus: input.shippingStatus,
           score: null,
+          scoreCompletenessPercentage: null,
           status: "PENDING_VALIDATION",
           statusReason: null,
           collectedAt: options.now,
@@ -298,7 +316,7 @@ export async function ingestOfferInTransaction(
       imageUrl: input.imageUrl ?? null,
       productUrl: input.productUrl,
       affiliateUrl: input.affiliateUrl ?? null,
-      originalPrice: input.originalPrice,
+      originalPrice: input.originalPrice ?? null,
       currentPrice: input.currentPrice,
       discountPercentage,
       couponCode: input.couponCode ?? null,
@@ -306,7 +324,8 @@ export async function ingestOfferInTransaction(
       commissionPercentage: input.commissionPercentage ?? null,
       rating: input.rating ?? null,
       salesCount: input.salesCount ?? null,
-      freeShipping: input.freeShipping,
+      freeShipping,
+      shippingStatus: input.shippingStatus,
       stockStatus: input.stockStatus,
       status: "PENDING_VALIDATION",
       collectedAt: options.now,
@@ -339,6 +358,7 @@ export async function ingestOfferInTransaction(
       data: {
         offerId: offer.id,
         total: score.total,
+        completenessPercentage: score.scoreCompletenessPercentage,
         discountComponent: score.discountComponent,
         commissionComponent: score.commissionComponent,
         ratingComponent: score.ratingComponent,
@@ -351,20 +371,23 @@ export async function ingestOfferInTransaction(
     });
   }
 
-  const existingAffiliateLink = await tx.affiliateLink.findFirst({
-    where: { offerId: offer.id },
-    select: { slug: true },
-  });
-  const affiliateLinkSlug =
-    existingAffiliateLink?.slug ??
-    (await reserveAffiliateSlug(tx, buildSlug(input.title, input.marketplace, input.externalProductId)));
+  const existingAffiliateLink = input.affiliateUrl
+    ? await tx.affiliateLink.findFirst({
+        where: { offerId: offer.id },
+        select: { slug: true },
+      })
+    : null;
+  const affiliateLinkSlug = input.affiliateUrl
+    ? existingAffiliateLink?.slug ??
+      (await reserveAffiliateSlug(tx, buildSlug(input.title, input.marketplace, input.externalProductId)))
+    : undefined;
 
-  if (!existingAffiliateLink) {
+  if (input.affiliateUrl && !existingAffiliateLink && affiliateLinkSlug) {
     await tx.affiliateLink.create({
       data: {
         offerId: offer.id,
         slug: affiliateLinkSlug,
-        destination: input.affiliateUrl ?? input.productUrl,
+        destination: input.affiliateUrl,
         marketplace: input.marketplace,
       },
     });
@@ -394,6 +417,9 @@ export async function ingestOfferInTransaction(
     } else if (score.total < options.minScore) {
       status = "REJECTED_LOW_SCORE";
       statusReason = `Score ${score.total} abaixo do minimo ${options.minScore}.`;
+    } else if (!input.affiliateUrl) {
+      status = "READY_FOR_AFFILIATE_LINK";
+      statusReason = "Oferta valida aguardando link oficial de afiliado.";
     }
   }
 
@@ -404,20 +430,27 @@ export async function ingestOfferInTransaction(
         status,
         statusReason,
         score: score.total,
+        scoreCompletenessPercentage: score.scoreCompletenessPercentage,
         verifiedAt: options.now,
       },
     });
   }
 
-  return {
+  const result: IngestOfferResult = {
     ok: status === "READY_TO_PUBLISH",
     offerId: offer.id,
     status,
     statusReason,
     score: score.total,
+    scoreCompletenessPercentage: score.scoreCompletenessPercentage,
     discountPercentage,
-    affiliateLinkSlug,
   };
+
+  if (affiliateLinkSlug) {
+    result.affiliateLinkSlug = affiliateLinkSlug;
+  }
+
+  return result;
 }
 
 async function isHistoricalOffer(

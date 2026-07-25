@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Channel, Offer, Prisma } from "@affiliate/database";
-import { createPublicationIdempotently } from "./index";
+import { createPublicationIdempotently, scheduleReadyOffers } from "./index";
 
 vi.mock("@affiliate/database", async () => {
   const actual = await vi.importActual<typeof import("@affiliate/database")>("@affiliate/database");
@@ -11,6 +11,24 @@ vi.mock("@affiliate/database", async () => {
 });
 
 describe("createPublicationIdempotently", () => {
+  it("only queries READY_TO_PUBLISH offers for scheduling", async () => {
+    const actual = await import("@affiliate/database");
+    const findManyOffers = vi.fn().mockResolvedValue([]);
+    const findManyChannels = vi.fn().mockResolvedValue([]);
+    Object.assign(actual.prisma, {
+      offer: { findMany: findManyOffers },
+      channel: { findMany: findManyChannels },
+    });
+
+    await scheduleReadyOffers(new Date("2026-07-24T12:00:00.000Z"));
+
+    expect(findManyOffers).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { status: "READY_TO_PUBLISH" },
+      }),
+    );
+  });
+
   it("uses a stable channel and offer idempotency key", async () => {
     const upsert = vi.fn().mockResolvedValue({ id: "publication-1" });
     const tx = { publication: { upsert } } as unknown as Prisma.TransactionClient;

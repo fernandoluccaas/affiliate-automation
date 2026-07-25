@@ -9,12 +9,13 @@ export type ScoreWeights = {
 };
 
 export type ScoreInput = {
-  discountPercentage: number;
-  commissionPercentage?: number;
-  rating?: number;
-  salesCount?: number;
-  freeShipping: boolean;
-  couponExpiration?: Date;
+  discountPercentage?: number | null;
+  commissionPercentage?: number | null;
+  rating?: number | null;
+  salesCount?: number | null;
+  freeShipping?: boolean | null;
+  shippingStatus?: "FREE" | "NOT_FREE" | "UNKNOWN" | string | null;
+  couponExpiration?: Date | null;
   collectedAt: Date;
 };
 
@@ -27,6 +28,7 @@ export type ScoreBreakdown = {
   freeShippingComponent: number;
   couponValidityComponent: number;
   noveltyComponent: number;
+  scoreCompletenessPercentage: number;
   weights: ScoreWeights;
 };
 
@@ -49,25 +51,65 @@ export function calculateOfferScore(
   weights: ScoreWeights = defaultScoreWeights,
   now = new Date(),
 ): ScoreBreakdown {
-  const discountComponent = clamp((input.discountPercentage / 50) * 100);
-  const commissionComponent = clamp(((input.commissionPercentage ?? 0) / 20) * 100);
-  const ratingComponent = clamp(((input.rating ?? 0) / 5) * 100);
-  const popularityComponent = clamp(Math.log10((input.salesCount ?? 0) + 1) * 25);
-  const freeShippingComponent = input.freeShipping ? 100 : 0;
+  const available: Array<{ component: number; weight: number }> = [];
+  const discountComponent =
+    input.discountPercentage === null || input.discountPercentage === undefined
+      ? 0
+      : clamp((input.discountPercentage / 50) * 100);
+  const commissionComponent =
+    input.commissionPercentage === null || input.commissionPercentage === undefined
+      ? 0
+      : clamp((input.commissionPercentage / 20) * 100);
+  const ratingComponent =
+    input.rating === null || input.rating === undefined ? 0 : clamp((input.rating / 5) * 100);
+  const popularityComponent =
+    input.salesCount === null || input.salesCount === undefined
+      ? 0
+      : clamp(Math.log10(input.salesCount + 1) * 25);
+  const normalizedShippingStatus =
+    input.shippingStatus ??
+    (input.freeShipping === true ? "FREE" : input.freeShipping === false ? "NOT_FREE" : "UNKNOWN");
+  const freeShippingComponent = normalizedShippingStatus === "FREE" ? 100 : 0;
   const couponValidityComponent =
     input.couponExpiration && input.couponExpiration > now ? 100 : 0;
   const offerAgeHours = Math.max(0, now.getTime() - input.collectedAt.getTime()) / 36e5;
   const noveltyComponent = clamp(100 - offerAgeHours * 4);
 
-  const total = Math.round(
-    discountComponent * weights.discount +
-      commissionComponent * weights.commission +
-      ratingComponent * weights.rating +
-      popularityComponent * weights.popularity +
-      freeShippingComponent * weights.freeShipping +
-      couponValidityComponent * weights.couponValidity +
-      noveltyComponent * weights.novelty,
+  if (input.discountPercentage !== null && input.discountPercentage !== undefined) {
+    available.push({ component: discountComponent, weight: weights.discount });
+  }
+
+  if (input.commissionPercentage !== null && input.commissionPercentage !== undefined) {
+    available.push({ component: commissionComponent, weight: weights.commission });
+  }
+
+  if (input.rating !== null && input.rating !== undefined) {
+    available.push({ component: ratingComponent, weight: weights.rating });
+  }
+
+  if (input.salesCount !== null && input.salesCount !== undefined) {
+    available.push({ component: popularityComponent, weight: weights.popularity });
+  }
+
+  if (normalizedShippingStatus !== "UNKNOWN") {
+    available.push({ component: freeShippingComponent, weight: weights.freeShipping });
+  }
+
+  if (input.couponExpiration !== null && input.couponExpiration !== undefined) {
+    available.push({ component: couponValidityComponent, weight: weights.couponValidity });
+  }
+
+  available.push({ component: noveltyComponent, weight: weights.novelty });
+
+  const totalWeight = Object.values(weights).reduce((sum, weight) => sum + weight, 0);
+  const availableWeight = available.reduce((sum, item) => sum + item.weight, 0);
+  const weightedScore = available.reduce(
+    (sum, item) => sum + item.component * item.weight,
+    0,
   );
+  const total = availableWeight > 0 ? Math.round(weightedScore / availableWeight) : 0;
+  const scoreCompletenessPercentage =
+    totalWeight > 0 ? Number(((availableWeight / totalWeight) * 100).toFixed(2)) : 0;
 
   return {
     total,
@@ -78,6 +120,7 @@ export function calculateOfferScore(
     freeShippingComponent,
     couponValidityComponent,
     noveltyComponent: Math.round(noveltyComponent),
+    scoreCompletenessPercentage,
     weights,
   };
 }

@@ -68,6 +68,18 @@ Status: implemented.
 - Preserved per-Offer AffiliateLink tracking so later Offer versions do not rewrite earlier tracking.
 - Added migration/backfill for existing Offers and Publications with documented limitations for already-corrupted historical rows.
 
+### Phase 2C Maintenance - Optional External Ingestion Fields
+
+Status: implemented.
+
+- Decoupled the manual form from the connector ingestion contract.
+- Defined minimum ingestion, valid-offer and publication data levels.
+- Allowed candidate Offers with missing enrichment fields such as original price, coupon, affiliate URL, image, commission, rating and sales count.
+- Added `READY_FOR_AFFILIATE_LINK` for valid offers that still need an official affiliate URL before publication.
+- Added tri-state shipping with `FREE`, `NOT_FREE` and `UNKNOWN`.
+- Updated scoring to normalize over available components and persist score completeness.
+- Updated deterministic and AI copy validation so missing facts are omitted instead of invented.
+
 ## Phase 3 - Marketplace Ingestion
 
 - Implement officially permitted Shopee and Mercado Livre collection adapters.

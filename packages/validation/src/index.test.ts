@@ -20,6 +20,21 @@ describe("validateOfferFacts", () => {
     expect(validateOfferFacts(baseOffer)).toEqual({ ok: true, normalizedDiscountPercentage: 20 });
   });
 
+  it("accepts missing original price and keeps discount unavailable", () => {
+    expect(
+      validateOfferFacts({
+        ...baseOffer,
+        imageUrl: undefined,
+        originalPrice: undefined,
+        discountPercentage: null,
+        couponCode: undefined,
+        couponExpiration: undefined,
+        shippingStatus: "UNKNOWN",
+        stockStatus: "UNKNOWN",
+      }),
+    ).toEqual({ ok: true, normalizedDiscountPercentage: null });
+  });
+
   it("rejects a discount that does not match internal calculation", () => {
     expect(validateOfferFacts({ ...baseOffer, discountPercentage: 25 })).toMatchObject({
       ok: false,
@@ -45,6 +60,13 @@ describe("calculateValidatedDiscount", () => {
     expect(calculateValidatedDiscount(200, 150)).toEqual({
       ok: true,
       discountPercentage: 25,
+    });
+  });
+
+  it("does not reject when original price is unavailable", () => {
+    expect(calculateValidatedDiscount(undefined, 150)).toEqual({
+      ok: true,
+      discountPercentage: null,
     });
   });
 

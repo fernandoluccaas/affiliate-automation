@@ -1,7 +1,11 @@
-import { marketplaces, stockStatuses } from "@affiliate/shared";
+import { marketplaces, shippingStatuses, stockStatuses } from "@affiliate/shared";
 import { z } from "zod";
 
 const optionalText = z.preprocess((value) => {
+  if (value === null || value === undefined) {
+    return undefined;
+  }
+
   if (typeof value !== "string") {
     return value;
   }
@@ -11,6 +15,10 @@ const optionalText = z.preprocess((value) => {
 }, z.string().optional());
 
 const optionalUrl = z.preprocess((value) => {
+  if (value === null || value === undefined) {
+    return undefined;
+  }
+
   if (typeof value !== "string") {
     return value;
   }
@@ -48,6 +56,14 @@ const optionalRating = z.preprocess((value) => {
   return value;
 }, z.coerce.number().min(0).max(5).optional());
 
+const optionalPrice = z.preprocess((value) => {
+  if (value === "" || value === null || value === undefined || Number.isNaN(value)) {
+    return undefined;
+  }
+
+  return value;
+}, z.coerce.number().positive("O preco original deve ser maior que zero.").optional());
+
 const optionalSalesCount = z.preprocess((value) => {
   if (value === "" || value === null || value === undefined) {
     return undefined;
@@ -65,15 +81,16 @@ export const offerFormSchema = z.object({
   imageUrl: optionalUrl,
   productUrl: z.string().trim().url("Informe uma URL valida do produto."),
   affiliateUrl: optionalUrl,
-  originalPrice: z.coerce.number().positive("O preco original deve ser maior que zero."),
+  originalPrice: optionalPrice,
   currentPrice: z.coerce.number().positive("O preco atual deve ser maior que zero."),
   couponCode: optionalText,
   couponExpiration: optionalDate,
   commissionPercentage: optionalPercentage,
   rating: optionalRating,
   salesCount: optionalSalesCount,
-  freeShipping: z.coerce.boolean().default(false),
-  stockStatus: z.enum(stockStatuses),
+  freeShipping: z.coerce.boolean().optional(),
+  shippingStatus: z.enum(shippingStatuses).default("UNKNOWN"),
+  stockStatus: z.enum(stockStatuses).default("UNKNOWN"),
 });
 
 export type OfferFormValues = z.infer<typeof offerFormSchema>;

@@ -26,6 +26,7 @@ enum OfferStatus {
   REJECTED_DUPLICATE
   REJECTED_LOW_SCORE
   QUARANTINED_INTEGRATION_ERROR
+  READY_FOR_AFFILIATE_LINK
   READY_TO_PUBLISH
   SCHEDULED
   PUBLISHED
@@ -35,6 +36,12 @@ enum OfferStatus {
 enum StockStatus {
   IN_STOCK
   OUT_OF_STOCK
+  UNKNOWN
+}
+
+enum ShippingStatus {
+  FREE
+  NOT_FREE
   UNKNOWN
 }
 
@@ -186,17 +193,19 @@ model Offer {
   imageUrl             String?
   productUrl           String
   affiliateUrl         String?
-  originalPrice        Decimal     @db.Decimal(12, 2)
+  originalPrice        Decimal?    @db.Decimal(12, 2)
   currentPrice         Decimal     @db.Decimal(12, 2)
-  discountPercentage   Decimal     @db.Decimal(5, 2)
+  discountPercentage   Decimal?    @db.Decimal(5, 2)
   couponCode           String?
   couponExpiration     DateTime?
   commissionPercentage Decimal?    @db.Decimal(5, 2)
   rating               Decimal?    @db.Decimal(3, 2)
   salesCount           Int?
   freeShipping         Boolean     @default(false)
+  shippingStatus       ShippingStatus @default(UNKNOWN)
   stockStatus          StockStatus @default(UNKNOWN)
   score                Int?
+  scoreCompletenessPercentage Decimal? @db.Decimal(5, 2)
   status               OfferStatus @default(PENDING_VALIDATION)
   statusReason         String?
   collectedAt          DateTime
@@ -260,6 +269,7 @@ model OfferScore {
   id                    String   @id @default(cuid())
   offerId               String
   total                 Int
+  completenessPercentage Decimal? @db.Decimal(5, 2)
   discountComponent     Int
   commissionComponent   Int
   ratingComponent       Int
@@ -296,12 +306,13 @@ model Publication {
   productExternalIdSnapshot String
   marketplaceSnapshot      Marketplace
   categorySnapshot         String?
-  originalPriceSnapshot    Decimal           @db.Decimal(12, 2)
+  originalPriceSnapshot    Decimal?          @db.Decimal(12, 2)
   currentPriceSnapshot     Decimal           @db.Decimal(12, 2)
-  discountPercentageSnapshot Decimal          @db.Decimal(5, 2)
+  discountPercentageSnapshot Decimal?         @db.Decimal(5, 2)
   couponCodeSnapshot       String?
   couponExpirationSnapshot DateTime?
   freeShippingSnapshot     Boolean
+  shippingStatusSnapshot   ShippingStatus     @default(UNKNOWN)
   affiliateUrlSnapshot     String?
   trackingUrlSnapshot      String
   offerVersionSnapshot     Int

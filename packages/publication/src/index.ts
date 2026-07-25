@@ -2,12 +2,13 @@ import type { Marketplace } from "@affiliate/shared";
 
 export type MessageOffer = {
   title: string;
-  originalPrice: number | string;
+  originalPrice?: number | string | null;
   currentPrice: number | string;
-  discountPercentage: number | string;
+  discountPercentage?: number | string | null;
   couponCode?: string | null;
   couponExpiration?: Date | string | null;
-  freeShipping: boolean;
+  freeShipping?: boolean | null;
+  shippingStatus?: "FREE" | "NOT_FREE" | "UNKNOWN" | string | null;
   marketplace: Marketplace | string;
   trackingUrl: string;
 };
@@ -31,7 +32,7 @@ export type OfferPolicyInput = {
   marketplace: string;
   category?: string | null;
   score?: number | null;
-  discountPercentage: number | string;
+  discountPercentage?: number | string | null;
 };
 
 export type PublicationWindowInput = {
@@ -56,15 +57,21 @@ export function escapeMessageText(value: string) {
 }
 
 export function deterministicMessageComposer(offer: MessageOffer) {
-  const lines = [
-    `🔥 ${escapeMessageText(offer.title)}`,
-    "",
-    `De ${formatBRLCurrency(offer.originalPrice)}`,
-    `Por ${formatBRLCurrency(offer.currentPrice)}`,
-    `💰 ${Number(offer.discountPercentage).toLocaleString("pt-BR", {
-      maximumFractionDigits: 2,
-    })}% de desconto`,
-  ];
+  const lines = [`ðŸ”¥ ${escapeMessageText(offer.title)}`, ""];
+
+  if (offer.originalPrice !== null && offer.originalPrice !== undefined) {
+    lines.push(`De ${formatBRLCurrency(offer.originalPrice)}`);
+  }
+
+  lines.push(`Por ${formatBRLCurrency(offer.currentPrice)}`);
+
+  if (offer.discountPercentage !== null && offer.discountPercentage !== undefined) {
+    lines.push(
+      `ðŸ’° ${Number(offer.discountPercentage).toLocaleString("pt-BR", {
+        maximumFractionDigits: 2,
+      })}% de desconto`,
+    );
+  }
 
   if (offer.couponCode) {
     const couponLine = offer.couponExpiration
@@ -76,11 +83,11 @@ export function deterministicMessageComposer(offer: MessageOffer) {
     lines.push("", couponLine);
   }
 
-  if (offer.freeShipping) {
+  if (offer.shippingStatus === "FREE" || offer.freeShipping === true) {
     lines.push("Frete gratis");
   }
 
-  lines.push("", "🛒 Confira:", offer.trackingUrl, "", "#publi - link de afiliado");
+  lines.push("", "ðŸ›’ Confira:", offer.trackingUrl, "", "#publi - link de afiliado");
 
   return lines.join("\n");
 }
@@ -164,12 +171,14 @@ export function isOfferCompatibleWithChannel(
     return { ok: false, reason: "Score abaixo do minimo do canal." };
   }
 
-  if (
-    channel.minimumDiscountPercentage !== null &&
-    channel.minimumDiscountPercentage !== undefined &&
-    Number(offer.discountPercentage) < Number(channel.minimumDiscountPercentage)
-  ) {
-    return { ok: false, reason: "Desconto abaixo do minimo do canal." };
+  if (channel.minimumDiscountPercentage !== null && channel.minimumDiscountPercentage !== undefined) {
+    if (offer.discountPercentage === null || offer.discountPercentage === undefined) {
+      return { ok: false, reason: "Desconto indisponivel para a politica do canal." };
+    }
+
+    if (Number(offer.discountPercentage) < Number(channel.minimumDiscountPercentage)) {
+      return { ok: false, reason: "Desconto abaixo do minimo do canal." };
+    }
   }
 
   return { ok: true };

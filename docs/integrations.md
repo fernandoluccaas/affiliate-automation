@@ -4,6 +4,10 @@
 
 Shopee and Mercado Livre connectors must use officially permitted APIs, exports or partner mechanisms. The system must not automate marketplace logins, bypass CAPTCHA or perform authenticated scraping without express authorization.
 
+Marketplace connectors should emit only confirmed facts. The minimum candidate fields are `marketplace`, `externalProductId`, `title`, `productUrl` and `currentPrice`. Enrichment fields such as description, category, image, original price, coupon, affiliate URL, commission, rating, sales count and shipping certainty are optional. Unknown shipping must be normalized as `UNKNOWN`, not `NOT_FREE`.
+
+If a connector cannot provide an affiliate URL yet, ingestion may persist a valid candidate as `READY_FOR_AFFILIATE_LINK`. The worker publishes only `READY_TO_PUBLISH` offers, so missing affiliate URLs are enrichment blockers rather than ingestion blockers.
+
 ## Publishers
 
 The publication layer uses a `PublisherAdapter` contract with:

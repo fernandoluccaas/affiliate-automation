@@ -8,6 +8,7 @@ export const offerStatuses = [
   "REJECTED_DUPLICATE",
   "REJECTED_LOW_SCORE",
   "QUARANTINED_INTEGRATION_ERROR",
+  "READY_FOR_AFFILIATE_LINK",
   "READY_TO_PUBLISH",
   "SCHEDULED",
   "PUBLISHED",
@@ -17,6 +18,9 @@ export type OfferStatus = (typeof offerStatuses)[number];
 
 export const stockStatuses = ["IN_STOCK", "OUT_OF_STOCK", "UNKNOWN"] as const;
 export type StockStatus = (typeof stockStatuses)[number];
+
+export const shippingStatuses = ["FREE", "NOT_FREE", "UNKNOWN"] as const;
+export type ShippingStatus = (typeof shippingStatuses)[number];
 
 export const channelTypes = [
   "TELEGRAM",

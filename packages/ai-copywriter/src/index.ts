@@ -26,19 +26,20 @@ export const messageGenerationInputSchema = z.object({
   title: z.string().trim().min(1),
   marketplace: z.string().trim().min(1),
   category: z.string().trim().optional().nullable(),
-  originalPrice: z.union([z.number(), z.string()]),
+  originalPrice: z.union([z.number(), z.string()]).optional().nullable(),
   currentPrice: z.union([z.number(), z.string()]),
-  discountPercentage: z.union([z.number(), z.string()]),
+  discountPercentage: z.union([z.number(), z.string()]).optional().nullable(),
   couponCode: z.string().trim().optional().nullable(),
   couponExpiration: z.union([z.date(), z.string()]).optional().nullable(),
-  freeShipping: z.boolean(),
+  freeShipping: z.boolean().optional().nullable(),
+  shippingStatus: z.enum(["FREE", "NOT_FREE", "UNKNOWN"]).default("UNKNOWN"),
   rating: z.union([z.number(), z.string()]).optional().nullable(),
   salesCount: z.number().int().optional().nullable(),
   trackingUrl: z.string().url(),
 });
 
 export type PromotionalCopy = z.infer<typeof promotionalCopySchema>;
-export type MessageGenerationInput = z.infer<typeof messageGenerationInputSchema>;
+export type MessageGenerationInput = z.input<typeof messageGenerationInputSchema>;
 export type MessageSource = "AI_GENERATED" | "DETERMINISTIC_FALLBACK";
 export type AiProviderName = "OLLAMA" | "OPENAI" | "DETERMINISTIC";
 
@@ -219,6 +220,14 @@ function dateSummary(value: Date | string | null | undefined) {
   }).format(new Date(value));
 }
 
+function optionalCurrency(value: number | string | null | undefined) {
+  return value === null || value === undefined ? null : formatBRLCurrency(value);
+}
+
+function optionalPercentage(value: number | string | null | undefined) {
+  return value === null || value === undefined ? null : `${normalizedNumber(asNumber(value))}%`;
+}
+
 function sanitizeBaseUrl(value: string) {
   return value.trim().replace(/\/+$/, "");
 }
@@ -268,12 +277,13 @@ export function buildPrompt(input: MessageGenerationInput) {
         title: input.title,
         marketplace: input.marketplace,
         category: input.category ?? null,
-        originalPrice: formatBRLCurrency(input.originalPrice),
+        originalPrice: optionalCurrency(input.originalPrice),
         currentPrice: formatBRLCurrency(input.currentPrice),
-        discountPercentage: `${normalizedNumber(asNumber(input.discountPercentage))}%`,
+        discountPercentage: optionalPercentage(input.discountPercentage),
         couponCode: input.couponCode ?? null,
         couponExpiration: dateSummary(input.couponExpiration),
-        freeShipping: input.freeShipping,
+        shippingStatus: input.shippingStatus ?? "UNKNOWN",
+        freeShipping: input.shippingStatus === "FREE" || input.freeShipping === true,
         rating: input.rating ?? null,
         salesCount: input.salesCount ?? null,
         trackingUrl: input.trackingUrl,
@@ -298,10 +308,11 @@ export class AiMessageValidator {
     const reasons: string[] = [];
     const text = allCopyText(parsed.data);
     const normalizedText = normalizeComparable(text);
-    const allowedPrices = new Set([
-      normalizeComparable(formatBRLCurrency(input.originalPrice)),
-      normalizeComparable(formatBRLCurrency(input.currentPrice)),
-    ]);
+    const allowedPrices = new Set([normalizeComparable(formatBRLCurrency(input.currentPrice))]);
+
+    if (input.originalPrice !== null && input.originalPrice !== undefined) {
+      allowedPrices.add(normalizeComparable(formatBRLCurrency(input.originalPrice)));
+    }
 
     const moneyMentions = text.match(/R\$\s*\d[\d.\s]*(?:,\d{2})?/g) ?? [];
     for (const mention of moneyMentions) {
@@ -310,13 +321,21 @@ export class AiMessageValidator {
       }
     }
 
-    const allowedDiscount = Math.round(asNumber(input.discountPercentage) * 100) / 100;
     const percentageMentions = text.match(/\d+(?:[,.]\d+)?\s*%/g) ?? [];
-    for (const mention of percentageMentions) {
-      const value = Number(mention.replace("%", "").replace(",", ".").trim());
 
-      if (Math.abs(value - allowedDiscount) > 0.01) {
-        reasons.push(`Desconto nao confirmado: ${mention}.`);
+    if (input.discountPercentage === null || input.discountPercentage === undefined) {
+      if (percentageMentions.length > 0) {
+        reasons.push("Desconto foi mencionado sem desconto confirmado.");
+      }
+    } else {
+      const allowedDiscount = Math.round(asNumber(input.discountPercentage) * 100) / 100;
+
+      for (const mention of percentageMentions) {
+        const value = Number(mention.replace("%", "").replace(",", ".").trim());
+
+        if (Math.abs(value - allowedDiscount) > 0.01) {
+          reasons.push(`Desconto nao confirmado: ${mention}.`);
+        }
       }
     }
 
@@ -346,7 +365,11 @@ export class AiMessageValidator {
       reasons.push("Cupom confirmado nao foi preservado.");
     }
 
-    if (!input.freeShipping && /(frete|envio)\s+gr[aá]tis/i.test(text)) {
+    if (
+      (input.shippingStatus ?? "UNKNOWN") !== "FREE" &&
+      input.freeShipping !== true &&
+      /(frete|envio)\s+gr[aá]tis/i.test(text)
+    ) {
       reasons.push("Frete gratis foi mencionado sem confirmacao.");
     }
 

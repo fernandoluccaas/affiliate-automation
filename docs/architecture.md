@@ -6,7 +6,9 @@ Affiliate Automation is a production-oriented monorepo that separates user-facin
 
 Shopee and Mercado Livre integrations feed marketplace connectors. Connectors normalize external data into internal products, offers, coupons and affiliate links. Offers are persisted in PostgreSQL, validated deterministically, deduplicated, scored, associated with affiliate links, prepared by the AI copywriter, scheduled, published through channel adapters and measured through tracking and conversion imports.
 
-Phase 2A adds a manual offer pipeline before real marketplace connectors. An administrator can create an offer in `/ofertas/nova`; `ingestOffer` calculates the discount, upserts the product identity, creates or reuses a versioned offer snapshot by fingerprint in a transaction, validates facts with Zod and deterministic rules, calculates and persists an auditable score, creates a tracking slug for that Offer and sets the final offer status automatically.
+Phase 2A adds a manual offer pipeline before real marketplace connectors. An administrator can create an offer in `/ofertas/nova`; `ingestOffer` calculates the discount when possible, upserts the product identity, creates or reuses a versioned offer snapshot by fingerprint in a transaction, validates facts with Zod and deterministic rules, calculates and persists an auditable score, creates a tracking slug when an affiliate URL exists and sets the final offer status automatically.
+
+The ingestion boundary now separates candidate identity from enrichment. `marketplace`, `externalProductId`, `title`, `productUrl` and `currentPrice` are the minimum fields required to create an Offer candidate. Description, category, image, original price, discount, coupon, affiliate URL, commission, rating, sales count and shipping certainty are optional inputs. Missing facts remain `null` or `UNKNOWN`; they are not coerced to zero or false.
 
 Phase 2B adds the publication and tracking loop. The worker selects active compatible channels for `READY_TO_PUBLISH` offers, creates idempotent `Publication` rows with deterministic message payloads, publishes scheduled rows through Telegram or manual export adapters, records `PublicationAttempt`, and updates publication status. `/go/[slug]` is public and records clicks before redirecting to the affiliate destination.
 
@@ -28,6 +30,8 @@ Historical pages must read publication snapshots for published content. They mus
 - `apps/worker`: worker entrypoint for Railway jobs, marketplace imports and automation runs.
 
 The dashboard uses a reusable administrative shell with real navigation for dashboard, offers, products, coupons, channels, integrations, publications, automations, settings and logs. Pages that are not fully implemented show empty states and do not fabricate operational data.
+
+Scoring does not treat unavailable enrichment as zero. It computes the final score from available component weights and persists a separate completeness percentage so publication policy can distinguish a strong sparse candidate from a fully enriched candidate.
 
 ## Packages
 
@@ -54,7 +58,7 @@ Redis selection is server-only: Upstash is used when `UPSTASH_REDIS_REST_URL` an
 
 The selected AI provider receives only confirmed offer facts: title, marketplace, category, prices, discount, coupon, shipping flag, rating, sales count and tracking URL. AI output uses Structured Outputs with `headline`, `body`, `callToAction`, `disclosure` and `hashtags`.
 
-The deterministic validator rejects generated copy that changes prices, discount, coupon, shipping status, affiliate disclosure or tracking URL, or that adds unsupported urgency/promises. Rejected, timed out, errored, disabled or unconfigured AI generation falls back to `deterministicMessageComposer`. Publication adapters consume the same saved payload regardless of provider.
+The selected AI provider receives only confirmed offer facts. Optional values that are unavailable are passed as unavailable, not as zero. The deterministic validator rejects generated copy that changes prices, discount, coupon, shipping status, affiliate disclosure or tracking URL, or that adds unsupported urgency/promises. Rejected, timed out, errored, disabled or unconfigured AI generation falls back to `deterministicMessageComposer`, which omits coupon, discount, original price and free-shipping lines when those facts are missing. Publication adapters consume the same saved payload regardless of provider.
 
 ## Security Boundary
 

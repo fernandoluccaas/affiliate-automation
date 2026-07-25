@@ -72,11 +72,15 @@ export default async function PublicationsPage() {
                     <td className="px-4 py-3">
                       <div>{formatCurrency(publication.currentPriceSnapshot)}</div>
                       <div className="text-xs text-[var(--muted-foreground)]">
-                        De {formatCurrency(publication.originalPriceSnapshot)}
+                        {publication.originalPriceSnapshot
+                          ? `De ${formatCurrency(publication.originalPriceSnapshot)}`
+                          : "Preco original indisponivel"}
                       </div>
                     </td>
                     <td className="px-4 py-3">
-                      {formatPercentage(publication.discountPercentageSnapshot)}%
+                      {publication.discountPercentageSnapshot === null
+                        ? "-"
+                        : `${formatPercentage(publication.discountPercentageSnapshot)}%`}
                     </td>
                     <td className="px-4 py-3">
                       {publication.couponCodeSnapshot ?? "-"}
@@ -87,7 +91,11 @@ export default async function PublicationsPage() {
                       ) : null}
                       {publication.freeShippingSnapshot ? (
                         <div className="text-xs text-[var(--muted-foreground)]">Frete gratis</div>
-                      ) : null}
+                      ) : (
+                        <div className="text-xs text-[var(--muted-foreground)]">
+                          Frete {publication.shippingStatusSnapshot}
+                        </div>
+                      )}
                     </td>
                     <td className="px-4 py-3">
                       {publication.channel.name} ({publication.channel.type})

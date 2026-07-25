@@ -72,6 +72,8 @@ export default async function OffersPage({ searchParams }: OffersPageProps) {
         currentPrice: true,
         discountPercentage: true,
         score: true,
+        scoreCompletenessPercentage: true,
+        shippingStatus: true,
         stockStatus: true,
         couponCode: true,
         collectedAt: true,
@@ -166,13 +168,23 @@ export default async function OffersPage({ searchParams }: OffersPageProps) {
                   <td className="px-4 py-3">
                     <div>{formatCurrency(offer.currentPrice)}</div>
                     <div className="text-xs text-[var(--muted-foreground)]">
-                      De {formatCurrency(offer.originalPrice)}
+                      {offer.originalPrice ? `De ${formatCurrency(offer.originalPrice)}` : "Preco original indisponivel"}
                     </div>
                   </td>
-                  <td className="px-4 py-3">{formatPercentage(offer.discountPercentage)}%</td>
-                  <td className="px-4 py-3">{offer.score ?? "-"}</td>
+                  <td className="px-4 py-3">
+                    {offer.discountPercentage === null ? "-" : `${formatPercentage(offer.discountPercentage)}%`}
+                  </td>
+                  <td className="px-4 py-3">
+                    {offer.score ?? "-"}
+                    {offer.scoreCompletenessPercentage !== null ? (
+                      <div className="text-xs text-[var(--muted-foreground)]">
+                        {formatPercentage(offer.scoreCompletenessPercentage)}% completude
+                      </div>
+                    ) : null}
+                  </td>
                   <td className="px-4 py-3">
                     {stockStatuses.includes(offer.stockStatus) ? offer.stockStatus : "-"}
+                    <div className="text-xs text-[var(--muted-foreground)]">{offer.shippingStatus}</div>
                   </td>
                   <td className="px-4 py-3">{offer.couponCode ?? "-"}</td>
                   <td className="px-4 py-3">{formatDateTime(offer.collectedAt)}</td>

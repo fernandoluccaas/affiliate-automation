@@ -26,12 +26,14 @@ APP_BASE_URL="http://localhost:3000"
 Phase 2A supports manual offer ingestion:
 
 1. Open `/ofertas/nova`.
-2. Fill the marketplace, product data, prices, coupon and commercial fields.
+2. Fill the required candidate fields: marketplace, external product ID, title, product URL and current price.
 3. Submit the form.
-4. The system calculates the discount internally.
-5. `ingestOffer` validates facts, calculates score, persists `OfferScore`, creates an affiliate slug for that Offer version and sets the final status.
+4. The system calculates the discount internally when original price is available.
+5. `ingestOffer` validates facts, calculates score, persists `OfferScore`, creates an affiliate slug when an affiliate URL exists and sets the final status.
 
-Valid offers above the minimum score become `READY_TO_PUBLISH`. Invalid, expired, duplicate or low-score offers are rejected with a deterministic reason.
+External integrations are not required to provide every enrichment field that the manual form exposes. Description, category, image, original price, coupon, affiliate URL, commission, rating, sales count and shipping certainty can be missing. Missing values are stored as `null` or `UNKNOWN`, not as zero or false facts.
+
+Valid offers above the minimum score become `READY_TO_PUBLISH`. Offers without an affiliate URL can be persisted as `READY_FOR_AFFILIATE_LINK` so they can be enriched later, but the worker does not publish them. Invalid, expired, duplicate or low-score offers are rejected with a deterministic reason.
 
 Product, Offer and Publication are intentionally separate:
 
@@ -40,6 +42,8 @@ Product, Offer and Publication are intentionally separate:
 - `Publication`: immutable snapshot of what was scheduled/sent to a channel.
 
 Example: the same `Product` can have `Offer v1` at `R$ 329,90` and later `Offer v2` at `R$ 245,90`. Publishing v2 never rewrites the historical publication for v1.
+
+Scoring normalizes over the components that are actually available and stores `scoreCompletenessPercentage`. A missing rating, sales count, commission, discount or shipping certainty is not treated as zero.
 
 ## Publication Flow
 

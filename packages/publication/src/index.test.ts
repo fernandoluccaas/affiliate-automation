@@ -47,14 +47,17 @@ describe("deterministicMessageComposer", () => {
   it("omits optional lines when facts are absent", () => {
     const message = deterministicMessageComposer({
       title: "Sem opcionais",
-      originalPrice: 100,
       currentPrice: 80,
-      discountPercentage: 20,
-      freeShipping: false,
+      originalPrice: null,
+      discountPercentage: null,
+      freeShipping: null,
+      shippingStatus: "UNKNOWN",
       marketplace: "SHOPEE",
       trackingUrl: "https://example.com/go/slug",
     });
 
+    expect(message).not.toContain("De ");
+    expect(message).not.toContain("% de desconto");
     expect(message).not.toContain("Cupom");
     expect(message).not.toContain("Frete gratis");
   });
@@ -89,6 +92,12 @@ describe("channel policy", () => {
         channel,
       ),
     ).toMatchObject({ ok: false });
+    expect(
+      isOfferCompatibleWithChannel(
+        { marketplace: "SHOPEE", category: "Casa", score: 90, discountPercentage: null },
+        channel,
+      ),
+    ).toMatchObject({ ok: false, reason: "Desconto indisponivel para a politica do canal." });
     expect(
       isOfferCompatibleWithChannel(
         { marketplace: "SHOPEE", category: "Casa", score: 90, discountPercentage: 20 },

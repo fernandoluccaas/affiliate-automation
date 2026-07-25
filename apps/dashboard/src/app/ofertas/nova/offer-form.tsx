@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useMemo, useState, useTransition } from "react";
 import { useForm } from "react-hook-form";
 import { ArrowLeft, Save } from "lucide-react";
-import { marketplaces, stockStatuses } from "@affiliate/shared";
+import { marketplaces, shippingStatuses, stockStatuses } from "@affiliate/shared";
 import { createManualOfferAction, type CreateOfferState } from "@/lib/actions";
 import { offerFormSchema, type OfferFormValues } from "@/lib/offer-form-schema";
 import { Button } from "@/components/ui/button";
@@ -23,15 +23,16 @@ const defaultValues: OfferFormValues = {
   imageUrl: undefined,
   productUrl: "",
   affiliateUrl: undefined,
-  originalPrice: 0,
+  originalPrice: undefined,
   currentPrice: 0,
   couponCode: undefined,
   couponExpiration: undefined,
   commissionPercentage: undefined,
   rating: undefined,
   salesCount: undefined,
-  freeShipping: false,
-  stockStatus: "IN_STOCK",
+  freeShipping: undefined,
+  shippingStatus: "UNKNOWN",
+  stockStatus: "UNKNOWN",
 };
 
 export function OfferForm() {
@@ -84,7 +85,7 @@ export function OfferForm() {
           <CardTitle>Dados do produto</CardTitle>
         </CardHeader>
         <CardContent className="grid gap-4 md:grid-cols-2">
-          <Field label="Marketplace" error={errors.marketplace?.message}>
+          <Field label="Marketplace" required error={errors.marketplace?.message}>
             <Select {...register("marketplace")}>
               {marketplaces.map((marketplace) => (
                 <option key={marketplace} value={marketplace}>
@@ -93,14 +94,14 @@ export function OfferForm() {
               ))}
             </Select>
           </Field>
-          <Field label="ID externo" error={errors.externalProductId?.message}>
+          <Field label="ID externo" required error={errors.externalProductId?.message}>
             <Input {...register("externalProductId")} />
             <p className="text-xs text-[var(--muted-foreground)]">
               Identificador unico do produto dentro do marketplace. Utilize o mesmo ID somente
               quando se tratar realmente do mesmo produto.
             </p>
           </Field>
-          <Field label="Titulo" error={errors.title?.message}>
+          <Field label="Titulo" required error={errors.title?.message}>
             <Input {...register("title")} />
           </Field>
           <Field label="Categoria" error={errors.category?.message}>
@@ -112,7 +113,7 @@ export function OfferForm() {
           <Field label="Imagem" error={errors.imageUrl?.message}>
             <Input {...register("imageUrl")} type="url" />
           </Field>
-          <Field label="URL do produto" error={errors.productUrl?.message}>
+          <Field label="URL do produto" required error={errors.productUrl?.message}>
             <Input {...register("productUrl")} type="url" />
           </Field>
           <Field label="URL afiliada" error={errors.affiliateUrl?.message}>
@@ -138,7 +139,7 @@ export function OfferForm() {
           <Field label="Preco original" error={errors.originalPrice?.message}>
             <Input {...register("originalPrice", { valueAsNumber: true })} min="0" step="0.01" type="number" />
           </Field>
-          <Field label="Preco atual" error={errors.currentPrice?.message}>
+          <Field label="Preco atual" required error={errors.currentPrice?.message}>
             <Input {...register("currentPrice", { valueAsNumber: true })} min="0" step="0.01" type="number" />
           </Field>
           <div className="rounded-md border bg-[var(--background)] px-3 py-2">
@@ -162,10 +163,15 @@ export function OfferForm() {
           <Field label="Vendas" error={errors.salesCount?.message}>
             <Input {...register("salesCount", { valueAsNumber: true })} min="0" step="1" type="number" />
           </Field>
-          <label className="flex h-10 items-center gap-2 self-end text-sm font-medium">
-            <input {...register("freeShipping")} type="checkbox" className="h-4 w-4" />
-            Frete gratis
-          </label>
+          <Field label="Frete" error={errors.shippingStatus?.message}>
+            <Select {...register("shippingStatus")}>
+              {shippingStatuses.map((status) => (
+                <option key={status} value={status}>
+                  {status}
+                </option>
+              ))}
+            </Select>
+          </Field>
         </CardContent>
       </Card>
 
@@ -199,15 +205,21 @@ export function OfferForm() {
 
 type FieldProps = {
   label: string;
+  required?: boolean;
   error?: string | undefined;
   className?: string | undefined;
   children: React.ReactNode;
 };
 
-function Field({ label, error, className, children }: FieldProps) {
+function Field({ label, required = false, error, className, children }: FieldProps) {
   return (
     <div className={`grid gap-2 ${className ?? ""}`}>
-      <Label>{label}</Label>
+      <Label>
+        {label}{" "}
+        <span className="text-xs font-normal text-[var(--muted-foreground)]">
+          {required ? "Obrigatorio" : "Opcional"}
+        </span>
+      </Label>
       {children}
       {error ? <p className="text-sm text-[var(--destructive)]">{error}</p> : null}
     </div>

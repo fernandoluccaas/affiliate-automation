@@ -1,4 +1,8 @@
 export function formatCurrency(value: unknown) {
+  if (value === null || value === undefined) {
+    return "-";
+  }
+
   const amount = Number(value ?? 0);
 
   return new Intl.NumberFormat("pt-BR", {
@@ -8,6 +12,10 @@ export function formatCurrency(value: unknown) {
 }
 
 export function formatPercentage(value: unknown) {
+  if (value === null || value === undefined) {
+    return "-";
+  }
+
   const amount = Number(value ?? 0);
 
   return new Intl.NumberFormat("pt-BR", {

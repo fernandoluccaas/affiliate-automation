@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { Marketplace, OfferStatus, Prisma, StockStatus } from "@affiliate/database";
+import type { Marketplace, OfferStatus, Prisma, ShippingStatus, StockStatus } from "@affiliate/database";
 import { createOfferFingerprint, ingestOfferInTransaction } from "./offer-ingest";
 import type { OfferFormValues } from "./offer-form-schema";
 
@@ -19,18 +19,26 @@ type OfferRecord = {
   version: number;
   offerFingerprint: string;
   title: string;
+  description: string | null;
+  category: string | null;
+  imageUrl: string | null;
   productUrl: string;
   affiliateUrl: string | null;
-  originalPrice: number;
+  originalPrice: number | null;
   currentPrice: number;
-  discountPercentage: number;
+  discountPercentage: number | null;
   couponCode: string | null;
   couponExpiration: Date | null;
+  commissionPercentage: number | null;
+  rating: number | null;
+  salesCount: number | null;
   freeShipping: boolean;
+  shippingStatus: ShippingStatus;
   stockStatus: StockStatus;
   status: OfferStatus;
   statusReason: string | null;
   score: number | null;
+  scoreCompletenessPercentage: number | null;
 };
 
 type AffiliateLinkRecord = {
@@ -68,9 +76,10 @@ function validOffer(overrides: Partial<OfferFormValues> = {}): OfferFormValues {
     commissionPercentage: 20,
     rating: 5,
     salesCount: 100000,
-    freeShipping: true,
-    stockStatus: "IN_STOCK",
     ...overrides,
+    freeShipping: overrides.freeShipping ?? (overrides.shippingStatus ?? "FREE") === "FREE",
+    shippingStatus: overrides.shippingStatus ?? "FREE",
+    stockStatus: overrides.stockStatus ?? "IN_STOCK",
   };
 }
 
@@ -151,12 +160,15 @@ class FakeTransaction {
 
       return null;
     },
-    create: async (args: { data: Omit<OfferRecord, "id" | "statusReason" | "score"> }) => {
+    create: async (args: {
+      data: Omit<OfferRecord, "id" | "statusReason" | "score" | "scoreCompletenessPercentage">;
+    }) => {
       const offer = {
         ...args.data,
         id: `offer-${this.offers.length + 1}`,
         statusReason: null,
         score: null,
+        scoreCompletenessPercentage: null,
       };
       this.offers.push(offer);
       return offer;
@@ -357,6 +369,81 @@ describe("ingestOfferInTransaction", () => {
     expect(tx.affiliateLinks[1]?.destination).toBe("https://example.com/affiliate-v2");
   });
 
+  it("persists an offer without original price and leaves discount unavailable", async () => {
+    const tx = new FakeTransaction();
+    const result = await ingestWithFake(
+      tx,
+      validOffer({
+        originalPrice: undefined,
+        couponCode: undefined,
+        couponExpiration: undefined,
+      }),
+    );
+
+    expect(result.status).toBe("READY_TO_PUBLISH");
+    expect(result.discountPercentage).toBeNull();
+    expect(tx.offers[0]?.originalPrice).toBeNull();
+    expect(tx.offers[0]?.discountPercentage).toBeNull();
+    expect(tx.offerScores[0]?.completenessPercentage).toBeLessThan(100);
+  });
+
+  it("accepts missing coupon without creating coupon records", async () => {
+    const tx = new FakeTransaction();
+    const result = await ingestWithFake(
+      tx,
+      validOffer({
+        couponCode: undefined,
+        couponExpiration: undefined,
+      }),
+    );
+
+    expect(result.status).toBe("READY_TO_PUBLISH");
+    expect(tx.coupons).toHaveLength(0);
+    expect(tx.offers[0]?.couponCode).toBeNull();
+  });
+
+  it("keeps a valid Mercado Livre offer waiting for an affiliate link", async () => {
+    const tx = new FakeTransaction();
+    const result = await ingestWithFake(
+      tx,
+      validOffer({
+        marketplace: "MERCADO_LIVRE",
+        affiliateUrl: undefined,
+      }),
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      status: "READY_FOR_AFFILIATE_LINK",
+    });
+    expect(tx.affiliateLinks).toHaveLength(0);
+    expect(tx.offers[0]?.affiliateUrl).toBeNull();
+  });
+
+  it("accepts missing image and sparse enrichment fields as null", async () => {
+    const tx = new FakeTransaction();
+    const result = await ingestWithFake(
+      tx,
+      validOffer({
+        imageUrl: undefined,
+        commissionPercentage: undefined,
+        rating: undefined,
+        salesCount: undefined,
+        shippingStatus: "UNKNOWN",
+        freeShipping: undefined,
+        stockStatus: "UNKNOWN",
+      }),
+    );
+
+    expect(result.status).toBe("READY_TO_PUBLISH");
+    expect(tx.offers[0]?.commissionPercentage).toBeNull();
+    expect(tx.offers[0]?.rating).toBeNull();
+    expect(tx.offers[0]?.salesCount).toBeNull();
+    expect(tx.offers[0]?.shippingStatus).toBe("UNKNOWN");
+    expect(tx.offers[0]?.freeShipping).toBe(false);
+    expect(result.scoreCompletenessPercentage).toBeLessThan(100);
+  });
+
   it("rejects an offer with invalid prices", async () => {
     const tx = new FakeTransaction();
     const result = await ingestWithFake(tx, validOffer({ currentPrice: 120 }));
@@ -393,7 +480,7 @@ describe("createOfferFingerprint", () => {
       couponCode: " PROMO10 ",
       couponExpiration: "2026-01-02T00:00:00.000Z",
       affiliateUrl: "HTTPS://Example.com/Affiliate/",
-      freeShipping: true,
+      shippingStatus: "FREE",
       stockStatus: "IN_STOCK",
     });
     const second = createOfferFingerprint({
@@ -403,7 +490,7 @@ describe("createOfferFingerprint", () => {
       couponCode: "promo10",
       couponExpiration: new Date("2026-01-02T00:00:00.000Z"),
       affiliateUrl: "https://example.com/Affiliate",
-      freeShipping: true,
+      shippingStatus: "FREE",
       stockStatus: "IN_STOCK",
     });
 
