@@ -24,6 +24,11 @@ type OfferRecord = {
   imageUrl: string | null;
   productUrl: string;
   affiliateUrl: string | null;
+  affiliateLabel: string | null;
+  affiliateEligibility: "ELIGIBLE" | "INELIGIBLE" | "UNKNOWN";
+  sellerId: string | null;
+  officialStoreId: string | null;
+  trackingStrategy: "INTERNAL_REDIRECT" | "DIRECT_AFFILIATE_LINK";
   originalPrice: number | null;
   currentPrice: number;
   discountPercentage: number | null;
@@ -69,6 +74,7 @@ function validOffer(overrides: Partial<OfferFormValues> = {}): OfferFormValues {
     imageUrl: "https://example.com/image.jpg",
     productUrl: "https://example.com/product",
     affiliateUrl: "https://example.com/affiliate",
+    affiliateEligibility: "UNKNOWN",
     originalPrice: 100,
     currentPrice: 40,
     couponCode: "PROMO10",

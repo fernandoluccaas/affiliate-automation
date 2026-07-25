@@ -2,12 +2,14 @@
 
 import { Prisma, prisma } from "@affiliate/database";
 import { MessageGenerationService, OllamaAiProvider, OpenAiProvider } from "@affiliate/ai-copywriter";
+import { createMercadoLivreConnector } from "@affiliate/marketplace-connectors";
 import bcrypt from "bcryptjs";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
 import { TelegramPublisher } from "@affiliate/publisher-connectors";
 import { createSession, destroySession } from "./session";
+import { collectMercadoLivreCandidates } from "./mercado-livre-sync";
 import { ingestOffer } from "./offer-ingest";
 import { formatOfferFormError, offerFormSchema, type OfferFormInput } from "./offer-form-schema";
 
@@ -100,6 +102,28 @@ const channelSchema = z.object({
   allowedMarketplaces: z.string().optional(),
   allowedCategories: z.string().optional(),
   telegramChatId: z.string().optional(),
+});
+
+const mercadoLivreConfigSchema = z.object({
+  enabled: z.boolean(),
+  siteId: z.string().trim().min(1, "Informe o site ID."),
+  categoryIds: z.string().optional(),
+  bestSellersEnabled: z.boolean(),
+  minimumPrice: z.preprocess((value) => (value === "" ? undefined : value), z.coerce.number().positive().optional()),
+  maximumPrice: z.preprocess((value) => (value === "" ? undefined : value), z.coerce.number().positive().optional()),
+  minimumDiscountPercentage: z.preprocess(
+    (value) => (value === "" ? undefined : value),
+    z.coerce.number().min(0).max(100).optional(),
+  ),
+  minimumScore: z.coerce.number().int().min(0).max(100),
+  maxCandidatesPerCategory: z.coerce.number().int().min(1).max(20),
+  refreshIntervalMinutes: z.coerce.number().int().min(15),
+});
+
+const affiliateLinkSchema = z.object({
+  offerId: z.string().min(1),
+  affiliateUrl: z.string().trim().url("Informe uma URL afiliada valida."),
+  affiliateLabel: z.string().trim().optional(),
 });
 
 function stringList(value?: string) {
@@ -224,6 +248,10 @@ export async function testTelegramChannelAction(formData: FormData) {
   redirect(`/canais?message=${ok ? "telegram-ok" : "telegram-failed"}`);
 }
 
+function decimalToString(value: Prisma.Decimal | null) {
+  return value === null ? undefined : value.toString();
+}
+
 export async function testOpenAiCopyAction() {
   let service: MessageGenerationService;
 
@@ -287,6 +315,130 @@ export async function testOllamaCopyAction() {
         : "ollama-fallback"
     }`,
   );
+}
+
+export async function saveMercadoLivreConfigAction(formData: FormData) {
+  const parsed = mercadoLivreConfigSchema.safeParse({
+    enabled: formData.get("enabled") === "on",
+    siteId: formData.get("siteId")?.toString(),
+    categoryIds: formData.get("categoryIds")?.toString(),
+    bestSellersEnabled: formData.get("bestSellersEnabled") === "on",
+    minimumPrice: formData.get("minimumPrice"),
+    maximumPrice: formData.get("maximumPrice"),
+    minimumDiscountPercentage: formData.get("minimumDiscountPercentage"),
+    minimumScore: formData.get("minimumScore"),
+    maxCandidatesPerCategory: formData.get("maxCandidatesPerCategory"),
+    refreshIntervalMinutes: formData.get("refreshIntervalMinutes"),
+  });
+
+  if (!parsed.success) {
+    redirect("/integracoes/mercado-livre?message=config-invalid");
+  }
+
+  const data = parsed.data;
+  const existing = await prisma.mercadoLivreDiscoveryConfig.findFirst({ select: { id: true } });
+
+  const payload = {
+    enabled: data.enabled,
+    siteId: data.siteId,
+    categoryIds: stringList(data.categoryIds),
+    bestSellersEnabled: data.bestSellersEnabled,
+    minimumPrice: data.minimumPrice ?? null,
+    maximumPrice: data.maximumPrice ?? null,
+    minimumDiscountPercentage: data.minimumDiscountPercentage ?? null,
+    minimumScore: data.minimumScore,
+    maxCandidatesPerCategory: data.maxCandidatesPerCategory,
+    refreshIntervalMinutes: data.refreshIntervalMinutes,
+  };
+
+  if (existing) {
+    await prisma.mercadoLivreDiscoveryConfig.update({ where: { id: existing.id }, data: payload });
+  } else {
+    await prisma.mercadoLivreDiscoveryConfig.create({ data: payload });
+  }
+
+  revalidatePath("/integracoes");
+  revalidatePath("/integracoes/mercado-livre");
+  redirect("/integracoes/mercado-livre?message=config-saved");
+}
+
+export async function testMercadoLivreIntegrationAction() {
+  try {
+    const connector = await createMercadoLivreConnector();
+    const available = await connector.healthCheck();
+    redirect(`/integracoes?message=${available ? "meli-ok" : "meli-unavailable"}`);
+  } catch {
+    redirect("/integracoes?message=meli-unavailable");
+  }
+}
+
+export async function syncMercadoLivreNowAction() {
+  try {
+    await collectMercadoLivreCandidates(new Date(), { force: true });
+    revalidatePath("/integracoes");
+    revalidatePath("/integracoes/mercado-livre");
+    revalidatePath("/ofertas");
+    redirect("/integracoes/mercado-livre?message=sync-ok");
+  } catch {
+    redirect("/integracoes/mercado-livre?message=sync-failed");
+  }
+}
+
+export async function saveMercadoLivreAffiliateUrlAction(formData: FormData) {
+  const parsed = affiliateLinkSchema.safeParse({
+    offerId: formData.get("offerId")?.toString(),
+    affiliateUrl: formData.get("affiliateUrl")?.toString(),
+    affiliateLabel: formData.get("affiliateLabel")?.toString(),
+  });
+
+  if (!parsed.success) {
+    redirect("/ofertas/affiliate-links?message=invalid");
+  }
+
+  const offer = await prisma.offer.findUnique({ where: { id: parsed.data.offerId } });
+
+  if (!offer || offer.marketplace !== "MERCADO_LIVRE") {
+    redirect("/ofertas/affiliate-links?message=not-found");
+  }
+
+  const result = await ingestOffer({
+    marketplace: offer.marketplace,
+    externalProductId: offer.externalProductId,
+    title: offer.title,
+    description: offer.description ?? undefined,
+    category: offer.category ?? undefined,
+    imageUrl: offer.imageUrl ?? undefined,
+    productUrl: offer.productUrl,
+    affiliateUrl: parsed.data.affiliateUrl,
+    affiliateLabel: parsed.data.affiliateLabel,
+    affiliateEligibility: offer.affiliateEligibility,
+    sellerId: offer.sellerId ?? undefined,
+    officialStoreId: offer.officialStoreId ?? undefined,
+    trackingStrategy: "DIRECT_AFFILIATE_LINK",
+    originalPrice: decimalToString(offer.originalPrice),
+    currentPrice: offer.currentPrice.toString(),
+    couponCode: offer.couponCode ?? undefined,
+    couponExpiration: offer.couponExpiration ?? undefined,
+    commissionPercentage: decimalToString(offer.commissionPercentage),
+    rating: decimalToString(offer.rating),
+    salesCount: offer.salesCount ?? undefined,
+    shippingStatus: offer.shippingStatus,
+    stockStatus: offer.stockStatus,
+  });
+
+  if (result.ok && result.offerId !== offer.id) {
+    await prisma.offer.update({
+      where: { id: offer.id },
+      data: {
+        status: "REJECTED_DUPLICATE",
+        statusReason: "Substituida por versao validada com link oficial de afiliado.",
+      },
+    });
+  }
+
+  revalidatePath("/ofertas");
+  revalidatePath("/ofertas/affiliate-links");
+  redirect(`/ofertas/affiliate-links?message=${result.ok ? "saved" : "failed"}`);
 }
 
 export async function acknowledgeAlertAction(formData: FormData) {

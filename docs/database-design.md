@@ -15,6 +15,7 @@ PostgreSQL is the source of truth. Prisma owns schema evolution.
 - `Publication` and `PublicationAttempt`: scheduling, publishing and retry history.
 - `Click`, `Conversion`, `Commission`: attribution and revenue measurement.
 - `ImportJob`, `AutomationRun`, `SystemAlert`, `SystemSetting`: operations and observability.
+- `MercadoLivreDiscoveryConfig`: persisted Mercado Livre discovery settings and last run summary.
 
 ## Monetary Values
 
@@ -61,6 +62,8 @@ Offers default to `PENDING_VALIDATION`. The manual ingestion service then sets o
 - `REJECTED_LOW_SCORE`: valid facts with score below the minimum.
 
 `Offer.statusReason` stores the deterministic reason shown in the operational panel. `OfferScore` keeps each scoring component, the weights used for auditability and `completenessPercentage`.
+
+Mercado Livre adds operational fields to `Offer`: `affiliateEligibility`, `affiliateLabel`, `sellerId`, `officialStoreId` and `trackingStrategy`. `TrackingStrategy.INTERNAL_REDIRECT` keeps the existing `/go/[slug]` flow. `TrackingStrategy.DIRECT_AFFILIATE_LINK` is used for Mercado Livre so the worker sends the official affiliate URL directly and does not create an internal `AffiliateLink` slug.
 
 Shipping uses `ShippingStatus` with `FREE`, `NOT_FREE` and `UNKNOWN`. A missing shipping field from an external API is `UNKNOWN`, not `NOT_FREE`. `freeShipping` remains as a compatibility boolean derived from `shippingStatus === FREE`.
 
@@ -115,3 +118,20 @@ Phase 2C stores copy-generation metadata directly on `Publication`:
 - `generatedAt`: timestamp when message generation ran.
 
 The published/exported text remains in `messagePayload`. These fields do not store prompts, API keys or raw provider responses.
+
+## Mercado Livre Integration State
+
+`MarketplaceAccount` stores Mercado Livre OAuth state:
+
+- `externalUserId`
+- `accessTokenEncrypted`
+- `refreshTokenEncrypted`
+- `expiresAt`
+- `scopes`
+- `status`: `CONNECTED`, `DISCONNECTED`, `REAUTH_REQUIRED` or `ERROR`
+- `siteId`
+- `lastRefreshAt`, `lastSyncAt`, `lastErrorAt`, `lastError`
+
+Tokens are encrypted at rest and never sent to the browser. Refresh tokens are rotated on successful refresh.
+
+`MercadoLivreDiscoveryConfig` stores `enabled`, `siteId`, `categoryIds`, `bestSellersEnabled`, price filters, minimum discount, minimum score, max candidates per category, refresh interval, last run timestamp and last run metrics.

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Channel, Offer, Prisma } from "@affiliate/database";
-import { createPublicationIdempotently, scheduleReadyOffers } from "./index";
+import { createPublicationIdempotently, resolvePublicationUrl, scheduleReadyOffers } from "./index";
 
 vi.mock("@affiliate/database", async () => {
   const actual = await vi.importActual<typeof import("@affiliate/database")>("@affiliate/database");
@@ -29,6 +29,39 @@ vi.mock("@affiliate/redis", () => ({
 }));
 
 describe("createPublicationIdempotently", () => {
+  it("uses direct affiliate URL for Mercado Livre offers", () => {
+    const offer = {
+      marketplace: "MERCADO_LIVRE",
+      trackingStrategy: "DIRECT_AFFILIATE_LINK",
+      affiliateUrl: "https://mercadolivre.com/sec/affiliate",
+      affiliateLinks: [
+        {
+          id: "link-1",
+          slug: "mlb1",
+          destination: "https://mercadolivre.com/sec/affiliate",
+          active: true,
+        },
+      ],
+    };
+
+    expect(resolvePublicationUrl(offer as never)).toEqual({
+      url: "https://mercadolivre.com/sec/affiliate",
+      affiliateLinkId: null,
+    });
+    expect(resolvePublicationUrl(offer as never)?.url).not.toContain("/go/");
+  });
+
+  it("does not publish Mercado Livre offers without affiliate URL", () => {
+    const offer = {
+      marketplace: "MERCADO_LIVRE",
+      trackingStrategy: "DIRECT_AFFILIATE_LINK",
+      affiliateUrl: null,
+      affiliateLinks: [],
+    };
+
+    expect(resolvePublicationUrl(offer as never)).toBeNull();
+  });
+
   it("only queries READY_TO_PUBLISH offers for scheduling", async () => {
     const actual = await import("@affiliate/database");
     const findManyOffers = vi.fn().mockResolvedValue([]);

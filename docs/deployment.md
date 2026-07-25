@@ -43,6 +43,17 @@ ollama run qwen3:4b
 
 The worker calls Ollama over HTTP and falls back to deterministic copy if Ollama is unavailable. Local Ollama execution has no token billing. For OpenAI, set `AI_PROVIDER="openai"` and configure `OPENAI_API_KEY` only in server/worker environments.
 
+For Mercado Livre, configure the application credentials in the dashboard and worker environments:
+
+```env
+MERCADO_LIVRE_CLIENT_ID=""
+MERCADO_LIVRE_CLIENT_SECRET=""
+MERCADO_LIVRE_REDIRECT_URI="https://your-dashboard.example.com/api/integrations/mercadolivre/callback"
+MERCADO_LIVRE_SITE_ID="MLB"
+```
+
+Keep `APP_BASE_URL` aligned with the dashboard URL. Run `npm run prisma:migrate` after deploying migration `20260725110000_phase_3a_mercado_livre`. Connect the account from `/integracoes`, then configure categories and discovery filters in `/integracoes/mercado-livre`. The worker uses Redis locks for token refresh and discovery/publication coordination.
+
 ## CI
 
 GitHub Actions runs install, Prisma generation, lint, typecheck and tests on pull requests and pushes to `main`.

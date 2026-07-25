@@ -20,6 +20,7 @@ import {
   type Prisma,
   type Publication,
 } from "@affiliate/database";
+import { collectMercadoLivreCandidates, refreshMercadoLivreOffers } from "./mercado-livre";
 
 const DEFAULT_POLL_INTERVAL_MS = 60_000;
 const DEFAULT_MAX_ATTEMPTS = 3;
@@ -147,17 +148,25 @@ function trackingUrlForSlug(slug: string) {
   return `${getBaseUrl()}/go/${encodeURIComponent(slug)}`;
 }
 
+export function resolvePublicationUrl(offer: OfferWithLinks) {
+  if (offer.marketplace === "MERCADO_LIVRE" || offer.trackingStrategy === "DIRECT_AFFILIATE_LINK") {
+    return offer.affiliateUrl ? { url: offer.affiliateUrl, affiliateLinkId: null } : null;
+  }
+
+  const link = offer.affiliateLinks.find((item) => item.active);
+  return link ? { url: trackingUrlForSlug(link.slug), affiliateLinkId: link.id } : null;
+}
+
 async function messagePayloadFor(
   offer: OfferWithLinks,
   channel: Channel,
 ): Promise<GeneratedPublicationPayload | null> {
-  const link = offer.affiliateLinks.find((item) => item.active);
+  const publicationUrl = resolvePublicationUrl(offer);
 
-  if (!link) {
+  if (!publicationUrl) {
     return null;
   }
 
-  const trackingUrl = trackingUrlForSlug(link.slug);
   const generated = await generateMessageForOffer({
     title: offer.title,
     marketplace: offer.marketplace,
@@ -171,13 +180,13 @@ async function messagePayloadFor(
     shippingStatus: offer.shippingStatus,
     rating: offer.rating?.toString() ?? null,
     salesCount: offer.salesCount,
-    trackingUrl,
+    trackingUrl: publicationUrl.url,
   });
 
   return {
     offerId: offer.id,
     channelId: channel.id,
-    trackingUrl,
+    trackingUrl: publicationUrl.url,
     message: generated.message,
     imageUrl: offer.imageUrl,
     messageSource: generated.source,
@@ -609,6 +618,8 @@ export async function runWorkerCycle(now = new Date()) {
 
   try {
     mergeMetrics(metrics, await expireInvalidOffers(now));
+    mergeMetrics(metrics, await collectMercadoLivreCandidates(now));
+    mergeMetrics(metrics, await refreshMercadoLivreOffers(now));
     mergeMetrics(metrics, await scheduleReadyOffers(now));
     mergeMetrics(metrics, await retryFailedPublications(now));
     mergeMetrics(metrics, await publishScheduledOffers(now));

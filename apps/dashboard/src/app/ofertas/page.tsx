@@ -29,6 +29,8 @@ export default async function OffersPage({ searchParams }: OffersPageProps) {
   const marketplace = single(params?.marketplace);
   const status = single(params?.status);
   const category = single(params?.category)?.trim();
+  const affiliateEligibility = single(params?.affiliateEligibility);
+  const affiliateLinkMissing = single(params?.affiliateLinkMissing);
   const page = Math.max(1, Number(single(params?.page) ?? 1));
   const pageSize = 10;
   const queryParams = new URLSearchParams();
@@ -45,6 +47,14 @@ export default async function OffersPage({ searchParams }: OffersPageProps) {
     queryParams.set("category", category);
   }
 
+  if (affiliateEligibility) {
+    queryParams.set("affiliateEligibility", affiliateEligibility);
+  }
+
+  if (affiliateLinkMissing) {
+    queryParams.set("affiliateLinkMissing", affiliateLinkMissing);
+  }
+
   const where = {
     ...(marketplaces.includes(marketplace as (typeof marketplaces)[number])
       ? { marketplace: marketplace as (typeof marketplaces)[number] }
@@ -53,6 +63,10 @@ export default async function OffersPage({ searchParams }: OffersPageProps) {
       ? { status: status as (typeof offerStatuses)[number] }
       : {}),
     ...(category ? { category: { contains: category, mode: "insensitive" as const } } : {}),
+    ...(["ELIGIBLE", "INELIGIBLE", "UNKNOWN"].includes(affiliateEligibility ?? "")
+      ? { affiliateEligibility: affiliateEligibility as "ELIGIBLE" | "INELIGIBLE" | "UNKNOWN" }
+      : {}),
+    ...(affiliateLinkMissing === "true" ? { affiliateUrl: null } : {}),
   };
 
   const [offers, total] = await Promise.all([
@@ -79,6 +93,9 @@ export default async function OffersPage({ searchParams }: OffersPageProps) {
         collectedAt: true,
         status: true,
         statusReason: true,
+        affiliateUrl: true,
+        affiliateEligibility: true,
+        trackingStrategy: true,
       },
     }),
     prisma.offer.count({ where }),
@@ -90,15 +107,20 @@ export default async function OffersPage({ searchParams }: OffersPageProps) {
       currentPath="/ofertas"
       title="Ofertas"
       actions={
-        <Button asChild>
-          <Link href="/ofertas/nova">
-            <Plus aria-hidden="true" size={18} />
-            Nova oferta
-          </Link>
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button asChild variant="outline">
+            <Link href="/ofertas/affiliate-links">Links afiliados</Link>
+          </Button>
+          <Button asChild>
+            <Link href="/ofertas/nova">
+              <Plus aria-hidden="true" size={18} />
+              Nova oferta
+            </Link>
+          </Button>
+        </div>
       }
     >
-      <form className="grid gap-3 rounded-md border bg-white p-4 md:grid-cols-[1fr_1fr_1fr_auto]">
+      <form className="grid gap-3 rounded-md border bg-white p-4 md:grid-cols-[1fr_1fr_1fr_1fr_1fr_auto]">
         <Select name="marketplace" defaultValue={marketplace ?? ""} aria-label="Marketplace">
           <option value="">Todos marketplaces</option>
           {marketplaces.map((item) => (
@@ -121,6 +143,24 @@ export default async function OffersPage({ searchParams }: OffersPageProps) {
           placeholder="Categoria"
           className="h-10 rounded-md border bg-white px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
         />
+        <Select
+          name="affiliateEligibility"
+          defaultValue={affiliateEligibility ?? ""}
+          aria-label="Elegibilidade afiliado"
+        >
+          <option value="">Todas elegibilidades</option>
+          <option value="ELIGIBLE">ELIGIBLE</option>
+          <option value="INELIGIBLE">INELIGIBLE</option>
+          <option value="UNKNOWN">UNKNOWN</option>
+        </Select>
+        <Select
+          name="affiliateLinkMissing"
+          defaultValue={affiliateLinkMissing ?? ""}
+          aria-label="Link afiliado ausente"
+        >
+          <option value="">Todos links</option>
+          <option value="true">Sem affiliateUrl</option>
+        </Select>
         <Button type="submit">Filtrar</Button>
       </form>
 
@@ -133,7 +173,7 @@ export default async function OffersPage({ searchParams }: OffersPageProps) {
         />
       ) : (
         <div className="overflow-x-auto rounded-md border bg-white">
-          <table className="w-full min-w-[980px] border-collapse text-left text-sm">
+          <table className="w-full min-w-[1180px] border-collapse text-left text-sm">
             <thead className="border-b bg-[var(--muted)] text-xs uppercase text-[var(--muted-foreground)]">
               <tr>
                 <th className="px-4 py-3 font-semibold">Titulo</th>
@@ -144,6 +184,7 @@ export default async function OffersPage({ searchParams }: OffersPageProps) {
                 <th className="px-4 py-3 font-semibold">Precos</th>
                 <th className="px-4 py-3 font-semibold">Desconto</th>
                 <th className="px-4 py-3 font-semibold">Score</th>
+                <th className="px-4 py-3 font-semibold">Afiliado</th>
                 <th className="px-4 py-3 font-semibold">Estoque</th>
                 <th className="px-4 py-3 font-semibold">Cupom</th>
                 <th className="px-4 py-3 font-semibold">Data</th>
@@ -181,6 +222,12 @@ export default async function OffersPage({ searchParams }: OffersPageProps) {
                         {formatPercentage(offer.scoreCompletenessPercentage)}% completude
                       </div>
                     ) : null}
+                  </td>
+                  <td className="px-4 py-3">
+                    {offer.affiliateEligibility}
+                    <div className="text-xs text-[var(--muted-foreground)]">
+                      {offer.affiliateUrl ? "com link" : "sem link"} · {offer.trackingStrategy}
+                    </div>
                   </td>
                   <td className="px-4 py-3">
                     {stockStatuses.includes(offer.stockStatus) ? offer.stockStatus : "-"}

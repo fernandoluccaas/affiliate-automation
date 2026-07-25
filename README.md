@@ -90,6 +90,23 @@ ollama run qwen3:4b
 
 The worker sends confirmed offer facts to the selected provider using structured JSON output. The system validates the generated copy deterministically before saving the publication. If AI is disabled, Ollama is offline, a provider times out, returns invalid JSON or produces copy with unconfirmed facts, the worker uses the deterministic composer and keeps scheduling/publishing intact.
 
+## Mercado Livre
+
+Phase 3A adds an official Mercado Livre connector. Configure the app credentials only on the server:
+
+```env
+MERCADO_LIVRE_CLIENT_ID=""
+MERCADO_LIVRE_CLIENT_SECRET=""
+MERCADO_LIVRE_REDIRECT_URI="http://localhost:3000/api/integrations/mercadolivre/callback"
+MERCADO_LIVRE_SITE_ID="MLB"
+```
+
+Use `/integracoes` to connect or reconnect through OAuth 2.0. Tokens are encrypted in `MarketplaceAccount`, refresh tokens are treated as rotating credentials, and Redis locks prevent concurrent refresh.
+
+Use `/integracoes/mercado-livre` to enable discovery, choose official category IDs, set price/discount/score filters and run manual sync. Discovery uses official categories, highlights/best sellers, multiget item details and the official item prices endpoint. Missing original price, shipping certainty, image, rating, sales count or commission stays `null`/`UNKNOWN`.
+
+Mercado Livre affiliate links are not generated automatically. Valid offers without an official affiliate URL become `READY_FOR_AFFILIATE_LINK`; fill the link in `/ofertas/affiliate-links`. Mercado Livre publications use `DIRECT_AFFILIATE_LINK`, so the worker sends the official affiliate URL directly instead of `/go/[slug]`.
+
 ## Tracking
 
 Affiliate links are exposed through `/go/[slug]`. The route records a `Click` with affiliate link, offer, publication when available, channel when available, marketplace, referer and user agent. It never stores raw IP addresses. If tracking fails, the user is still redirected with a temporary HTTP redirect.

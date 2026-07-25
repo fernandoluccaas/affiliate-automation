@@ -86,6 +86,21 @@ Status: implemented.
 - Normalize products, offers, campaigns and coupons.
 - Add integration health checks and import jobs.
 
+### Phase 3A - Mercado Livre Official Integration
+
+Status: implemented.
+
+- Added Mercado Livre OAuth 2.0 connection and callback routes with server-side state validation.
+- Added encrypted, rotating token storage in `MarketplaceAccount` and refresh through Redis lock.
+- Added `MercadoLivreConnector`, API client, price service, category lookup, highlights/best sellers, item multiget and normalization.
+- Added persistent discovery configuration in `/integracoes/mercado-livre`.
+- Added worker jobs for candidate discovery and offer refresh with `AutomationRun` metrics and `SystemAlert` codes.
+- Added `AffiliateEligibility` and `TrackingStrategy` fields for offers.
+- Added `READY_FOR_AFFILIATE_LINK` handling for Mercado Livre offers without official affiliate URL.
+- Added `/ofertas/affiliate-links` to paste official affiliate URLs manually.
+- Preserved Telegram, Ollama, deterministic fallback, channel filters, scoring, tracking and publication snapshots.
+- No Shopee connector, WhatsApp automation, scraping or browser automation was added.
+
 ## Phase 4 - Publication Expansion
 
 - Add additional official publisher adapters when credentials and APIs are available.

@@ -14,6 +14,10 @@ Phase 2B adds the publication and tracking loop. The worker selects active compa
 
 Phase 2C adds multi-provider copy generation between channel selection and publication creation. The worker requests structured JSON copy from the configured provider, validates the returned text against confirmed offer facts, persists message metadata on `Publication`, and falls back to the deterministic composer without blocking Telegram, manual export, tracking or Redis locks. Ollama is the default provider and is called over HTTP at the configured `OLLAMA_BASE_URL`; OpenAI remains optional.
 
+Phase 3A adds the official Mercado Livre connector. OAuth starts from `/integracoes`, returns to `/api/integrations/mercadolivre/callback`, validates a server-side `state` cookie, exchanges the code for tokens and stores encrypted rotating credentials in `MarketplaceAccount`. Discovery is configured in `/integracoes/mercado-livre` and uses official categories, `/highlights/{siteId}/category/{categoryId}`, multiget `/items?ids=...` and `/items/{ITEM_ID}/prices`. The connector only normalizes external facts and then calls ingestion; it does not score, version or publish.
+
+Mercado Livre affiliate URLs are not generated automatically. Valid offers without a link become `READY_FOR_AFFILIATE_LINK` and are enriched manually in `/ofertas/affiliate-links`. Mercado Livre uses `TrackingStrategy.DIRECT_AFFILIATE_LINK`, so publication receives the official affiliate URL directly. Other marketplaces keep the internal `/go/[slug]` tracking strategy.
+
 ## Historical Immutability
 
 `Product`, `Offer` and `Publication` have different ownership:
@@ -36,6 +40,7 @@ Scoring does not treat unavailable enrichment as zero. It computes the final sco
 ## Packages
 
 - `packages/database`: Prisma client, persistence utilities and credential encryption boundaries.
+- `packages/ingestion`: shared offer ingestion schema, discount calculation, product upsert, offer versioning, validation, scoring and affiliate-link status selection.
 - `packages/marketplace-connectors`: official marketplace API connector contracts and implementations.
 - `packages/publisher-connectors`: publication adapters for supported channels.
 - `packages/publication`: deterministic message composition and channel policy checks.

@@ -19,6 +19,24 @@ enum Marketplace {
   MERCADO_LIVRE
 }
 
+enum MarketplaceAccountStatus {
+  DISCONNECTED
+  CONNECTED
+  REAUTH_REQUIRED
+  ERROR
+}
+
+enum AffiliateEligibility {
+  ELIGIBLE
+  INELIGIBLE
+  UNKNOWN
+}
+
+enum TrackingStrategy {
+  INTERNAL_REDIRECT
+  DIRECT_AFFILIATE_LINK
+}
+
 enum OfferStatus {
   PENDING_VALIDATION
   REJECTED_INVALID_DATA
@@ -115,7 +133,18 @@ model MarketplaceAccount {
   id                   String      @id @default(cuid())
   marketplace          Marketplace
   name                 String
-  encryptedCredentials String
+  encryptedCredentials String      @default("")
+  externalUserId       String?
+  accessTokenEncrypted String?
+  refreshTokenEncrypted String?
+  expiresAt            DateTime?
+  scopes               Json        @default("[]")
+  status               MarketplaceAccountStatus @default(DISCONNECTED)
+  siteId               String?
+  lastRefreshAt        DateTime?
+  lastSyncAt           DateTime?
+  lastErrorAt          DateTime?
+  lastError            String?
   capabilities         Json        @default("{}")
   enabled              Boolean     @default(true)
   createdAt            DateTime    @default(now())
@@ -125,6 +154,7 @@ model MarketplaceAccount {
   automationRuns AutomationRun[]
 
   @@index([marketplace, enabled])
+  @@index([marketplace, status])
 }
 
 model Channel {
@@ -193,6 +223,11 @@ model Offer {
   imageUrl             String?
   productUrl           String
   affiliateUrl         String?
+  affiliateLabel       String?
+  affiliateEligibility AffiliateEligibility @default(UNKNOWN)
+  sellerId             String?
+  officialStoreId      String?
+  trackingStrategy     TrackingStrategy @default(INTERNAL_REDIRECT)
   originalPrice        Decimal?    @db.Decimal(12, 2)
   currentPrice         Decimal     @db.Decimal(12, 2)
   discountPercentage   Decimal?    @db.Decimal(5, 2)
@@ -229,8 +264,28 @@ model Offer {
   @@index([status, score])
   @@index([marketplace, category])
   @@index([marketplace, externalProductId])
+  @@index([marketplace, affiliateEligibility])
+  @@index([trackingStrategy])
   @@index([scheduledAt])
   @@index([publishedAt])
+}
+
+model MercadoLivreDiscoveryConfig {
+  id                        String   @id @default(cuid())
+  enabled                   Boolean  @default(false)
+  siteId                    String   @default("MLB")
+  categoryIds               Json     @default("[]")
+  bestSellersEnabled        Boolean  @default(true)
+  minimumPrice              Decimal? @db.Decimal(12, 2)
+  maximumPrice              Decimal? @db.Decimal(12, 2)
+  minimumDiscountPercentage Decimal? @db.Decimal(5, 2)
+  minimumScore              Int      @default(0)
+  maxCandidatesPerCategory  Int      @default(20)
+  refreshIntervalMinutes    Int      @default(360)
+  lastRunAt                 DateTime?
+  lastRunSummary            Json?
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
 }
 
 model Coupon {

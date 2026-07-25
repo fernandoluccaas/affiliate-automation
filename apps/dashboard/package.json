@@ -14,6 +14,8 @@
   "dependencies": {
     "@affiliate/ai-copywriter": "0.1.0",
     "@affiliate/database": "0.1.0",
+    "@affiliate/ingestion": "0.1.0",
+    "@affiliate/marketplace-connectors": "0.1.0",
     "@affiliate/publisher-connectors": "0.1.0",
     "@affiliate/redis": "0.1.0",
     "@affiliate/scoring": "0.1.0",

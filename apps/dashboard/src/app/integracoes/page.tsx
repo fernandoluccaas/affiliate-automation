@@ -1,13 +1,21 @@
-import { Bot, CheckCircle2, Cpu, KeyRound, PlugZap, XCircle } from "lucide-react";
+import { Bot, CheckCircle2, Cpu, KeyRound, PlugZap, RefreshCw, Settings, XCircle } from "lucide-react";
 import {
   OllamaAiProvider,
   getOllamaIntegrationStatus,
   getOpenAiIntegrationStatus,
 } from "@affiliate/ai-copywriter";
+import { prisma } from "@affiliate/database";
+import Link from "next/link";
 import { AdminShell } from "@/components/admin-shell";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { testOllamaCopyAction, testOpenAiCopyAction } from "@/lib/actions";
+import {
+  syncMercadoLivreNowAction,
+  testMercadoLivreIntegrationAction,
+  testOllamaCopyAction,
+  testOpenAiCopyAction,
+} from "@/lib/actions";
+import { formatDateTime } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
 
@@ -22,6 +30,11 @@ function messageText(message?: string | string[]) {
   if (value === "ollama-fallback") return "Teste local concluido com fallback deterministico.";
   if (value === "openai-ok") return "OpenAI respondeu com copy validada.";
   if (value === "openai-fallback") return "Teste OpenAI concluido com fallback deterministico.";
+  if (value === "meli-connected") return "Mercado Livre conectado com sucesso.";
+  if (value === "meli-connect-failed") return "Falha ao concluir OAuth do Mercado Livre.";
+  if (value === "meli-missing-config") return "Configure as variaveis do app Mercado Livre no servidor.";
+  if (value === "meli-ok") return "Mercado Livre respondeu ao teste de integracao.";
+  if (value === "meli-unavailable") return "Mercado Livre indisponivel ou conta nao conectada.";
   return null;
 }
 
@@ -39,6 +52,23 @@ export default async function IntegrationsPage({ searchParams }: IntegrationsPag
   const ollamaHealth = await new OllamaAiProvider().healthCheck();
   const openAi = getOpenAiIntegrationStatus();
   const message = messageText(params?.message);
+  const [mercadoLivreAccount, mercadoLivreConfig] = await Promise.all([
+    prisma.marketplaceAccount.findFirst({
+      where: { marketplace: "MERCADO_LIVRE" },
+      orderBy: { updatedAt: "desc" },
+      select: {
+        externalUserId: true,
+        status: true,
+        siteId: true,
+        expiresAt: true,
+        lastRefreshAt: true,
+        lastSyncAt: true,
+        lastErrorAt: true,
+        lastError: true,
+      },
+    }),
+    prisma.mercadoLivreDiscoveryConfig.findFirst({ orderBy: { updatedAt: "desc" } }),
+  ]);
 
   return (
     <AdminShell currentPath="/integracoes" title="Integracoes">
@@ -127,11 +157,73 @@ export default async function IntegrationsPage({ searchParams }: IntegrationsPag
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <PlugZap aria-hidden="true" size={18} />
-              Marketplaces
+              Mercado Livre
             </CardTitle>
           </CardHeader>
-          <CardContent className="text-sm text-[var(--muted-foreground)]">
-            Conectores reais de Shopee e Mercado Livre permanecem indisponiveis nesta fase.
+          <CardContent className="grid gap-4 text-sm">
+            <div className="flex items-center justify-between">
+              <span>Status</span>
+              <span className="inline-flex items-center gap-2">
+                <StatusIcon ok={mercadoLivreAccount?.status === "CONNECTED"} />
+                {mercadoLivreAccount?.status ?? "DISCONNECTED"}
+              </span>
+            </div>
+            <div className="grid gap-1">
+              <span className="text-[var(--muted-foreground)]">User ID</span>
+              <span>{mercadoLivreAccount?.externalUserId ?? "-"}</span>
+            </div>
+            <div className="grid gap-1">
+              <span className="text-[var(--muted-foreground)]">Site</span>
+              <span>{mercadoLivreAccount?.siteId ?? mercadoLivreConfig?.siteId ?? "MLB"}</span>
+            </div>
+            <div className="grid gap-1">
+              <span className="text-[var(--muted-foreground)]">Token expira em</span>
+              <span>{mercadoLivreAccount?.expiresAt ? formatDateTime(mercadoLivreAccount.expiresAt) : "-"}</span>
+            </div>
+            <div className="grid gap-1">
+              <span className="text-[var(--muted-foreground)]">Ultimo refresh</span>
+              <span>
+                {mercadoLivreAccount?.lastRefreshAt ? formatDateTime(mercadoLivreAccount.lastRefreshAt) : "-"}
+              </span>
+            </div>
+            <div className="grid gap-1">
+              <span className="text-[var(--muted-foreground)]">Ultima sincronizacao</span>
+              <span>{mercadoLivreAccount?.lastSyncAt ? formatDateTime(mercadoLivreAccount.lastSyncAt) : "-"}</span>
+            </div>
+            {mercadoLivreAccount?.lastError ? (
+              <div className="grid gap-1 text-red-700">
+                <span>Ultimo erro</span>
+                <span>
+                  {mercadoLivreAccount.lastErrorAt ? `${formatDateTime(mercadoLivreAccount.lastErrorAt)} - ` : ""}
+                  {mercadoLivreAccount.lastError}
+                </span>
+              </div>
+            ) : null}
+            <div className="flex flex-wrap gap-2">
+              <Button asChild variant="outline">
+                <Link href="/api/integrations/mercadolivre/connect">
+                  <PlugZap aria-hidden="true" size={16} />
+                  {mercadoLivreAccount?.status === "CONNECTED" ? "Reconectar" : "Conectar"}
+                </Link>
+              </Button>
+              <Button asChild variant="outline">
+                <Link href="/integracoes/mercado-livre">
+                  <Settings aria-hidden="true" size={16} />
+                  Configurar
+                </Link>
+              </Button>
+              <form action={testMercadoLivreIntegrationAction}>
+                <Button type="submit" variant="outline">
+                  Testar
+                </Button>
+              </form>
+              <form action={syncMercadoLivreNowAction}>
+                <Button type="submit" variant="outline" disabled={mercadoLivreAccount?.status !== "CONNECTED"}>
+                  <RefreshCw aria-hidden="true" size={16} />
+                  Sincronizar
+                </Button>
+              </form>
+            </div>
           </CardContent>
         </Card>
 
