@@ -5,7 +5,7 @@ import {
   type MarketplaceOfferCandidate,
 } from "@affiliate/marketplace-connectors";
 import { prisma } from "@affiliate/database";
-import { ingestOffer } from "./offer-ingest";
+import { ingestOffer } from "@affiliate/ingestion";
 
 export type MercadoLivreJobMetrics = {
   readyOffersFound: number;

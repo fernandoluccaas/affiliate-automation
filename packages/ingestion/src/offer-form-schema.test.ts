@@ -2,6 +2,14 @@ import { describe, expect, it } from "vitest";
 import { offerFormSchema, parseDecimalInput } from "./offer-form-schema";
 
 describe("ingestion offer schema", () => {
+  it("exposes the public ingestion API", async () => {
+    const ingestion = await import("./index");
+
+    expect(typeof ingestion.ingestOffer).toBe("function");
+    expect(typeof ingestion.offerFormSchema.safeParse).toBe("function");
+    expect(typeof ingestion.formatOfferFormError).toBe("function");
+  });
+
   it("keeps optional enrichment unavailable instead of forcing zero values", () => {
     const parsed = offerFormSchema.parse({
       marketplace: "MERCADO_LIVRE",

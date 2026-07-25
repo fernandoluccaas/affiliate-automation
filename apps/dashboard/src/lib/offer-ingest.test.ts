@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { Marketplace, OfferStatus, Prisma, ShippingStatus, StockStatus } from "@affiliate/database";
-import { createOfferFingerprint, ingestOfferInTransaction } from "./offer-ingest";
-import { offerFormSchema, parseDecimalInput, type OfferFormValues } from "./offer-form-schema";
+import {
+  createOfferFingerprint,
+  ingestOffer,
+  ingestOfferInTransaction,
+  offerFormSchema,
+  parseDecimalInput,
+  type OfferFormValues,
+} from "@affiliate/ingestion";
 
 type ProductRecord = {
   id: string;
@@ -244,6 +250,17 @@ async function ingestRawWithFake(tx: FakeTransaction, input: unknown) {
 }
 
 describe("offer form normalization", () => {
+  it("exports ingestOffer from the public ingestion package", () => {
+    expect(typeof ingestOffer).toBe("function");
+  });
+
+  it("exports offerFormSchema and format helpers from the public ingestion package", async () => {
+    const ingestion = await import("@affiliate/ingestion");
+
+    expect(typeof ingestion.offerFormSchema.safeParse).toBe("function");
+    expect(typeof ingestion.formatOfferFormError).toBe("function");
+  });
+
   it.each([
     ["299,99", 299.99],
     ["299.99", 299.99],

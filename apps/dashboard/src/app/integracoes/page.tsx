@@ -34,7 +34,11 @@ function messageText(message?: string | string[]) {
   if (value === "meli-connect-failed") return "Falha ao concluir OAuth do Mercado Livre.";
   if (value === "meli-missing-config") return "Configure as variaveis do app Mercado Livre no servidor.";
   if (value === "meli-ok") return "Mercado Livre respondeu ao teste de integracao.";
-  if (value === "meli-unavailable") return "Mercado Livre indisponivel ou conta nao conectada.";
+  if (value === "meli-not-connected") return "Mercado Livre ainda nao esta conectado.";
+  if (value === "meli-auth-error") return "Mercado Livre conectado, mas a autenticacao precisa de reconexao.";
+  if (value === "meli-api-unavailable") return "Mercado Livre conectado, mas a API nao respondeu ao teste.";
+  if (value === "meli-configuration-error") return "Configuracao servidor do Mercado Livre incompleta ou invalida.";
+  if (value === "meli-internal-error") return "Erro interno ao testar Mercado Livre. Consulte os logs do servidor.";
   return null;
 }
 

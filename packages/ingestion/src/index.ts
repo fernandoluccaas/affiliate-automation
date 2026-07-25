@@ -6,7 +6,15 @@ import {
   type ValidationFailureCode,
 } from "@affiliate/validation";
 import { prisma, type OfferStatus, type Prisma } from "@affiliate/database";
-import { offerFormSchema, type OfferFormValues } from "./offer-form-schema";
+import { offerFormSchema as ingestionOfferFormSchema, type OfferFormValues } from "./offer-form-schema";
+
+export {
+  formatOfferFormError,
+  offerFormSchema,
+  parseDecimalInput,
+  type OfferFormInput,
+  type OfferFormValues,
+} from "./offer-form-schema";
 
 export const READY_TO_PUBLISH_MIN_SCORE = 70;
 
@@ -203,7 +211,7 @@ export async function ingestOfferInTransaction(
   rawInput: unknown,
   options: Required<IngestOfferOptions>,
 ): Promise<IngestOfferResult> {
-  const parsed = offerFormSchema.safeParse(rawInput);
+  const parsed = ingestionOfferFormSchema.safeParse(rawInput);
 
   if (!parsed.success) {
     return {

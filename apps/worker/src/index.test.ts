@@ -51,6 +51,13 @@ describe("createPublicationIdempotently", () => {
     expect(resolvePublicationUrl(offer as never)?.url).not.toContain("/go/");
   });
 
+  it("imports Mercado Livre jobs with the shared ingestion package", async () => {
+    const jobs = await import("./mercado-livre");
+
+    expect(typeof jobs.collectMercadoLivreCandidates).toBe("function");
+    expect(typeof jobs.refreshMercadoLivreOffers).toBe("function");
+  });
+
   it("does not publish Mercado Livre offers without affiliate URL", () => {
     const offer = {
       marketplace: "MERCADO_LIVRE",

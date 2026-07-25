@@ -5,13 +5,13 @@ import { useMemo, useState, useTransition } from "react";
 import { useForm } from "react-hook-form";
 import { ArrowLeft, Save } from "lucide-react";
 import { marketplaces, shippingStatuses, stockStatuses } from "@affiliate/shared";
-import { createManualOfferAction, type CreateOfferState } from "@/lib/actions";
 import {
   formatOfferFormError,
   offerFormSchema,
   parseDecimalInput,
   type OfferFormInput,
-} from "@/lib/offer-form-schema";
+} from "@affiliate/ingestion/offer-form-schema";
+import { createManualOfferAction, type CreateOfferState } from "@/lib/actions";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";

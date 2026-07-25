@@ -2,7 +2,12 @@
 
 import { Prisma, prisma } from "@affiliate/database";
 import { MessageGenerationService, OllamaAiProvider, OpenAiProvider } from "@affiliate/ai-copywriter";
-import { createMercadoLivreConnector } from "@affiliate/marketplace-connectors";
+import {
+  MercadoLivreApiError,
+  createMercadoLivreConnector,
+  getMercadoLivreConfig,
+} from "@affiliate/marketplace-connectors";
+import { formatOfferFormError, ingestOffer, offerFormSchema, type OfferFormInput } from "@affiliate/ingestion";
 import bcrypt from "bcryptjs";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
@@ -10,8 +15,6 @@ import { z } from "zod";
 import { TelegramPublisher } from "@affiliate/publisher-connectors";
 import { createSession, destroySession } from "./session";
 import { collectMercadoLivreCandidates } from "./mercado-livre-sync";
-import { ingestOffer } from "./offer-ingest";
-import { formatOfferFormError, offerFormSchema, type OfferFormInput } from "./offer-form-schema";
 
 const loginSchema = z.object({
   email: z.string().email(),
@@ -252,6 +255,49 @@ function decimalToString(value: Prisma.Decimal | null) {
   return value === null ? undefined : value.toString();
 }
 
+type MercadoLivreTestFailureCode =
+  | "MELI_NOT_CONNECTED"
+  | "MELI_AUTH_ERROR"
+  | "MELI_API_UNAVAILABLE"
+  | "MELI_CONFIGURATION_ERROR"
+  | "MELI_INTERNAL_ERROR";
+
+function mercadoLivreFailureMessage(code: MercadoLivreTestFailureCode) {
+  return {
+    MELI_NOT_CONNECTED: "meli-not-connected",
+    MELI_AUTH_ERROR: "meli-auth-error",
+    MELI_API_UNAVAILABLE: "meli-api-unavailable",
+    MELI_CONFIGURATION_ERROR: "meli-configuration-error",
+    MELI_INTERNAL_ERROR: "meli-internal-error",
+  }[code];
+}
+
+function classifyMercadoLivreTestError(error: unknown): MercadoLivreTestFailureCode {
+  if (error instanceof MercadoLivreApiError) {
+    if ([401, 403].includes(error.status)) {
+      return "MELI_AUTH_ERROR";
+    }
+
+    return "MELI_API_UNAVAILABLE";
+  }
+
+  const message = error instanceof Error ? error.message : "";
+
+  if (/not connected|refresh token|reauth|oauth|token/i.test(message)) {
+    return "MELI_AUTH_ERROR";
+  }
+
+  if (/config|client|redirect|encryption|secret/i.test(message)) {
+    return "MELI_CONFIGURATION_ERROR";
+  }
+
+  if (/fetch|timeout|network|unavailable|api/i.test(message)) {
+    return "MELI_API_UNAVAILABLE";
+  }
+
+  return "MELI_INTERNAL_ERROR";
+}
+
 export async function testOpenAiCopyAction() {
   let service: MessageGenerationService;
 
@@ -363,25 +409,56 @@ export async function saveMercadoLivreConfigAction(formData: FormData) {
 }
 
 export async function testMercadoLivreIntegrationAction() {
+  const config = getMercadoLivreConfig();
+
+  if (!config.clientId || !config.clientSecret || !config.redirectUri) {
+    redirect(`/integracoes?message=${mercadoLivreFailureMessage("MELI_CONFIGURATION_ERROR")}`);
+  }
+
+  const account = await prisma.marketplaceAccount.findFirst({
+    where: { marketplace: "MERCADO_LIVRE" },
+    orderBy: { updatedAt: "desc" },
+    select: { status: true },
+  });
+
+  if (!account || account.status !== "CONNECTED") {
+    redirect(`/integracoes?message=${mercadoLivreFailureMessage("MELI_NOT_CONNECTED")}`);
+  }
+
+  let message = "meli-ok";
+
   try {
     const connector = await createMercadoLivreConnector();
     const available = await connector.healthCheck();
-    redirect(`/integracoes?message=${available ? "meli-ok" : "meli-unavailable"}`);
-  } catch {
-    redirect("/integracoes?message=meli-unavailable");
+
+    if (!available) {
+      message = mercadoLivreFailureMessage("MELI_API_UNAVAILABLE");
+    }
+  } catch (error) {
+    const code = classifyMercadoLivreTestError(error);
+    console.error("Mercado Livre integration test failed", {
+      code,
+      error: error instanceof Error ? error.message : "unknown",
+    });
+    message = mercadoLivreFailureMessage(code);
   }
+
+  redirect(`/integracoes?message=${message}`);
 }
 
 export async function syncMercadoLivreNowAction() {
+  let message = "sync-ok";
+
   try {
     await collectMercadoLivreCandidates(new Date(), { force: true });
     revalidatePath("/integracoes");
     revalidatePath("/integracoes/mercado-livre");
     revalidatePath("/ofertas");
-    redirect("/integracoes/mercado-livre?message=sync-ok");
   } catch {
-    redirect("/integracoes/mercado-livre?message=sync-failed");
+    message = "sync-failed";
   }
+
+  redirect(`/integracoes/mercado-livre?message=${message}`);
 }
 
 export async function saveMercadoLivreAffiliateUrlAction(formData: FormData) {
