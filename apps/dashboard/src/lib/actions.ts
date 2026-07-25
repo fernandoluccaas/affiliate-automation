@@ -9,7 +9,7 @@ import { z } from "zod";
 import { TelegramPublisher } from "@affiliate/publisher-connectors";
 import { createSession, destroySession } from "./session";
 import { ingestOffer } from "./offer-ingest";
-import { offerFormSchema, type OfferFormValues } from "./offer-form-schema";
+import { formatOfferFormError, offerFormSchema, type OfferFormInput } from "./offer-form-schema";
 
 const loginSchema = z.object({
   email: z.string().email(),
@@ -60,13 +60,13 @@ export type CreateOfferState = {
   offerId?: string | undefined;
 };
 
-export async function createManualOfferAction(input: OfferFormValues): Promise<CreateOfferState> {
+export async function createManualOfferAction(input: OfferFormInput): Promise<CreateOfferState> {
   const parsed = offerFormSchema.safeParse(input);
 
   if (!parsed.success) {
     return {
       ok: false,
-      message: parsed.error.issues[0]?.message ?? "Dados da oferta invalidos.",
+      message: formatOfferFormError(parsed.error) || "Dados da oferta invalidos.",
     };
   }
 

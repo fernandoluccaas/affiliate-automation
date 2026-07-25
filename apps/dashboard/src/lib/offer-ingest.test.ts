@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Marketplace, OfferStatus, Prisma, ShippingStatus, StockStatus } from "@affiliate/database";
 import { createOfferFingerprint, ingestOfferInTransaction } from "./offer-ingest";
-import type { OfferFormValues } from "./offer-form-schema";
+import { offerFormSchema, parseDecimalInput, type OfferFormValues } from "./offer-form-schema";
 
 type ProductRecord = {
   id: string;
@@ -230,6 +230,71 @@ async function ingestWithFake(tx: FakeTransaction, input: OfferFormValues) {
   });
 }
 
+async function ingestRawWithFake(tx: FakeTransaction, input: unknown) {
+  return ingestOfferInTransaction(tx as unknown as Prisma.TransactionClient, input, {
+    now: new Date("2026-01-01T00:00:00.000Z"),
+    minScore: 70,
+  });
+}
+
+describe("offer form normalization", () => {
+  it.each([
+    ["299,99", 299.99],
+    ["299.99", 299.99],
+    ["1.299,99", 1299.99],
+  ])("normalizes %s to %s", (input, expected) => {
+    expect(parseDecimalInput(input)).toBe(expected);
+  });
+
+  it("normalizes empty optional fields without producing NaN", () => {
+    const parsed = offerFormSchema.parse({
+      marketplace: "SHOPEE",
+      externalProductId: "produto-opcional-001",
+      title: "Produto teste sem dados enriquecidos",
+      productUrl: "https://shopee.com.br/produto",
+      currentPrice: "299,99",
+      stockStatus: "UNKNOWN",
+      shippingStatus: "UNKNOWN",
+      category: "",
+      description: "",
+      imageUrl: "",
+      affiliateUrl: "",
+      originalPrice: "",
+      couponCode: "",
+      couponExpiration: "",
+      commissionPercentage: "",
+      rating: "",
+      salesCount: "",
+    });
+
+    expect(parsed).toMatchObject({
+      currentPrice: 299.99,
+      stockStatus: "UNKNOWN",
+      shippingStatus: "UNKNOWN",
+    });
+    expect(parsed.originalPrice).toBeUndefined();
+    expect(parsed.affiliateUrl).toBeUndefined();
+    expect(parsed.commissionPercentage).toBeUndefined();
+    expect(parsed.rating).toBeUndefined();
+    expect(parsed.salesCount).toBeUndefined();
+    expect(parsed.couponExpiration).toBeUndefined();
+  });
+
+  it("rejects non-empty arbitrary numeric text", () => {
+    expect(() =>
+      offerFormSchema.parse({
+        marketplace: "SHOPEE",
+        externalProductId: "produto-opcional-001",
+        title: "Produto teste sem dados enriquecidos",
+        productUrl: "https://shopee.com.br/produto",
+        currentPrice: "duzentos",
+        stockStatus: "UNKNOWN",
+        shippingStatus: "UNKNOWN",
+      }),
+    ).toThrow();
+  });
+});
+
 describe("ingestOfferInTransaction", () => {
   it("reuses the same Product for the same marketplace and externalProductId", async () => {
     const tx = new FakeTransaction();
@@ -442,6 +507,48 @@ describe("ingestOfferInTransaction", () => {
     expect(tx.offers[0]?.shippingStatus).toBe("UNKNOWN");
     expect(tx.offers[0]?.freeShipping).toBe(false);
     expect(result.scoreCompletenessPercentage).toBeLessThan(100);
+  });
+
+  it("ingests the exact minimal optional-fields regression payload", async () => {
+    const tx = new FakeTransaction();
+    const result = await ingestRawWithFake(tx, {
+      marketplace: "SHOPEE",
+      externalProductId: "produto-opcional-001",
+      title: "Produto teste sem dados enriquecidos",
+      productUrl: "https://shopee.com.br/produto",
+      currentPrice: "299,99",
+      stockStatus: "UNKNOWN",
+      shippingStatus: "UNKNOWN",
+      category: "",
+      description: "",
+      imageUrl: "",
+      affiliateUrl: "",
+      originalPrice: "",
+      couponCode: "",
+      couponExpiration: "",
+      commissionPercentage: "",
+      rating: "",
+      salesCount: "",
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      status: "READY_FOR_AFFILIATE_LINK",
+      discountPercentage: null,
+    });
+    expect(tx.offers[0]).toMatchObject({
+      currentPrice: 299.99,
+      originalPrice: null,
+      discountPercentage: null,
+      affiliateUrl: null,
+      shippingStatus: "UNKNOWN",
+      stockStatus: "UNKNOWN",
+      commissionPercentage: null,
+      rating: null,
+      salesCount: null,
+    });
+    expect(Number.isNaN(tx.offers[0]?.currentPrice)).toBe(false);
+    expect(tx.affiliateLinks).toHaveLength(0);
   });
 
   it("rejects an offer with invalid prices", async () => {

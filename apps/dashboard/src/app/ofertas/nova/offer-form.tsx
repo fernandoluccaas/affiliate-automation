@@ -6,7 +6,12 @@ import { useForm } from "react-hook-form";
 import { ArrowLeft, Save } from "lucide-react";
 import { marketplaces, shippingStatuses, stockStatuses } from "@affiliate/shared";
 import { createManualOfferAction, type CreateOfferState } from "@/lib/actions";
-import { offerFormSchema, type OfferFormValues } from "@/lib/offer-form-schema";
+import {
+  formatOfferFormError,
+  offerFormSchema,
+  parseDecimalInput,
+  type OfferFormInput,
+} from "@/lib/offer-form-schema";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -14,22 +19,22 @@ import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 
-const defaultValues: OfferFormValues = {
+const defaultValues: OfferFormInput = {
   marketplace: "SHOPEE",
   externalProductId: "",
   title: "",
-  description: undefined,
-  category: undefined,
-  imageUrl: undefined,
+  description: "",
+  category: "",
+  imageUrl: "",
   productUrl: "",
-  affiliateUrl: undefined,
-  originalPrice: undefined,
-  currentPrice: 0,
-  couponCode: undefined,
-  couponExpiration: undefined,
-  commissionPercentage: undefined,
-  rating: undefined,
-  salesCount: undefined,
+  affiliateUrl: "",
+  originalPrice: "",
+  currentPrice: "",
+  couponCode: "",
+  couponExpiration: "",
+  commissionPercentage: "",
+  rating: "",
+  salesCount: "",
   freeShipping: undefined,
   shippingStatus: "UNKNOWN",
   stockStatus: "UNKNOWN",
@@ -44,26 +49,32 @@ export function OfferForm() {
     watch,
     reset,
     formState: { errors },
-  } = useForm<OfferFormValues>({
+  } = useForm<OfferFormInput>({
     defaultValues,
   });
-  const originalPrice = Number(watch("originalPrice") ?? 0);
-  const currentPrice = Number(watch("currentPrice") ?? 0);
+  const originalPrice = parseDecimalInput(watch("originalPrice"));
+  const currentPrice = parseDecimalInput(watch("currentPrice"));
   const calculatedDiscount = useMemo(() => {
-    if (originalPrice <= 0 || currentPrice <= 0 || currentPrice > originalPrice) {
+    if (
+      typeof originalPrice !== "number" ||
+      typeof currentPrice !== "number" ||
+      originalPrice <= 0 ||
+      currentPrice <= 0 ||
+      currentPrice > originalPrice
+    ) {
       return null;
     }
 
     return (((originalPrice - currentPrice) / originalPrice) * 100).toFixed(2);
   }, [currentPrice, originalPrice]);
 
-  function onSubmit(values: OfferFormValues) {
+  function onSubmit(values: OfferFormInput) {
     const parsed = offerFormSchema.safeParse(values);
 
     if (!parsed.success) {
       setState({
         ok: false,
-        message: parsed.error.issues[0]?.message ?? "Dados da oferta invalidos.",
+        message: formatOfferFormError(parsed.error) || "Dados da oferta invalidos.",
       });
       return;
     }
@@ -137,15 +148,15 @@ export function OfferForm() {
         </CardHeader>
         <CardContent className="grid gap-4 md:grid-cols-3">
           <Field label="Preco original" error={errors.originalPrice?.message}>
-            <Input {...register("originalPrice", { valueAsNumber: true })} min="0" step="0.01" type="number" />
+            <Input {...register("originalPrice")} inputMode="decimal" />
           </Field>
           <Field label="Preco atual" required error={errors.currentPrice?.message}>
-            <Input {...register("currentPrice", { valueAsNumber: true })} min="0" step="0.01" type="number" />
+            <Input {...register("currentPrice")} inputMode="decimal" />
           </Field>
           <div className="rounded-md border bg-[var(--background)] px-3 py-2">
             <div className="text-sm font-medium">Desconto calculado</div>
             <div className="mt-1 text-2xl font-semibold">
-              {calculatedDiscount ? `${calculatedDiscount}%` : "-"}
+              {calculatedDiscount === null ? "Indisponivel" : `${calculatedDiscount}%`}
             </div>
           </div>
           <Field label="Cupom" error={errors.couponCode?.message}>
@@ -155,13 +166,13 @@ export function OfferForm() {
             <Input {...register("couponExpiration")} type="datetime-local" />
           </Field>
           <Field label="Comissao (%)" error={errors.commissionPercentage?.message}>
-            <Input {...register("commissionPercentage", { valueAsNumber: true })} min="0" max="100" step="0.01" type="number" />
+            <Input {...register("commissionPercentage")} inputMode="decimal" />
           </Field>
           <Field label="Avaliacao" error={errors.rating?.message}>
-            <Input {...register("rating", { valueAsNumber: true })} min="0" max="5" step="0.01" type="number" />
+            <Input {...register("rating")} inputMode="decimal" />
           </Field>
           <Field label="Vendas" error={errors.salesCount?.message}>
-            <Input {...register("salesCount", { valueAsNumber: true })} min="0" step="1" type="number" />
+            <Input {...register("salesCount")} inputMode="numeric" />
           </Field>
           <Field label="Frete" error={errors.shippingStatus?.message}>
             <Select {...register("shippingStatus")}>
