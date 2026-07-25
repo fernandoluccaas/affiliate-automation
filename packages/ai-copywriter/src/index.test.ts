@@ -193,6 +193,28 @@ describe("OllamaAiProvider", () => {
     await expect(ollama.generate(input)).rejects.toThrow("Ollama HTTP 404");
   });
 
+  it("preserves Unicode from Ollama provider through validated messages", async () => {
+    const copy: PromotionalCopy = {
+      headline: "\u{1F525} Promoção especial",
+      body: "Promoção válida para São Luís com preço R$ 149,90 e cupom AUDIO10.",
+      callToAction: "Confira em https://example.com/go/fone",
+      disclosure: "#publi - link de afiliado",
+      hashtags: ["#oferta"],
+    };
+    const ollama = new OllamaAiProvider({
+      fetchFn: vi.fn().mockResolvedValue(fetchResponse({ response: JSON.stringify(copy) })),
+    });
+    const service = new MessageGenerationService({ provider: ollama });
+    const result = await service.generate(input);
+
+    expect(result.source).toBe("AI_GENERATED");
+    expect(result.message).toContain("\u{1F525} Promoção especial");
+    expect(result.message).toContain("São Luís");
+    expect(result.message).not.toContain("Ã°Å¸");
+    expect(result.message).not.toContain("Ãƒ");
+    expect(result.message).not.toContain("Ã‚");
+  });
+
   it("reports health without requiring the local service to be online", async () => {
     const ollama = new OllamaAiProvider({
       baseUrl: "http://localhost:11434/",

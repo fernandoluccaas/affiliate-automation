@@ -2,6 +2,7 @@ import {
   canScheduleInWindow,
   isOfferCompatibleWithChannel,
   type ChannelPolicy,
+  type PolicyFailureCode,
 } from "@affiliate/publication";
 import { generateMessageForOffer, type MessageGenerationResult } from "@affiliate/ai-copywriter";
 import {
@@ -24,6 +25,7 @@ const DEFAULT_POLL_INTERVAL_MS = 60_000;
 const DEFAULT_MAX_ATTEMPTS = 3;
 
 type JobMetrics = {
+  readyOffersFound: number;
   scheduled: number;
   published: number;
   exported: number;
@@ -31,6 +33,7 @@ type JobMetrics = {
   retried: number;
   expired: number;
   skipped: number;
+  skipReasons: Record<string, number>;
 };
 
 type OfferWithLinks = Offer & {
@@ -55,6 +58,7 @@ type GeneratedPublicationPayload = PublicationPayload & {
 
 function emptyMetrics(): JobMetrics {
   return {
+    readyOffersFound: 0,
     scheduled: 0,
     published: 0,
     exported: 0,
@@ -62,13 +66,41 @@ function emptyMetrics(): JobMetrics {
     retried: 0,
     expired: 0,
     skipped: 0,
+    skipReasons: {},
   };
 }
 
 function mergeMetrics(target: JobMetrics, source: JobMetrics) {
-  for (const key of Object.keys(target) as Array<keyof JobMetrics>) {
+  const numericKeys: Array<Exclude<keyof JobMetrics, "skipReasons">> = [
+    "readyOffersFound",
+    "scheduled",
+    "published",
+    "exported",
+    "failed",
+    "retried",
+    "expired",
+    "skipped",
+  ];
+
+  for (const key of numericKeys) {
     target[key] += source[key];
   }
+
+  for (const [reason, count] of Object.entries(source.skipReasons)) {
+    target.skipReasons[reason] = (target.skipReasons[reason] ?? 0) + count;
+  }
+}
+
+type WorkerSkipReason =
+  | PolicyFailureCode
+  | "PUBLISHER_UNAVAILABLE"
+  | "OFFER_MISSING_AFFILIATE_LINK"
+  | "LOCK_NOT_ACQUIRED"
+  | "DUPLICATE_PUBLICATION";
+
+function recordSkip(metrics: JobMetrics, reason: WorkerSkipReason) {
+  metrics.skipped += 1;
+  metrics.skipReasons[reason] = (metrics.skipReasons[reason] ?? 0) + 1;
 }
 
 function asStringArray(value: unknown) {
@@ -280,11 +312,9 @@ export async function scheduleReadyOffers(now = new Date()) {
       take: 50,
       include: { affiliateLinks: true },
     }),
-    prisma.channel.findMany({
-      where: { enabled: true },
-      orderBy: { createdAt: "asc" },
-    }),
+    prisma.channel.findMany({ orderBy: { createdAt: "asc" } }),
   ]);
+  metrics.readyOffersFound = offers.length;
 
   for (const offer of offers) {
     let offerScheduled = false;
@@ -294,26 +324,29 @@ export async function scheduleReadyOffers(now = new Date()) {
         break;
       }
 
-      const publisher = publisherForChannel(channel);
-
-      if (!publisher) {
-        metrics.skipped += 1;
-        continue;
-      }
-
       const policy = channelPolicy(channel);
       const compatibility = isOfferCompatibleWithChannel(
         {
           marketplace: offer.marketplace,
           category: offer.category,
           score: offer.score,
+          scoreCompletenessPercentage: offer.scoreCompletenessPercentage?.toString() ?? null,
           discountPercentage: offer.discountPercentage?.toString() ?? null,
+          stockStatus: offer.stockStatus,
+          shippingStatus: offer.shippingStatus,
         },
         policy,
       );
 
       if (!compatibility.ok) {
-        metrics.skipped += 1;
+        recordSkip(metrics, compatibility.code);
+        continue;
+      }
+
+      const publisher = publisherForChannel(channel);
+
+      if (!publisher) {
+        recordSkip(metrics, "PUBLISHER_UNAVAILABLE");
         continue;
       }
 
@@ -332,21 +365,21 @@ export async function scheduleReadyOffers(now = new Date()) {
       });
 
       if (!windowResult.ok) {
-        metrics.skipped += 1;
+        recordSkip(metrics, windowResult.code);
         continue;
       }
 
       const payload = await messagePayloadFor(offer, channel);
 
       if (!payload) {
-        metrics.skipped += 1;
+        recordSkip(metrics, "OFFER_MISSING_AFFILIATE_LINK");
         continue;
       }
 
       const lock = await acquireLock(`publication:${channel.id}:${offer.id}`, 60_000);
 
       if (!lock.acquired) {
-        metrics.skipped += 1;
+        recordSkip(metrics, "LOCK_NOT_ACQUIRED");
         continue;
       }
 
@@ -364,7 +397,7 @@ export async function scheduleReadyOffers(now = new Date()) {
           metrics.scheduled += 1;
           offerScheduled = true;
         } else {
-          metrics.skipped += 1;
+          recordSkip(metrics, "DUPLICATE_PUBLICATION");
         }
       } finally {
         await lock.release();

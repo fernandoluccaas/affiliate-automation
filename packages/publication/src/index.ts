@@ -21,7 +21,7 @@ export type ChannelPolicy = {
   minimumIntervalMinutes: number;
   allowedStartTime?: string | null;
   allowedEndTime?: string | null;
-  minimumScore: number;
+  minimumScore?: number | string | null;
   minimumDiscountPercentage?: number | string | null;
   productRepeatIntervalDays: number;
   allowedMarketplaces: string[];
@@ -33,6 +33,9 @@ export type OfferPolicyInput = {
   category?: string | null;
   score?: number | null;
   discountPercentage?: number | string | null;
+  scoreCompletenessPercentage?: number | string | null;
+  stockStatus?: string | null;
+  shippingStatus?: string | null;
 };
 
 export type PublicationWindowInput = {
@@ -43,7 +46,19 @@ export type PublicationWindowInput = {
   lastProductPublicationAt?: Date | null;
 };
 
-export type PolicyResult = { ok: true } | { ok: false; reason: string };
+export type PolicyFailureCode =
+  | "CHANNEL_DISABLED"
+  | "CHANNEL_TYPE_UNAVAILABLE"
+  | "CHANNEL_MARKETPLACE_MISMATCH"
+  | "CHANNEL_CATEGORY_MISMATCH"
+  | "CHANNEL_MIN_SCORE"
+  | "CHANNEL_MIN_DISCOUNT"
+  | "CHANNEL_DAILY_LIMIT"
+  | "CHANNEL_MIN_INTERVAL"
+  | "CHANNEL_TIME_WINDOW"
+  | "CHANNEL_PRODUCT_REPEAT";
+
+export type PolicyResult = { ok: true } | { ok: false; code: PolicyFailureCode; reason: string };
 
 export function formatBRLCurrency(value: number | string) {
   return new Intl.NumberFormat("pt-BR", {
@@ -57,7 +72,7 @@ export function escapeMessageText(value: string) {
 }
 
 export function deterministicMessageComposer(offer: MessageOffer) {
-  const lines = [`ðŸ”¥ ${escapeMessageText(offer.title)}`, ""];
+  const lines = [`\u{1F525} ${escapeMessageText(offer.title)}`, ""];
 
   if (offer.originalPrice !== null && offer.originalPrice !== undefined) {
     lines.push(`De ${formatBRLCurrency(offer.originalPrice)}`);
@@ -67,7 +82,7 @@ export function deterministicMessageComposer(offer: MessageOffer) {
 
   if (offer.discountPercentage !== null && offer.discountPercentage !== undefined) {
     lines.push(
-      `ðŸ’° ${Number(offer.discountPercentage).toLocaleString("pt-BR", {
+      `\u{1F4B0} ${Number(offer.discountPercentage).toLocaleString("pt-BR", {
         maximumFractionDigits: 2,
       })}% de desconto`,
     );
@@ -87,7 +102,7 @@ export function deterministicMessageComposer(offer: MessageOffer) {
     lines.push("Frete gratis");
   }
 
-  lines.push("", "ðŸ›’ Confira:", offer.trackingUrl, "", "#publi - link de afiliado");
+  lines.push("", "\u{1F6D2} Confira:", offer.trackingUrl, "", "#publi - link de afiliado");
 
   return lines.join("\n");
 }
@@ -145,39 +160,61 @@ export function isOfferCompatibleWithChannel(
   channel: ChannelPolicy,
 ): PolicyResult {
   if (!channel.enabled) {
-    return { ok: false, reason: "Canal desativado." };
+    return { ok: false, code: "CHANNEL_DISABLED", reason: "Canal desativado." };
   }
 
   if (!["TELEGRAM", "MANUAL_EXPORT"].includes(channel.type)) {
-    return { ok: false, reason: "Tipo de canal indisponivel nesta fase." };
+    return {
+      ok: false,
+      code: "CHANNEL_TYPE_UNAVAILABLE",
+      reason: "Tipo de canal indisponivel nesta fase.",
+    };
   }
 
   if (
     channel.allowedMarketplaces.length > 0 &&
     !channel.allowedMarketplaces.includes(offer.marketplace)
   ) {
-    return { ok: false, reason: "Marketplace nao permitido para o canal." };
+    return {
+      ok: false,
+      code: "CHANNEL_MARKETPLACE_MISMATCH",
+      reason: "Marketplace nao permitido para o canal.",
+    };
   }
 
-  if (
-    offer.category &&
-    channel.allowedCategories.length > 0 &&
-    !channel.allowedCategories.includes(offer.category)
-  ) {
-    return { ok: false, reason: "Categoria nao permitida para o canal." };
+  if (channel.allowedCategories.length > 0) {
+    if (!offer.category || !channel.allowedCategories.includes(offer.category)) {
+      return {
+        ok: false,
+        code: "CHANNEL_CATEGORY_MISMATCH",
+        reason: "Categoria nao permitida para o canal.",
+      };
+    }
   }
 
-  if ((offer.score ?? 0) < channel.minimumScore) {
-    return { ok: false, reason: "Score abaixo do minimo do canal." };
+  const minimumScore = Number(channel.minimumScore ?? 0);
+
+  if (Number.isFinite(minimumScore) && minimumScore > 0 && (offer.score ?? 0) < minimumScore) {
+    return { ok: false, code: "CHANNEL_MIN_SCORE", reason: "Score abaixo do minimo do canal." };
   }
 
-  if (channel.minimumDiscountPercentage !== null && channel.minimumDiscountPercentage !== undefined) {
+  const minimumDiscount = Number(channel.minimumDiscountPercentage ?? 0);
+
+  if (Number.isFinite(minimumDiscount) && minimumDiscount > 0) {
     if (offer.discountPercentage === null || offer.discountPercentage === undefined) {
-      return { ok: false, reason: "Desconto indisponivel para a politica do canal." };
+      return {
+        ok: false,
+        code: "CHANNEL_MIN_DISCOUNT",
+        reason: "Desconto indisponivel para a politica do canal.",
+      };
     }
 
-    if (Number(offer.discountPercentage) < Number(channel.minimumDiscountPercentage)) {
-      return { ok: false, reason: "Desconto abaixo do minimo do canal." };
+    if (Number(offer.discountPercentage) < minimumDiscount) {
+      return {
+        ok: false,
+        code: "CHANNEL_MIN_DISCOUNT",
+        reason: "Desconto abaixo do minimo do canal.",
+      };
     }
   }
 
@@ -186,7 +223,11 @@ export function isOfferCompatibleWithChannel(
 
 export function canScheduleInWindow(input: PublicationWindowInput): PolicyResult {
   if (input.publicationsToday >= input.channel.dailyPublicationLimit) {
-    return { ok: false, reason: "Limite diario do canal atingido." };
+    return {
+      ok: false,
+      code: "CHANNEL_DAILY_LIMIT",
+      reason: "Limite diario do canal atingido.",
+    };
   }
 
   if (input.lastPublicationAt) {
@@ -194,12 +235,20 @@ export function canScheduleInWindow(input: PublicationWindowInput): PolicyResult
       (input.now.getTime() - input.lastPublicationAt.getTime()) / (60 * 1000);
 
     if (elapsedMinutes < input.channel.minimumIntervalMinutes) {
-      return { ok: false, reason: "Intervalo minimo entre publicacoes nao foi atingido." };
+      return {
+        ok: false,
+        code: "CHANNEL_MIN_INTERVAL",
+        reason: "Intervalo minimo entre publicacoes nao foi atingido.",
+      };
     }
   }
 
   if (!isWithinAllowedWindow(input.channel, input.now)) {
-    return { ok: false, reason: "Fora da janela de horario do canal." };
+    return {
+      ok: false,
+      code: "CHANNEL_TIME_WINDOW",
+      reason: "Fora da janela de horario do canal.",
+    };
   }
 
   if (input.lastProductPublicationAt) {
@@ -207,7 +256,11 @@ export function canScheduleInWindow(input: PublicationWindowInput): PolicyResult
       (input.now.getTime() - input.lastProductPublicationAt.getTime()) / (24 * 60 * 60 * 1000);
 
     if (elapsedDays < input.channel.productRepeatIntervalDays) {
-      return { ok: false, reason: "Produto publicado recentemente neste canal." };
+      return {
+        ok: false,
+        code: "CHANNEL_PRODUCT_REPEAT",
+        reason: "Produto publicado recentemente neste canal.",
+      };
     }
   }
 

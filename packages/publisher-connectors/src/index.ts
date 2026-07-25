@@ -177,7 +177,7 @@ export class TelegramPublisher implements PublisherAdapter {
     try {
       const response = await fetch(`https://api.telegram.org/bot${this.botToken}/${method}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json; charset=utf-8" },
         body: JSON.stringify(payload),
         signal: controller.signal,
       });

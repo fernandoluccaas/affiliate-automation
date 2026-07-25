@@ -215,6 +215,7 @@ function ChannelForm({
       <label className="grid gap-2">
         <Label>Score minimo</Label>
         <Input name="minimumScore" type="number" min="0" max="100" defaultValue={channel?.minimumScore ?? 70} />
+        <span className="text-xs text-[var(--muted-foreground)]">Vazio ou 0 = sem minimo.</span>
       </label>
       <label className="grid gap-2">
         <Label>Desconto minimo (%)</Label>
@@ -226,6 +227,7 @@ function ChannelForm({
           step="0.01"
           defaultValue={channel?.minimumDiscountPercentage ?? ""}
         />
+        <span className="text-xs text-[var(--muted-foreground)]">Vazio ou 0 = sem minimo.</span>
       </label>
       <label className="grid gap-2">
         <Label>Repeticao de produto (dias)</Label>
@@ -243,6 +245,7 @@ function ChannelForm({
       <label className="grid gap-2">
         <Label>Categorias permitidas</Label>
         <Input name="allowedCategories" placeholder="Casa, Eletronicos" defaultValue={channel?.allowedCategories ?? ""} />
+        <span className="text-xs text-[var(--muted-foreground)]">Vazio = todas as categorias.</span>
       </label>
       <label className="grid gap-2">
         <Label>Telegram Chat ID</Label>

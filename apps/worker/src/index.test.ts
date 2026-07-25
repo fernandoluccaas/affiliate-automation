@@ -10,6 +10,24 @@ vi.mock("@affiliate/database", async () => {
   };
 });
 
+vi.mock("@affiliate/ai-copywriter", () => ({
+  generateMessageForOffer: vi.fn().mockResolvedValue({
+    message: "\u{1F525} Produto teste\n\nPor R$ 345,99\n\n\u{1F6D2} Confira:\nhttps://example.com/go/slug\n\n#publi - link de afiliado",
+    source: "DETERMINISTIC_FALLBACK",
+    aiProvider: "DETERMINISTIC",
+    aiValidationPassed: false,
+    aiValidationReasons: [],
+    generatedAt: new Date("2026-07-24T12:00:00.000Z"),
+  }),
+}));
+
+vi.mock("@affiliate/redis", () => ({
+  acquireLock: vi.fn().mockResolvedValue({
+    acquired: true,
+    release: vi.fn().mockResolvedValue(undefined),
+  }),
+}));
+
 describe("createPublicationIdempotently", () => {
   it("only queries READY_TO_PUBLISH offers for scheduling", async () => {
     const actual = await import("@affiliate/database");
@@ -25,6 +43,102 @@ describe("createPublicationIdempotently", () => {
     expect(findManyOffers).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { status: "READY_TO_PUBLISH" },
+      }),
+    );
+  });
+
+  it("schedules a sparse READY_TO_PUBLISH offer for a channel without optional minimums", async () => {
+    const actual = await import("@affiliate/database");
+    const now = new Date("2026-07-24T12:00:00.000Z");
+    const offer = {
+      id: "offer-sparse",
+      productId: "product-1",
+      title: "Produto teste sem dados enriquecidos",
+      externalProductId: "produto-opcional-001",
+      marketplace: "SHOPEE",
+      category: null,
+      imageUrl: null,
+      originalPrice: null,
+      currentPrice: 345.99,
+      discountPercentage: null,
+      couponCode: null,
+      couponExpiration: null,
+      freeShipping: false,
+      shippingStatus: "UNKNOWN",
+      stockStatus: "UNKNOWN",
+      score: 100,
+      scoreCompletenessPercentage: 10,
+      affiliateUrl: "https://example.com/affiliate",
+      version: 1,
+      affiliateLinks: [
+        {
+          id: "link-1",
+          slug: "produto-opcional-001",
+          destination: "https://example.com/affiliate",
+          active: true,
+        },
+      ],
+    };
+    const channel = {
+      id: "channel-1",
+      name: "Telegram teste",
+      type: "TELEGRAM",
+      enabled: true,
+      timezone: "America/Fortaleza",
+      dailyPublicationLimit: 10,
+      minimumIntervalMinutes: 0,
+      allowedStartTime: null,
+      allowedEndTime: null,
+      minimumScore: 0,
+      minDiscountPercentage: 0,
+      productRepeatIntervalDays: 0,
+      allowedMarketplaces: ["SHOPEE"],
+      allowedCategories: [],
+      configuration: { chatId: "chat-1" },
+      createdAt: now,
+      updatedAt: now,
+    };
+    const upsert = vi.fn().mockResolvedValue({
+      id: "publication-1",
+      createdAt: now,
+      updatedAt: now,
+    });
+    const offerUpdate = vi.fn().mockResolvedValue(offer);
+
+    Object.assign(actual.prisma, {
+      offer: {
+        findMany: vi.fn().mockResolvedValue([offer]),
+        update: offerUpdate,
+      },
+      channel: { findMany: vi.fn().mockResolvedValue([channel]) },
+      publication: {
+        count: vi.fn().mockResolvedValue(0),
+        findFirst: vi.fn().mockResolvedValue(null),
+        upsert,
+      },
+      $transaction: vi.fn(async (callback: (tx: unknown) => unknown) =>
+        callback({ publication: { upsert }, offer: { update: offerUpdate } }),
+      ),
+    });
+
+    const metrics = await scheduleReadyOffers(now);
+
+    expect(metrics).toMatchObject({
+      readyOffersFound: 1,
+      scheduled: 1,
+      skipped: 0,
+      skipReasons: {},
+    });
+    expect(upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          offerId: "offer-sparse",
+          channelId: "channel-1",
+          status: "SCHEDULED",
+          originalPriceSnapshot: null,
+          discountPercentageSnapshot: null,
+          shippingStatusSnapshot: "UNKNOWN",
+        }),
       }),
     );
   });

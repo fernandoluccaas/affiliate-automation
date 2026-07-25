@@ -68,4 +68,35 @@ describe("TelegramPublisher", () => {
     expect(result).toMatchObject({ status: "PUBLISHED", externalId: "456" });
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
+
+  it("sends Telegram JSON as UTF-8 without mojibake", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ ok: true, result: { message_id: 789 } }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const message = "\u{1F525} Produto em promoção\n\u{1F6D2} Confira\nSão Luís\nPreço válido";
+    await new TelegramPublisher({
+      botToken: "secret-token",
+      chatId: "chat-1",
+      timeoutMs: 1000,
+    }).publish({ ...payload, imageUrl: null, message });
+
+    const [, request] = fetchMock.mock.calls[0]!;
+    const body = String((request as RequestInit).body);
+    const parsed = JSON.parse(body) as { text: string };
+
+    expect((request as RequestInit).headers).toMatchObject({
+      "Content-Type": "application/json; charset=utf-8",
+    });
+    expect(parsed.text).toBe(message);
+    expect(body).toContain("\u{1F525}");
+    expect(body).toContain("\u{1F6D2}");
+    expect(body).toContain("São Luís");
+    expect(body).toContain("Preço válido");
+    expect(body).not.toContain("Ã°Å¸");
+    expect(body).not.toContain("Ãƒ");
+    expect(body).not.toContain("Ã‚");
+  });
 });
