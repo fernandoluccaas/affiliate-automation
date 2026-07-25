@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  MercadoLivreApiError,
   MercadoLivreApiClient,
   MercadoLivreConnector,
   MercadoLivreOAuthClient,
@@ -111,6 +112,24 @@ describe("MercadoLivreApiClient", () => {
 });
 
 describe("MercadoLivreConnector", () => {
+  it("loads site root categories", async () => {
+    const fetchFn = vi.fn(async () =>
+      jsonResponse([
+        { id: "MLB1000", name: "Eletronicos" },
+        { id: "MLB2000", name: "Casa" },
+      ]),
+    );
+    const connector = new MercadoLivreConnector({
+      client: new MercadoLivreApiClient({ accessToken: "token", fetchFn }),
+      siteId: "MLB",
+    });
+
+    await expect(connector.getSiteCategories()).resolves.toEqual([
+      { id: "MLB1000", name: "Eletronicos" },
+      { id: "MLB2000", name: "Casa" },
+    ]);
+  });
+
   it("loads category and category children", async () => {
     const fetchFn = vi.fn(async () =>
       jsonResponse({
@@ -127,6 +146,55 @@ describe("MercadoLivreConnector", () => {
     await expect(connector.getCategoryChildren("MLB1055")).resolves.toEqual([
       { id: "MLB123", name: "Smartphones" },
     ]);
+  });
+
+  it("marks category with children as not leaf", async () => {
+    const fetchFn = vi.fn(async () =>
+      jsonResponse({
+        id: "MLB1055",
+        name: "Eletronicos",
+        path_from_root: [{ id: "MLB1055", name: "Eletronicos" }],
+        children_categories: [{ id: "MLB123", name: "Celulares" }],
+      }),
+    );
+    const connector = new MercadoLivreConnector({
+      client: new MercadoLivreApiClient({ accessToken: "token", fetchFn }),
+    });
+
+    const category = await connector.getCategory("MLB1055");
+
+    expect(category?.children).toHaveLength(1);
+  });
+
+  it("marks category without children as leaf", async () => {
+    const fetchFn = vi.fn(async () =>
+      jsonResponse({
+        id: "MLB123",
+        name: "Celulares",
+        path_from_root: [
+          { id: "MLB1055", name: "Eletronicos" },
+          { id: "MLB123", name: "Celulares" },
+        ],
+        children_categories: [],
+      }),
+    );
+    const connector = new MercadoLivreConnector({
+      client: new MercadoLivreApiClient({ accessToken: "token", fetchFn }),
+    });
+
+    const category = await connector.getCategory("MLB123");
+
+    expect(category?.children).toHaveLength(0);
+    expect(category?.pathFromRoot.map((item) => item.name).join(" > ")).toBe("Eletronicos > Celulares");
+  });
+
+  it("surfaces nonexistent category as 404", async () => {
+    const fetchFn = vi.fn(async () => jsonResponse({ message: "Category not found" }, 404));
+    const connector = new MercadoLivreConnector({
+      client: new MercadoLivreApiClient({ accessToken: "token", fetchFn, retries: 0 }),
+    });
+
+    await expect(connector.getCategory("MLB404")).rejects.toBeInstanceOf(MercadoLivreApiError);
   });
 
   it("normalizes best sellers from highlights", async () => {
@@ -147,6 +215,31 @@ describe("MercadoLivreConnector", () => {
       { externalId: "MLB1", position: 1, type: "ITEM" },
       { externalId: "MLB2", position: 2, type: null },
     ]);
+  });
+
+  it("keeps empty highlights as an empty list", async () => {
+    const fetchFn = vi.fn(async () => jsonResponse({ content: [] }));
+    const connector = new MercadoLivreConnector({
+      client: new MercadoLivreApiClient({ accessToken: "token", fetchFn }),
+      siteId: "MLB",
+    });
+
+    await expect(connector.getBestSellers("MLB123")).resolves.toEqual([]);
+  });
+
+  it("surfaces highlights 404 so discovery can record NO_HIGHLIGHTS_FOR_CATEGORY", async () => {
+    const fetchFn = vi.fn(async () =>
+      jsonResponse({ message: "Dimension CATEGORY with id MLB123 not found" }, 404),
+    );
+    const connector = new MercadoLivreConnector({
+      client: new MercadoLivreApiClient({ accessToken: "token", fetchFn, retries: 0 }),
+      siteId: "MLB",
+    });
+
+    await expect(connector.getBestSellers("MLB123")).rejects.toMatchObject({
+      status: 404,
+      message: expect.stringContaining("Dimension CATEGORY"),
+    });
   });
 
   it("uses official prices and preserves null or UNKNOWN fields", async () => {

@@ -2,6 +2,7 @@ import {
   MercadoLivreApiError,
   MercadoLivreInvalidResponseError,
   createMercadoLivreConnector,
+  type MarketplaceConnector,
   type MarketplaceOfferCandidate,
 } from "@affiliate/marketplace-connectors";
 import { prisma } from "@affiliate/database";
@@ -71,6 +72,9 @@ function candidateInput(candidate: MarketplaceOfferCandidate) {
 function baseRunMetrics() {
   return {
     categoriesProcessed: 0,
+    categoriesWithHighlights: 0,
+    categoriesSkipped: 0,
+    categorySkipReasons: {} as Record<string, number>,
     candidatesFound: 0,
     uniqueCandidates: 0,
     itemsFetched: 0,
@@ -82,6 +86,17 @@ function baseRunMetrics() {
     rejected: 0,
     errors: 0,
   };
+}
+
+type CategorySkipReason =
+  | "NO_HIGHLIGHTS_FOR_CATEGORY"
+  | "CATEGORY_NOT_LEAF"
+  | "CATEGORY_NOT_FOUND"
+  | "CATEGORY_API_ERROR";
+
+function recordCategorySkip(metrics: ReturnType<typeof baseRunMetrics>, reason: CategorySkipReason) {
+  metrics.categoriesSkipped += 1;
+  metrics.categorySkipReasons[reason] = (metrics.categorySkipReasons[reason] ?? 0) + 1;
 }
 
 function discountPercentage(originalPrice: number | null | undefined, currentPrice: number) {
@@ -109,6 +124,65 @@ function alertCodeForMercadoLivreError(error: unknown) {
   }
 
   return "MELI_API_UNAVAILABLE";
+}
+
+function isNotFound(error: unknown) {
+  return error instanceof MercadoLivreApiError && error.status === 404;
+}
+
+export async function discoverCandidatesFromLeafCategories(
+  connector: MarketplaceConnector,
+  categoryIds: string[],
+  maxCandidatesPerCategory: number,
+  metrics: ReturnType<typeof baseRunMetrics>,
+) {
+  const itemIds = new Set<string>();
+
+  for (const categoryId of categoryIds) {
+    metrics.categoriesProcessed += 1;
+
+    let category;
+
+    try {
+      category = await connector.getCategory(categoryId);
+    } catch (error) {
+      recordCategorySkip(metrics, isNotFound(error) ? "CATEGORY_NOT_FOUND" : "CATEGORY_API_ERROR");
+      continue;
+    }
+
+    if (!category) {
+      recordCategorySkip(metrics, "CATEGORY_NOT_FOUND");
+      continue;
+    }
+
+    if (category.children.length > 0) {
+      recordCategorySkip(metrics, "CATEGORY_NOT_LEAF");
+      continue;
+    }
+
+    let highlights;
+
+    try {
+      highlights = await connector.getBestSellers(category.id);
+    } catch (error) {
+      recordCategorySkip(metrics, isNotFound(error) ? "NO_HIGHLIGHTS_FOR_CATEGORY" : "CATEGORY_API_ERROR");
+      continue;
+    }
+
+    if (highlights.length === 0) {
+      recordCategorySkip(metrics, "NO_HIGHLIGHTS_FOR_CATEGORY");
+      continue;
+    }
+
+    metrics.categoriesWithHighlights += 1;
+
+    for (const item of highlights.slice(0, maxCandidatesPerCategory)) {
+      itemIds.add(item.externalId);
+    }
+  }
+
+  metrics.candidatesFound = itemIds.size;
+  return connector.getItems([...itemIds]);
 }
 
 export async function collectMercadoLivreCandidates(now = new Date(), options: MercadoLivreJobOptions = {}) {
@@ -143,11 +217,12 @@ export async function collectMercadoLivreCandidates(now = new Date(), options: M
   try {
     const connector = await createMercadoLivreConnector();
     const categoryIds = jsonStringArray(config.categoryIds);
-    runMetrics.categoriesProcessed = categoryIds.length;
-    const candidates = await connector.discoverCandidates(categoryIds, {
-      maxCandidatesPerCategory: Math.min(config.maxCandidatesPerCategory, 20),
-    });
-    runMetrics.candidatesFound = candidates.length;
+    const candidates = await discoverCandidatesFromLeafCategories(
+      connector,
+      categoryIds,
+      Math.min(config.maxCandidatesPerCategory, 20),
+      runMetrics,
+    );
     const unique = new Map(candidates.map((candidate) => [candidate.externalProductId, candidate]));
     runMetrics.uniqueCandidates = unique.size;
     runMetrics.itemsFetched = unique.size;

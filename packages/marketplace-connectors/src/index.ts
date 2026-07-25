@@ -41,6 +41,7 @@ export interface MarketplaceConnector {
   getItem(id: string): Promise<MarketplaceOfferCandidate | null>;
   getItems(ids: string[]): Promise<MarketplaceOfferCandidate[]>;
   getPrice(itemId: string): Promise<MercadoLivrePrice>;
+  getSiteCategories(): Promise<MercadoLivreCategoryChild[]>;
   getCategory(categoryId: string): Promise<MercadoLivreCategory | null>;
   getCategoryChildren(categoryId: string): Promise<MercadoLivreCategoryChild[]>;
   getBestSellers(categoryId: string): Promise<MercadoLivreBestSeller[]>;
@@ -110,6 +111,7 @@ export class MercadoLivreApiError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    readonly responseBody?: unknown,
   ) {
     super(message);
     this.name = "MercadoLivreApiError";
@@ -218,6 +220,13 @@ function asNumber(value: unknown) {
   return null;
 }
 
+function responseErrorMessage(body: unknown, fallback: string) {
+  const record = asRecord(body);
+  const message = asString(record?.message) ?? asString(record?.error);
+
+  return message ? `${fallback}: ${message}` : fallback;
+}
+
 function timeoutSignal(timeoutMs: number) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -262,7 +271,16 @@ export class MercadoLivreApiClient {
         }
 
         if (![429, 500, 502, 503, 504].includes(response.status) || attempt >= retries) {
-          throw new MercadoLivreApiError(`Mercado Livre API ${response.status}: ${response.statusText}`, response.status);
+          let body: unknown;
+
+          try {
+            body = await response.json();
+          } catch {
+            body = undefined;
+          }
+
+          const fallback = `Mercado Livre API ${response.status}: ${response.statusText}`;
+          throw new MercadoLivreApiError(responseErrorMessage(body, fallback), response.status, body);
         }
       } catch (error) {
         lastError = error;
@@ -617,6 +635,16 @@ export class MercadoLivreConnector implements MarketplaceConnector {
 
   async getPrice(itemId: string) {
     return this.priceService.getPrice(itemId);
+  }
+
+  async getSiteCategories() {
+    const siteId = this.options.siteId ?? "MLB";
+    const body = await this.options.client.request(`/sites/${encodeURIComponent(siteId)}/categories`);
+    return asArray(body)
+      .map(asRecord)
+      .filter(isRecord)
+      .map((item) => ({ id: asString(item.id) ?? "", name: asString(item.name) ?? "" }))
+      .filter((item) => item.id);
   }
 
   async getCategory(categoryId: string) {

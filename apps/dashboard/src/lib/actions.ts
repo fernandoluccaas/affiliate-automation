@@ -6,6 +6,8 @@ import {
   MercadoLivreApiError,
   createMercadoLivreConnector,
   getMercadoLivreConfig,
+  type MarketplaceConnector,
+  type MercadoLivreCategory,
 } from "@affiliate/marketplace-connectors";
 import { formatOfferFormError, ingestOffer, offerFormSchema, type OfferFormInput } from "@affiliate/ingestion";
 import bcrypt from "bcryptjs";
@@ -112,10 +114,16 @@ const mercadoLivreConfigSchema = z.object({
   siteId: z.string().trim().min(1, "Informe o site ID."),
   categoryIds: z.string().optional(),
   bestSellersEnabled: z.boolean(),
-  minimumPrice: z.preprocess((value) => (value === "" ? undefined : value), z.coerce.number().positive().optional()),
-  maximumPrice: z.preprocess((value) => (value === "" ? undefined : value), z.coerce.number().positive().optional()),
+  minimumPrice: z.preprocess(
+    (value) => (value === "" || value === null ? undefined : value),
+    z.coerce.number().positive().optional(),
+  ),
+  maximumPrice: z.preprocess(
+    (value) => (value === "" || value === null ? undefined : value),
+    z.coerce.number().positive().optional(),
+  ),
   minimumDiscountPercentage: z.preprocess(
-    (value) => (value === "" ? undefined : value),
+    (value) => (value === "" || value === null ? undefined : value),
     z.coerce.number().min(0).max(100).optional(),
   ),
   minimumScore: z.coerce.number().int().min(0).max(100),
@@ -127,6 +135,10 @@ const affiliateLinkSchema = z.object({
   offerId: z.string().min(1),
   affiliateUrl: z.string().trim().url("Informe uma URL afiliada valida."),
   affiliateLabel: z.string().trim().optional(),
+});
+
+const mercadoLivreCategorySchema = z.object({
+  categoryId: z.string().trim().min(1, "Informe a categoria."),
 });
 
 function stringList(value?: string) {
@@ -249,6 +261,86 @@ export async function testTelegramChannelAction(formData: FormData) {
   const ok = await publisher.validateCredentials();
 
   redirect(`/canais?message=${ok ? "telegram-ok" : "telegram-failed"}`);
+}
+
+function uniqueStringList(values: string[]) {
+  return [...new Set(values.map((item) => item.trim()).filter(Boolean))];
+}
+
+function categoryPath(category: MercadoLivreCategory) {
+  const path = category.pathFromRoot.length > 0 ? category.pathFromRoot : [{ id: category.id, name: category.name }];
+  return path.map((item) => item.name).filter(Boolean).join(" > ");
+}
+
+function categoryTestQuery(params: Record<string, string | number | boolean>) {
+  const query = new URLSearchParams();
+
+  for (const [key, value] of Object.entries(params)) {
+    query.set(key, String(value));
+  }
+
+  return query.toString();
+}
+
+async function validateMercadoLivreDiscoveryCategory(
+  connector: MarketplaceConnector,
+  categoryId: string,
+  options: { requireLeaf: boolean },
+) {
+  let category: MercadoLivreCategory | null;
+
+  try {
+    category = await connector.getCategory(categoryId);
+  } catch (error) {
+    if (error instanceof MercadoLivreApiError && error.status === 404) {
+      return { ok: false as const, message: "category-not-found" };
+    }
+
+    return { ok: false as const, message: "category-api-error" };
+  }
+
+  if (!category) {
+    return { ok: false as const, message: "category-not-found" };
+  }
+
+  if (options.requireLeaf && category.children.length > 0) {
+    return { ok: false as const, message: "category-not-leaf", category };
+  }
+
+  return { ok: true as const, category };
+}
+
+async function upsertMercadoLivreConfig(data: {
+  enabled: boolean;
+  siteId: string;
+  categoryIds: string[];
+  bestSellersEnabled: boolean;
+  minimumPrice?: number | null;
+  maximumPrice?: number | null;
+  minimumDiscountPercentage?: number | null;
+  minimumScore: number;
+  maxCandidatesPerCategory: number;
+  refreshIntervalMinutes: number;
+}) {
+  const existing = await prisma.mercadoLivreDiscoveryConfig.findFirst({ select: { id: true } });
+  const payload = {
+    enabled: data.enabled,
+    siteId: data.siteId,
+    categoryIds: uniqueStringList(data.categoryIds),
+    bestSellersEnabled: data.bestSellersEnabled,
+    minimumPrice: data.minimumPrice ?? null,
+    maximumPrice: data.maximumPrice ?? null,
+    minimumDiscountPercentage: data.minimumDiscountPercentage ?? null,
+    minimumScore: data.minimumScore,
+    maxCandidatesPerCategory: data.maxCandidatesPerCategory,
+    refreshIntervalMinutes: data.refreshIntervalMinutes,
+  };
+
+  if (existing) {
+    await prisma.mercadoLivreDiscoveryConfig.update({ where: { id: existing.id }, data: payload });
+  } else {
+    await prisma.mercadoLivreDiscoveryConfig.create({ data: payload });
+  }
 }
 
 function decimalToString(value: Prisma.Decimal | null) {
@@ -382,12 +474,32 @@ export async function saveMercadoLivreConfigAction(formData: FormData) {
   }
 
   const data = parsed.data;
-  const existing = await prisma.mercadoLivreDiscoveryConfig.findFirst({ select: { id: true } });
+  const categoryIds = stringList(data.categoryIds);
 
-  const payload = {
+  if (categoryIds.length > 0) {
+    let connector: MarketplaceConnector;
+
+    try {
+      connector = await createMercadoLivreConnector();
+    } catch {
+      redirect("/integracoes/mercado-livre?message=category-api-error");
+    }
+
+    for (const categoryId of categoryIds) {
+      const validation = await validateMercadoLivreDiscoveryCategory(connector, categoryId, {
+        requireLeaf: data.bestSellersEnabled,
+      });
+
+      if (!validation.ok) {
+        redirect(`/integracoes/mercado-livre?message=${validation.message}&categoryId=${encodeURIComponent(categoryId)}`);
+      }
+    }
+  }
+
+  await upsertMercadoLivreConfig({
     enabled: data.enabled,
     siteId: data.siteId,
-    categoryIds: stringList(data.categoryIds),
+    categoryIds,
     bestSellersEnabled: data.bestSellersEnabled,
     minimumPrice: data.minimumPrice ?? null,
     maximumPrice: data.maximumPrice ?? null,
@@ -395,17 +507,114 @@ export async function saveMercadoLivreConfigAction(formData: FormData) {
     minimumScore: data.minimumScore,
     maxCandidatesPerCategory: data.maxCandidatesPerCategory,
     refreshIntervalMinutes: data.refreshIntervalMinutes,
-  };
-
-  if (existing) {
-    await prisma.mercadoLivreDiscoveryConfig.update({ where: { id: existing.id }, data: payload });
-  } else {
-    await prisma.mercadoLivreDiscoveryConfig.create({ data: payload });
-  }
+  });
 
   revalidatePath("/integracoes");
   revalidatePath("/integracoes/mercado-livre");
   redirect("/integracoes/mercado-livre?message=config-saved");
+}
+
+export async function addMercadoLivreCategoryAction(formData: FormData) {
+  const parsed = mercadoLivreCategorySchema.safeParse({
+    categoryId: formData.get("categoryId")?.toString(),
+  });
+
+  if (!parsed.success) {
+    redirect("/integracoes/mercado-livre?message=category-invalid");
+  }
+
+  const [config, connector] = await Promise.all([
+    prisma.mercadoLivreDiscoveryConfig.findFirst({ orderBy: { updatedAt: "desc" } }),
+    createMercadoLivreConnector().catch(() => null),
+  ]);
+
+  if (!connector) {
+    redirect("/integracoes/mercado-livre?message=category-api-error");
+  }
+
+  const validation = await validateMercadoLivreDiscoveryCategory(connector, parsed.data.categoryId, {
+    requireLeaf: true,
+  });
+
+  if (!validation.ok) {
+    redirect(
+      `/integracoes/mercado-livre?message=${validation.message}&categoryId=${encodeURIComponent(parsed.data.categoryId)}`,
+    );
+  }
+
+  await upsertMercadoLivreConfig({
+    enabled: config?.enabled ?? false,
+    siteId: config?.siteId ?? getMercadoLivreConfig().siteId,
+    categoryIds: [...stringList(Array.isArray(config?.categoryIds) ? config.categoryIds.join(",") : ""), validation.category.id],
+    bestSellersEnabled: config?.bestSellersEnabled ?? true,
+    minimumPrice: config?.minimumPrice ? Number(config.minimumPrice) : null,
+    maximumPrice: config?.maximumPrice ? Number(config.maximumPrice) : null,
+    minimumDiscountPercentage: config?.minimumDiscountPercentage ? Number(config.minimumDiscountPercentage) : null,
+    minimumScore: config?.minimumScore ?? 70,
+    maxCandidatesPerCategory: config?.maxCandidatesPerCategory ?? 20,
+    refreshIntervalMinutes: config?.refreshIntervalMinutes ?? 360,
+  });
+
+  revalidatePath("/integracoes/mercado-livre");
+  redirect(`/integracoes/mercado-livre?message=category-added&categoryId=${encodeURIComponent(validation.category.id)}`);
+}
+
+export async function testMercadoLivreCategoryAction(formData: FormData) {
+  const parsed = mercadoLivreCategorySchema.safeParse({
+    categoryId: formData.get("categoryId")?.toString(),
+  });
+
+  if (!parsed.success) {
+    redirect("/integracoes/mercado-livre?message=category-invalid");
+  }
+
+  let connector: MarketplaceConnector;
+
+  try {
+    connector = await createMercadoLivreConnector();
+  } catch {
+    redirect("/integracoes/mercado-livre?message=category-api-error");
+  }
+
+  const validation = await validateMercadoLivreDiscoveryCategory(connector, parsed.data.categoryId, {
+    requireLeaf: false,
+  });
+
+  if (!validation.ok) {
+    redirect(
+      `/integracoes/mercado-livre?message=${validation.message}&categoryId=${encodeURIComponent(parsed.data.categoryId)}`,
+    );
+  }
+
+  let highlightsAvailable = false;
+  let candidatesFound = 0;
+  let highlightsReason = "";
+
+  try {
+    const highlights = await connector.getBestSellers(validation.category.id);
+    highlightsAvailable = highlights.length > 0;
+    candidatesFound = highlights.length;
+    highlightsReason = highlightsAvailable ? "OK" : "NO_HIGHLIGHTS_FOR_CATEGORY";
+  } catch (error) {
+    highlightsReason =
+      error instanceof MercadoLivreApiError && error.status === 404
+        ? "NO_HIGHLIGHTS_FOR_CATEGORY"
+        : "CATEGORY_API_ERROR";
+  }
+
+  redirect(
+    `/integracoes/mercado-livre?${categoryTestQuery({
+      message: "category-tested",
+      categoryId: validation.category.id,
+      categoryName: validation.category.name,
+      categoryPath: categoryPath(validation.category),
+      categoryLeaf: validation.category.children.length === 0,
+      categoryChildrenCount: validation.category.children.length,
+      highlightsAvailable,
+      candidatesFound,
+      highlightsReason,
+    })}`,
+  );
 }
 
 export async function testMercadoLivreIntegrationAction() {
