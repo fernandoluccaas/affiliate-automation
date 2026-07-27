@@ -103,7 +103,7 @@ MERCADO_LIVRE_SITE_ID="MLB"
 
 Use `/integracoes` to connect or reconnect through OAuth 2.0. Tokens are encrypted in `MarketplaceAccount`, refresh tokens are treated as rotating credentials, and Redis locks prevent concurrent refresh.
 
-Use `/integracoes/mercado-livre` to enable discovery, choose official category IDs, set price/discount/score filters and run manual sync. Discovery uses official categories, highlights/best sellers, multiget item details and the official item prices endpoint. Missing original price, shipping certainty, image, rating, sales count or commission stays `null`/`UNKNOWN`.
+Use `/integracoes/mercado-livre` to enable discovery, choose official category IDs, set price/discount/score filters and run manual sync. Discovery uses official categories, highlights/best sellers, catalog product resolution, multiget item details and the official item prices endpoint. Highlight `PRODUCT` entries may be catalog parents; the resolver follows bounded `children_ids` to a child with `buy_box_winner.item_id` before deduplicating by final item ID. Missing original price, shipping certainty, image, rating, sales count or commission stays `null`/`UNKNOWN`.
 
 Mercado Livre affiliate links are not generated automatically. Valid offers without an official affiliate URL become `READY_FOR_AFFILIATE_LINK`; fill the link in `/ofertas/affiliate-links`. Mercado Livre publications use `DIRECT_AFFILIATE_LINK`, so the worker sends the official affiliate URL directly instead of `/go/[slug]`.
 

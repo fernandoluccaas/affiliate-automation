@@ -36,7 +36,9 @@ export type MarketplaceOfferCandidate = {
   channels?: string[];
   sourceHighlightId?: string;
   sourceHighlightType?: MercadoLivreHighlightCandidate["type"];
+  resolvedProductId?: string;
   resolvedItemId?: string;
+  resolutionStrategy?: MercadoLivreResolutionStrategy;
   collectedAt?: Date;
 };
 
@@ -113,7 +115,18 @@ export type MercadoLivreBestSeller = MercadoLivreHighlightCandidate;
 
 export type MercadoLivreProduct = {
   id: string;
+  name: string | null;
+  status: string | null;
+  parentId: string | null;
+  childrenIds: string[];
+  soldQuantity: number | null;
+  buyBoxWinner: {
+    itemId: string | null;
+    price: number | null;
+  } | null;
+  buyBoxWinnerPriceRange: unknown;
   buyBoxWinnerItemId: string | null;
+  buyBoxWinnerPrice: number | null;
 };
 
 export type MercadoLivreUserProduct = {
@@ -124,23 +137,55 @@ export type MercadoLivreUserProduct = {
 export type MercadoLivreHighlightSkipReason =
   | "UNSUPPORTED_HIGHLIGHT_TYPE"
   | "PRODUCT_NOT_FOUND"
-  | "PRODUCT_NO_BUY_BOX_WINNER"
+  | "PRODUCT_PARENT_NO_RESOLVABLE_CHILD"
+  | "PRODUCT_LEAF_NO_BUY_BOX_WINNER"
+  | "PRODUCT_CHILD_NOT_FOUND"
+  | "PRODUCT_CHILD_RESOLUTION_ERROR"
+  | "PRODUCT_TREE_DEPTH_LIMIT"
+  | "PRODUCT_TREE_SIZE_LIMIT"
   | "USER_PRODUCT_NOT_FOUND"
   | "USER_PRODUCT_NO_USER"
   | "USER_PRODUCT_NO_ACTIVE_ITEM"
   | "CANDIDATE_RESOLUTION_ERROR";
 
+export type MercadoLivreResolutionStrategy =
+  | "ITEM_DIRECT"
+  | "PRODUCT_DIRECT_BUY_BOX"
+  | "PRODUCT_CHILD_BUY_BOX"
+  | "USER_PRODUCT_ACTIVE_ITEM";
+
+export type MercadoLivreProductResolutionDiagnostics = {
+  productDirectWinnerCount: number;
+  productParentCount: number;
+  productLeafCount: number;
+  productResolvedDirectly: number;
+  productResolvedViaChild: number;
+  productLeafWithoutWinner: number;
+  productParentWithoutResolvableChild: number;
+};
+
 export type MercadoLivreResolvedHighlightCandidate = {
   sourceHighlightId: string;
   sourceHighlightType: MercadoLivreHighlightCandidate["type"];
+  resolvedProductId?: string;
   resolvedItemId: string;
+  resolutionStrategy: MercadoLivreResolutionStrategy;
   position: number;
   categoryId: string;
 };
 
 export type MercadoLivreHighlightResolutionResult =
-  | { ok: true; candidate: MercadoLivreResolvedHighlightCandidate }
-  | { ok: false; reason: MercadoLivreHighlightSkipReason; candidate: MercadoLivreHighlightCandidate };
+  | {
+      ok: true;
+      candidate: MercadoLivreResolvedHighlightCandidate;
+      diagnostics?: MercadoLivreProductResolutionDiagnostics;
+    }
+  | {
+      ok: false;
+      reason: MercadoLivreHighlightSkipReason;
+      candidate: MercadoLivreHighlightCandidate;
+      diagnostics?: MercadoLivreProductResolutionDiagnostics;
+    };
 
 function normalizeHighlightType(value: unknown): MercadoLivreHighlightCandidate["type"] {
   const type = asString(value);
@@ -626,32 +671,107 @@ function normalizeItemUrl(item: Record<string, unknown>) {
 function resolvedHighlight(
   candidate: MercadoLivreHighlightCandidate,
   resolvedItemId: string,
+  strategy: MercadoLivreResolutionStrategy,
+  metadata: { resolvedProductId?: string } = {},
+  diagnostics?: MercadoLivreProductResolutionDiagnostics,
 ): MercadoLivreHighlightResolutionResult {
   return {
     ok: true,
     candidate: {
       sourceHighlightId: candidate.id,
       sourceHighlightType: candidate.type,
+      ...(metadata.resolvedProductId ? { resolvedProductId: metadata.resolvedProductId } : {}),
       resolvedItemId,
+      resolutionStrategy: strategy,
       position: candidate.position,
       categoryId: candidate.categoryId,
     },
+    ...(diagnostics ? { diagnostics } : {}),
   };
 }
 
 function skippedHighlight(
   candidate: MercadoLivreHighlightCandidate,
   reason: MercadoLivreHighlightSkipReason,
+  diagnostics?: MercadoLivreProductResolutionDiagnostics,
 ): MercadoLivreHighlightResolutionResult {
-  return { ok: false, candidate, reason };
+  return { ok: false, candidate, reason, ...(diagnostics ? { diagnostics } : {}) };
 }
 
 function marketplaceChannels(candidate: MarketplaceOfferCandidate) {
   return (candidate.channels ?? []).map((channel) => channel.toLowerCase());
 }
 
+function emptyProductDiagnostics(): MercadoLivreProductResolutionDiagnostics {
+  return {
+    productDirectWinnerCount: 0,
+    productParentCount: 0,
+    productLeafCount: 0,
+    productResolvedDirectly: 0,
+    productResolvedViaChild: 0,
+    productLeafWithoutWinner: 0,
+    productParentWithoutResolvableChild: 0,
+  };
+}
+
+function countProductShape(product: MercadoLivreProduct, diagnostics: MercadoLivreProductResolutionDiagnostics) {
+  if (product.childrenIds.length > 0) {
+    diagnostics.productParentCount += 1;
+  } else {
+    diagnostics.productLeafCount += 1;
+  }
+
+  if (product.buyBoxWinnerItemId) {
+    diagnostics.productDirectWinnerCount += 1;
+  }
+}
+
+function compareNullableNumberDesc(left: number | null, right: number | null) {
+  if (left !== null && right !== null && left !== right) {
+    return right - left;
+  }
+
+  if (left !== null && right === null) {
+    return -1;
+  }
+
+  if (left === null && right !== null) {
+    return 1;
+  }
+
+  return 0;
+}
+
+function compareNullablePriceAsc(left: number | null, right: number | null) {
+  if (left !== null && right !== null && left !== right) {
+    return left - right;
+  }
+
+  if (left !== null && right === null) {
+    return -1;
+  }
+
+  if (left === null && right !== null) {
+    return 1;
+  }
+
+  return 0;
+}
+
+type ProductChildCandidate = {
+  product: MercadoLivreProduct;
+  terminal: boolean;
+};
+
+type ProductChildResolution =
+  | { ok: true; product: MercadoLivreProduct }
+  | { ok: false; reason: MercadoLivreHighlightSkipReason };
+
 export class MercadoLivreHighlightResolver {
-  constructor(private readonly connector: MarketplaceConnector) {}
+  constructor(
+    private readonly connector: MarketplaceConnector,
+    private readonly options: { maxProductDepth?: number; maxProductsInspected?: number } = {},
+  ) {}
 
   async resolveCandidate(candidate: MercadoLivreHighlightCandidate): Promise<MercadoLivreHighlightResolutionResult> {
     try {
@@ -660,31 +780,11 @@ export class MercadoLivreHighlightResolver {
       }
 
       if (candidate.type === "ITEM") {
-        return resolvedHighlight(candidate, candidate.id);
+        return resolvedHighlight(candidate, candidate.id, "ITEM_DIRECT");
       }
 
       if (candidate.type === "PRODUCT") {
-        let product: MercadoLivreProduct | null;
-
-        try {
-          product = await this.connector.getProduct(candidate.id);
-        } catch (error) {
-          if (error instanceof MercadoLivreApiError && error.status === 404) {
-            return skippedHighlight(candidate, "PRODUCT_NOT_FOUND");
-          }
-
-          throw error;
-        }
-
-        if (!product) {
-          return skippedHighlight(candidate, "PRODUCT_NOT_FOUND");
-        }
-
-        if (!product.buyBoxWinnerItemId) {
-          return skippedHighlight(candidate, "PRODUCT_NO_BUY_BOX_WINNER");
-        }
-
-        return resolvedHighlight(candidate, product.buyBoxWinnerItemId);
+        return this.resolveProductCandidate(candidate);
       }
 
       let userProduct: MercadoLivreUserProduct | null;
@@ -737,10 +837,193 @@ export class MercadoLivreHighlightResolver {
         return skippedHighlight(candidate, "USER_PRODUCT_NO_ACTIVE_ITEM");
       }
 
-      return resolvedHighlight(candidate, chosen.externalProductId);
+      return resolvedHighlight(candidate, chosen.externalProductId, "USER_PRODUCT_ACTIVE_ITEM");
     } catch {
       return skippedHighlight(candidate, "CANDIDATE_RESOLUTION_ERROR");
     }
+  }
+
+  private async resolveProductCandidate(
+    candidate: MercadoLivreHighlightCandidate,
+  ): Promise<MercadoLivreHighlightResolutionResult> {
+    const diagnostics = emptyProductDiagnostics();
+    let product: MercadoLivreProduct | null;
+
+    try {
+      product = await this.connector.getProduct(candidate.id);
+    } catch (error) {
+      if (error instanceof MercadoLivreApiError && error.status === 404) {
+        return skippedHighlight(candidate, "PRODUCT_NOT_FOUND", diagnostics);
+      }
+
+      throw error;
+    }
+
+    if (!product) {
+      return skippedHighlight(candidate, "PRODUCT_NOT_FOUND", diagnostics);
+    }
+
+    countProductShape(product, diagnostics);
+
+    if (product.buyBoxWinnerItemId) {
+      diagnostics.productResolvedDirectly += 1;
+      return resolvedHighlight(
+        candidate,
+        product.buyBoxWinnerItemId,
+        "PRODUCT_DIRECT_BUY_BOX",
+        { resolvedProductId: product.id },
+        diagnostics,
+      );
+    }
+
+    if (product.childrenIds.length === 0) {
+      diagnostics.productLeafWithoutWinner += 1;
+      return skippedHighlight(candidate, "PRODUCT_LEAF_NO_BUY_BOX_WINNER", diagnostics);
+    }
+
+    const childResolution = await this.resolveProductChildren(product, diagnostics);
+
+    if (!childResolution.ok) {
+      if (childResolution.reason === "PRODUCT_PARENT_NO_RESOLVABLE_CHILD") {
+        diagnostics.productParentWithoutResolvableChild += 1;
+      }
+
+      return skippedHighlight(candidate, childResolution.reason, diagnostics);
+    }
+
+    diagnostics.productResolvedViaChild += 1;
+    return resolvedHighlight(
+      candidate,
+      childResolution.product.buyBoxWinnerItemId as string,
+      "PRODUCT_CHILD_BUY_BOX",
+      { resolvedProductId: childResolution.product.id },
+      diagnostics,
+    );
+  }
+
+  private async resolveProductChildren(
+    parent: MercadoLivreProduct,
+    diagnostics: MercadoLivreProductResolutionDiagnostics,
+  ): Promise<ProductChildResolution> {
+    const maxDepth = this.options.maxProductDepth ?? 4;
+    const maxProductsInspected = this.options.maxProductsInspected ?? 50;
+    const visited = new Set([parent.id]);
+    const queue = parent.childrenIds.map((id) => ({ id, depth: 1 }));
+    const candidates: ProductChildCandidate[] = [];
+    let inspected = 1;
+    let loadedChildren = 0;
+    let childNotFound = false;
+    let childError = false;
+    let depthLimited = false;
+
+    while (queue.length > 0) {
+      const current = queue.shift();
+
+      if (!current || visited.has(current.id)) {
+        continue;
+      }
+
+      if (inspected >= maxProductsInspected) {
+        return { ok: false, reason: "PRODUCT_TREE_SIZE_LIMIT" };
+      }
+
+      visited.add(current.id);
+      inspected += 1;
+
+      let product: MercadoLivreProduct | null;
+
+      try {
+        product = await this.connector.getProduct(current.id);
+      } catch (error) {
+        if (error instanceof MercadoLivreApiError && error.status === 404) {
+          childNotFound = true;
+          continue;
+        }
+
+        childError = true;
+        continue;
+      }
+
+      if (!product) {
+        childNotFound = true;
+        continue;
+      }
+
+      loadedChildren += 1;
+      countProductShape(product, diagnostics);
+
+      const terminal = product.childrenIds.length === 0;
+
+      if (product.buyBoxWinnerItemId) {
+        candidates.push({ product, terminal });
+      }
+
+      if (product.childrenIds.length > 0) {
+        if (current.depth >= maxDepth) {
+          depthLimited = true;
+          continue;
+        }
+
+        for (const childId of product.childrenIds) {
+          if (!visited.has(childId)) {
+            queue.push({ id: childId, depth: current.depth + 1 });
+          }
+        }
+      } else if (!product.buyBoxWinnerItemId) {
+        diagnostics.productLeafWithoutWinner += 1;
+      }
+    }
+
+    const chosen = this.chooseProductChild(candidates);
+
+    if (chosen) {
+      return { ok: true, product: chosen };
+    }
+
+    if (depthLimited) {
+      return { ok: false, reason: "PRODUCT_TREE_DEPTH_LIMIT" };
+    }
+
+    if (childError) {
+      return { ok: false, reason: "PRODUCT_CHILD_RESOLUTION_ERROR" };
+    }
+
+    if (childNotFound && loadedChildren === 0) {
+      return { ok: false, reason: "PRODUCT_CHILD_NOT_FOUND" };
+    }
+
+    return { ok: false, reason: "PRODUCT_PARENT_NO_RESOLVABLE_CHILD" };
+  }
+
+  private chooseProductChild(candidates: ProductChildCandidate[]) {
+    const [chosen] = [...candidates].sort((left, right) => {
+      const leftActive = left.product.status === "active";
+      const rightActive = right.product.status === "active";
+
+      if (leftActive !== rightActive) {
+        return leftActive ? -1 : 1;
+      }
+
+      if (left.terminal !== right.terminal) {
+        return left.terminal ? -1 : 1;
+      }
+
+      const soldQuantity = compareNullableNumberDesc(left.product.soldQuantity, right.product.soldQuantity);
+
+      if (soldQuantity !== 0) {
+        return soldQuantity;
+      }
+
+      const price = compareNullablePriceAsc(left.product.buyBoxWinnerPrice, right.product.buyBoxWinnerPrice);
+
+      if (price !== 0) {
+        return price;
+      }
+
+      return left.product.id.localeCompare(right.product.id);
+    });
+
+    return chosen?.product ?? null;
   }
 }
 
@@ -859,11 +1142,36 @@ export class MercadoLivreConnector implements MarketplaceConnector {
     }
 
     const buyBoxWinner = asRecord(product.buy_box_winner);
-
-    return {
+    const childrenIds = asArray(product.children_ids)
+      .map(asStringId)
+      .filter((item): item is string => Boolean(item));
+    const buyBoxWinnerItemId = asStringId(buyBoxWinner?.item_id);
+    const parsedProduct = {
       id: asString(product.id) ?? productId,
-      buyBoxWinnerItemId: asStringId(buyBoxWinner?.item_id),
+      name: asString(product.name),
+      status: asString(product.status),
+      parentId: asStringId(product.parent_id),
+      childrenIds,
+      soldQuantity: asNumber(product.sold_quantity),
+      buyBoxWinner: buyBoxWinner
+        ? {
+            itemId: buyBoxWinnerItemId,
+            price: asNumber(buyBoxWinner.price),
+          }
+        : null,
+      buyBoxWinnerPriceRange: product.buy_box_winner_price_range,
+      buyBoxWinnerItemId,
+      buyBoxWinnerPrice: asNumber(buyBoxWinner?.price),
     };
+
+    console.info("[mercado-livre.product]", {
+      productId: parsedProduct.id,
+      status: parsedProduct.status,
+      childrenCount: parsedProduct.childrenIds.length,
+      hasBuyBoxWinner: Boolean(parsedProduct.buyBoxWinnerItemId),
+    });
+
+    return parsedProduct;
   }
 
   async getUserProduct(userProductId: string) {
@@ -954,7 +1262,9 @@ export class MercadoLivreConnector implements MarketplaceConnector {
         ...item,
         sourceHighlightId: source.sourceHighlightId,
         sourceHighlightType: source.sourceHighlightType,
+        ...(source.resolvedProductId ? { resolvedProductId: source.resolvedProductId } : {}),
         resolvedItemId: source.resolvedItemId,
+        resolutionStrategy: source.resolutionStrategy,
       };
     });
   }

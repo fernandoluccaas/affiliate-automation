@@ -10,6 +10,7 @@ import {
   decryptSecret,
   encryptSecret,
   type ApiFetch,
+  type MercadoLivreProduct,
 } from "./index";
 
 function jsonResponse(body: unknown, status = 200): Awaited<ReturnType<ApiFetch>> {
@@ -18,6 +19,22 @@ function jsonResponse(body: unknown, status = 200): Awaited<ReturnType<ApiFetch>
     status,
     statusText: status === 200 ? "OK" : "Error",
     json: async () => body,
+  };
+}
+
+function catalogProduct(overrides: Partial<MercadoLivreProduct>): MercadoLivreProduct {
+  return {
+    id: "MLB100",
+    name: null,
+    status: "active",
+    parentId: null,
+    childrenIds: [],
+    soldQuantity: null,
+    buyBoxWinner: null,
+    buyBoxWinnerPriceRange: null,
+    buyBoxWinnerItemId: null,
+    buyBoxWinnerPrice: null,
+    ...overrides,
   };
 }
 
@@ -271,6 +288,45 @@ describe("MercadoLivreConnector", () => {
     });
   });
 
+  it("loads catalog product metadata needed for parent resolution without logging raw responses", async () => {
+    const log = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const fetchFn = vi.fn(async () =>
+      jsonResponse({
+        id: "MLB100",
+        name: "Catalog parent",
+        status: "inactive",
+        parent_id: null,
+        children_ids: ["MLB101", "MLB102"],
+        sold_quantity: 300,
+        buy_box_winner: null,
+        buy_box_winner_price_range: { min: 1000, max: 1200 },
+      }),
+    );
+    const connector = new MercadoLivreConnector({
+      client: new MercadoLivreApiClient({ accessToken: "token", fetchFn }),
+    });
+
+    await expect(connector.getProduct("MLB100")).resolves.toMatchObject({
+      id: "MLB100",
+      name: "Catalog parent",
+      status: "inactive",
+      parentId: null,
+      childrenIds: ["MLB101", "MLB102"],
+      soldQuantity: 300,
+      buyBoxWinner: null,
+      buyBoxWinnerPriceRange: { min: 1000, max: 1200 },
+      buyBoxWinnerItemId: null,
+    });
+    expect(log).toHaveBeenCalledWith("[mercado-livre.product]", {
+      productId: "MLB100",
+      status: "inactive",
+      childrenCount: 2,
+      hasBuyBoxWinner: false,
+    });
+
+    log.mockRestore();
+  });
+
   it("uses official prices and preserves null or UNKNOWN fields", async () => {
     const itemFetch = vi.fn(async () =>
       jsonResponse([
@@ -345,9 +401,49 @@ describe("MercadoLivreConnector", () => {
     expect(connector.getItems).toHaveBeenCalledWith(["MLB1", "MLB2"]);
   });
 
+  it("deduplicates PRODUCT highlights after final item resolution", async () => {
+    const connector = new MercadoLivreConnector({
+      client: new MercadoLivreApiClient({ accessToken: "token", fetchFn: vi.fn() }),
+    });
+    vi.spyOn(connector, "getBestSellers").mockResolvedValue([
+      { id: "MLBPRODUCTA", position: 1, type: "PRODUCT", rawType: "PRODUCT", categoryId: "MLB1055" },
+      { id: "MLBPRODUCTB", position: 2, type: "PRODUCT", rawType: "PRODUCT", categoryId: "MLB1055" },
+    ]);
+    vi.spyOn(connector, "getProduct").mockImplementation(async (id: string) =>
+      catalogProduct({
+        id,
+        buyBoxWinner: { itemId: "MLB9001", price: 100 },
+        buyBoxWinnerItemId: "MLB9001",
+        buyBoxWinnerPrice: 100,
+      }),
+    );
+    vi.spyOn(connector, "getItems").mockResolvedValue([
+      {
+        marketplace: "MERCADO_LIVRE",
+        externalProductId: "MLB9001",
+        title: "Produto",
+        productUrl: "https://produto.example/MLB9001",
+        currentPrice: 100,
+      },
+    ]);
+
+    const candidates = await connector.discoverCandidates(["MLB1055"]);
+
+    expect(candidates).toHaveLength(1);
+    expect(connector.getItems).toHaveBeenCalledWith(["MLB9001"]);
+  });
+
   it("resolves PRODUCT highlights through buy_box_winner.item_id", async () => {
+    const getProduct = vi.fn().mockResolvedValue(
+      catalogProduct({
+        id: "MLB61695785",
+        buyBoxWinner: { itemId: "MLBITEM1", price: 99 },
+        buyBoxWinnerItemId: "MLBITEM1",
+        buyBoxWinnerPrice: 99,
+      }),
+    );
     const marketplace = {
-      getProduct: vi.fn().mockResolvedValue({ id: "MLB61695785", buyBoxWinnerItemId: "MLBITEM1" }),
+      getProduct,
     } as unknown as MercadoLivreConnector;
     const resolver = new MercadoLivreHighlightResolver(marketplace);
 
@@ -364,16 +460,119 @@ describe("MercadoLivreConnector", () => {
       candidate: {
         sourceHighlightId: "MLB61695785",
         sourceHighlightType: "PRODUCT",
+        resolvedProductId: "MLB61695785",
         resolvedItemId: "MLBITEM1",
+        resolutionStrategy: "PRODUCT_DIRECT_BUY_BOX",
         position: 2,
         categoryId: "MLB123",
+      },
+      diagnostics: {
+        productDirectWinnerCount: 1,
+        productParentCount: 0,
+        productLeafCount: 1,
+        productResolvedDirectly: 1,
+        productResolvedViaChild: 0,
+        productLeafWithoutWinner: 0,
+        productParentWithoutResolvableChild: 0,
+      },
+    });
+    expect(getProduct).toHaveBeenCalledTimes(1);
+  });
+
+  it("resolves PRODUCT parent through the child with highest sold quantity", async () => {
+    const marketplace = {
+      getProduct: vi.fn(async (id: string) => {
+        const products: Record<string, MercadoLivreProduct> = {
+          MLB100: catalogProduct({
+            id: "MLB100",
+            status: "inactive",
+            childrenIds: ["MLB101", "MLB102"],
+          }),
+          MLB101: catalogProduct({
+            id: "MLB101",
+            status: "active",
+            soldQuantity: 50,
+            buyBoxWinner: { itemId: "MLB9001", price: 1000 },
+            buyBoxWinnerItemId: "MLB9001",
+            buyBoxWinnerPrice: 1000,
+          }),
+          MLB102: catalogProduct({
+            id: "MLB102",
+            status: "active",
+            soldQuantity: 100,
+            buyBoxWinner: { itemId: "MLB9002", price: 1100 },
+            buyBoxWinnerItemId: "MLB9002",
+            buyBoxWinnerPrice: 1100,
+          }),
+        };
+
+        return products[id] ?? null;
+      }),
+    } as unknown as MercadoLivreConnector;
+    const resolver = new MercadoLivreHighlightResolver(marketplace);
+
+    await expect(
+      resolver.resolveCandidate({
+        id: "MLB100",
+        position: 1,
+        type: "PRODUCT",
+        rawType: "PRODUCT",
+        categoryId: "MLB123",
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      candidate: {
+        sourceHighlightId: "MLB100",
+        sourceHighlightType: "PRODUCT",
+        resolvedProductId: "MLB102",
+        resolvedItemId: "MLB9002",
+        resolutionStrategy: "PRODUCT_CHILD_BUY_BOX",
+      },
+      diagnostics: {
+        productParentCount: 1,
+        productLeafCount: 2,
+        productResolvedViaChild: 1,
       },
     });
   });
 
-  it("skips PRODUCT highlights without buy box winner", async () => {
+  it("resolves nested PRODUCT parents within the depth limit", async () => {
     const marketplace = {
-      getProduct: vi.fn().mockResolvedValue({ id: "MLB61695785", buyBoxWinnerItemId: null }),
+      getProduct: vi.fn(async (id: string) => {
+        const products: Record<string, MercadoLivreProduct> = {
+          MLB100: catalogProduct({ id: "MLB100", childrenIds: ["MLB101"] }),
+          MLB101: catalogProduct({ id: "MLB101", childrenIds: ["MLB102"] }),
+          MLB102: catalogProduct({
+            id: "MLB102",
+            soldQuantity: 10,
+            buyBoxWinner: { itemId: "MLB9002", price: 1100 },
+            buyBoxWinnerItemId: "MLB9002",
+            buyBoxWinnerPrice: 1100,
+          }),
+        };
+
+        return products[id] ?? null;
+      }),
+    } as unknown as MercadoLivreConnector;
+    const resolver = new MercadoLivreHighlightResolver(marketplace, { maxProductDepth: 4 });
+
+    await expect(
+      resolver.resolveCandidate({
+        id: "MLB100",
+        position: 1,
+        type: "PRODUCT",
+        rawType: "PRODUCT",
+        categoryId: "MLB123",
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      candidate: { resolvedProductId: "MLB102", resolvedItemId: "MLB9002" },
+    });
+  });
+
+  it("skips PRODUCT leaves without buy box winner", async () => {
+    const marketplace = {
+      getProduct: vi.fn().mockResolvedValue(catalogProduct({ id: "MLB61695785", childrenIds: [] })),
     } as unknown as MercadoLivreConnector;
     const resolver = new MercadoLivreHighlightResolver(marketplace);
 
@@ -385,7 +584,67 @@ describe("MercadoLivreConnector", () => {
         rawType: "PRODUCT",
         categoryId: "MLB123",
       }),
-    ).resolves.toMatchObject({ ok: false, reason: "PRODUCT_NO_BUY_BOX_WINNER" });
+    ).resolves.toMatchObject({ ok: false, reason: "PRODUCT_LEAF_NO_BUY_BOX_WINNER" });
+  });
+
+  it("skips PRODUCT parents without resolvable children", async () => {
+    const marketplace = {
+      getProduct: vi.fn(async (id: string) => {
+        const products: Record<string, MercadoLivreProduct> = {
+          MLB100: catalogProduct({ id: "MLB100", childrenIds: ["MLB101", "MLB102", "MLB103"] }),
+          MLB101: catalogProduct({ id: "MLB101" }),
+          MLB102: catalogProduct({ id: "MLB102" }),
+          MLB103: catalogProduct({ id: "MLB103" }),
+        };
+
+        return products[id] ?? null;
+      }),
+    } as unknown as MercadoLivreConnector;
+    const resolver = new MercadoLivreHighlightResolver(marketplace);
+
+    await expect(
+      resolver.resolveCandidate({
+        id: "MLB100",
+        position: 1,
+        type: "PRODUCT",
+        rawType: "PRODUCT",
+        categoryId: "MLB123",
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      reason: "PRODUCT_PARENT_NO_RESOLVABLE_CHILD",
+      diagnostics: { productParentWithoutResolvableChild: 1 },
+    });
+  });
+
+  it("stops PRODUCT tree traversal at the configured depth limit", async () => {
+    const marketplace = {
+      getProduct: vi.fn(async (id: string) => {
+        const products: Record<string, MercadoLivreProduct> = {
+          MLB100: catalogProduct({ id: "MLB100", childrenIds: ["MLB101"] }),
+          MLB101: catalogProduct({ id: "MLB101", childrenIds: ["MLB102"] }),
+          MLB102: catalogProduct({
+            id: "MLB102",
+            buyBoxWinner: { itemId: "MLB9002", price: 1100 },
+            buyBoxWinnerItemId: "MLB9002",
+            buyBoxWinnerPrice: 1100,
+          }),
+        };
+
+        return products[id] ?? null;
+      }),
+    } as unknown as MercadoLivreConnector;
+    const resolver = new MercadoLivreHighlightResolver(marketplace, { maxProductDepth: 1 });
+
+    await expect(
+      resolver.resolveCandidate({
+        id: "MLB100",
+        position: 1,
+        type: "PRODUCT",
+        rawType: "PRODUCT",
+        categoryId: "MLB123",
+      }),
+    ).resolves.toMatchObject({ ok: false, reason: "PRODUCT_TREE_DEPTH_LIMIT" });
   });
 
   it("resolves USER_PRODUCT highlights to an active marketplace item", async () => {

@@ -10,6 +10,7 @@ import {
   type MarketplaceConnector,
   type MercadoLivreCategory,
   type MercadoLivreHighlightCandidate,
+  type MercadoLivreProductResolutionDiagnostics,
 } from "@affiliate/marketplace-connectors";
 import { formatOfferFormError, ingestOffer, offerFormSchema, type OfferFormInput } from "@affiliate/ingestion";
 import bcrypt from "bcryptjs";
@@ -301,6 +302,35 @@ function highlightTypeCounts(highlights: MercadoLivreHighlightCandidate[]) {
     },
     { item: 0, product: 0, userProduct: 0, unknown: 0 },
   );
+}
+
+function emptyProductDiagnostics(): MercadoLivreProductResolutionDiagnostics {
+  return {
+    productDirectWinnerCount: 0,
+    productParentCount: 0,
+    productLeafCount: 0,
+    productResolvedDirectly: 0,
+    productResolvedViaChild: 0,
+    productLeafWithoutWinner: 0,
+    productParentWithoutResolvableChild: 0,
+  };
+}
+
+function addProductDiagnostics(
+  target: MercadoLivreProductResolutionDiagnostics,
+  source?: MercadoLivreProductResolutionDiagnostics,
+) {
+  if (!source) {
+    return;
+  }
+
+  target.productDirectWinnerCount += source.productDirectWinnerCount;
+  target.productParentCount += source.productParentCount;
+  target.productLeafCount += source.productLeafCount;
+  target.productResolvedDirectly += source.productResolvedDirectly;
+  target.productResolvedViaChild += source.productResolvedViaChild;
+  target.productLeafWithoutWinner += source.productLeafWithoutWinner;
+  target.productParentWithoutResolvableChild += source.productParentWithoutResolvableChild;
 }
 
 async function validateMercadoLivreDiscoveryCategory(
@@ -617,6 +647,7 @@ export async function testMercadoLivreCategoryAction(formData: FormData) {
   let resolvedItemCandidates = 0;
   let unresolvedCandidates = 0;
   let resolutionReasons = "";
+  const productDiagnostics = emptyProductDiagnostics();
 
   try {
     const highlights = await connector.getBestSellers(validation.category.id);
@@ -634,6 +665,7 @@ export async function testMercadoLivreCategoryAction(formData: FormData) {
 
     for (const highlight of highlights) {
       const result = await resolver.resolveCandidate(highlight);
+      addProductDiagnostics(productDiagnostics, result.diagnostics);
 
       if (result.ok) {
         resolvedItemCandidates += 1;
@@ -671,6 +703,13 @@ export async function testMercadoLivreCategoryAction(formData: FormData) {
       resolvedItemCandidates,
       unresolvedCandidates,
       resolutionReasons,
+      productDirectWinnerCount: productDiagnostics.productDirectWinnerCount,
+      productParentCount: productDiagnostics.productParentCount,
+      productLeafCount: productDiagnostics.productLeafCount,
+      productResolvedDirectly: productDiagnostics.productResolvedDirectly,
+      productResolvedViaChild: productDiagnostics.productResolvedViaChild,
+      productLeafWithoutWinner: productDiagnostics.productLeafWithoutWinner,
+      productParentWithoutResolvableChild: productDiagnostics.productParentWithoutResolvableChild,
     })}`,
   );
 }

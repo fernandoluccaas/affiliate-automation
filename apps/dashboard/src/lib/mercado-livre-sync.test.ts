@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { MercadoLivreApiError, type MarketplaceConnector } from "@affiliate/marketplace-connectors";
+import { MercadoLivreApiError, type MarketplaceConnector, type MercadoLivreProduct } from "@affiliate/marketplace-connectors";
 import { discoverCandidatesFromLeafCategories } from "./mercado-livre-sync";
 
 vi.mock("@affiliate/database", () => ({
@@ -22,6 +22,13 @@ function metrics() {
     highlightProductCount: 0,
     highlightUserProductCount: 0,
     highlightUnknownTypeCount: 0,
+    productDirectWinnerCount: 0,
+    productParentCount: 0,
+    productLeafCount: 0,
+    productResolvedDirectly: 0,
+    productResolvedViaChild: 0,
+    productLeafWithoutWinner: 0,
+    productParentWithoutResolvableChild: 0,
     resolvedItemCandidates: 0,
     unresolvedCandidates: 0,
     candidateResolutionSkipReasons: {} as Record<string, number>,
@@ -33,6 +40,22 @@ function metrics() {
     readyForAffiliateLink: 0,
     rejected: 0,
     errors: 0,
+  };
+}
+
+function catalogProduct(overrides: Partial<MercadoLivreProduct>): MercadoLivreProduct {
+  return {
+    id: "MLB100",
+    name: null,
+    status: "active",
+    parentId: null,
+    childrenIds: [],
+    soldQuantity: null,
+    buyBoxWinner: null,
+    buyBoxWinnerPriceRange: null,
+    buyBoxWinnerItemId: null,
+    buyBoxWinnerPrice: null,
+    ...overrides,
   };
 }
 
@@ -200,7 +223,14 @@ describe("discoverCandidatesFromLeafCategories", () => {
       ]),
       getUserProduct: vi.fn().mockResolvedValue({ id: "MLBU3013800008", userId: "321" }),
       getItemsByUserProduct: vi.fn().mockResolvedValue(["MLBUSERITEM"]),
-      getProduct: vi.fn().mockResolvedValue({ id: "MLB61695785", buyBoxWinnerItemId: "MLBPRODUCTITEM" }),
+      getProduct: vi.fn().mockResolvedValue(
+        catalogProduct({
+          id: "MLB61695785",
+          buyBoxWinner: { itemId: "MLBPRODUCTITEM", price: 120 },
+          buyBoxWinnerItemId: "MLBPRODUCTITEM",
+          buyBoxWinnerPrice: 120,
+        }),
+      ),
       getItems,
     });
 
@@ -214,12 +244,74 @@ describe("discoverCandidatesFromLeafCategories", () => {
       highlightItemCount: 1,
       highlightProductCount: 1,
       highlightUserProductCount: 1,
+      productDirectWinnerCount: 1,
+      productResolvedDirectly: 1,
       resolvedItemCandidates: 3,
       unresolvedCandidates: 0,
     });
   });
 
-  it("records unresolved product highlights without failing the category", async () => {
+  it("records parent product resolution through children without failing the category", async () => {
+    const runMetrics = metrics();
+    const getItems = vi.fn().mockResolvedValue([
+      {
+        marketplace: "MERCADO_LIVRE",
+        externalProductId: "MLB9002",
+        title: "Produto",
+        productUrl: "https://produto.example/MLB9002",
+        currentPrice: 100,
+      },
+    ]);
+    const marketplace = connector({
+      getCategory: vi.fn().mockResolvedValue({
+        id: "MLB123",
+        name: "Celulares",
+        pathFromRoot: [{ id: "MLB123", name: "Celulares" }],
+        children: [],
+      }),
+      getBestSellers: vi.fn().mockResolvedValue([
+        { id: "MLB100", position: 1, type: "PRODUCT", rawType: "PRODUCT", categoryId: "MLB123" },
+      ]),
+      getProduct: vi.fn(async (id: string) => {
+        const products: Record<string, MercadoLivreProduct> = {
+          MLB100: catalogProduct({ id: "MLB100", status: "inactive", childrenIds: ["MLB101", "MLB102"] }),
+          MLB101: catalogProduct({
+            id: "MLB101",
+            soldQuantity: 50,
+            buyBoxWinner: { itemId: "MLB9001", price: 1000 },
+            buyBoxWinnerItemId: "MLB9001",
+            buyBoxWinnerPrice: 1000,
+          }),
+          MLB102: catalogProduct({
+            id: "MLB102",
+            soldQuantity: 100,
+            buyBoxWinner: { itemId: "MLB9002", price: 1100 },
+            buyBoxWinnerItemId: "MLB9002",
+            buyBoxWinnerPrice: 1100,
+          }),
+        };
+
+        return products[id] ?? null;
+      }),
+      getItems,
+    });
+
+    const candidates = await discoverCandidatesFromLeafCategories(marketplace, ["MLB123"], 5, runMetrics);
+
+    expect(candidates).toHaveLength(1);
+    expect(getItems).toHaveBeenLastCalledWith(["MLB9002"]);
+    expect(runMetrics).toMatchObject({
+      candidatesFound: 1,
+      uniqueCandidates: 1,
+      productParentCount: 1,
+      productLeafCount: 2,
+      productResolvedViaChild: 1,
+      resolvedItemCandidates: 1,
+      unresolvedCandidates: 0,
+    });
+  });
+
+  it("records unresolved leaf product highlights without failing the category", async () => {
     const runMetrics = metrics();
     const marketplace = connector({
       getCategory: vi.fn().mockResolvedValue({
@@ -231,7 +323,7 @@ describe("discoverCandidatesFromLeafCategories", () => {
       getBestSellers: vi.fn().mockResolvedValue([
         { id: "MLB61695785", position: 1, type: "PRODUCT", rawType: "PRODUCT", categoryId: "MLB123" },
       ]),
-      getProduct: vi.fn().mockResolvedValue({ id: "MLB61695785", buyBoxWinnerItemId: null }),
+      getProduct: vi.fn().mockResolvedValue(catalogProduct({ id: "MLB61695785", childrenIds: [] })),
     });
 
     const candidates = await discoverCandidatesFromLeafCategories(marketplace, ["MLB123"], 5, runMetrics);
@@ -240,6 +332,7 @@ describe("discoverCandidatesFromLeafCategories", () => {
     expect(runMetrics.categoriesWithHighlights).toBe(1);
     expect(runMetrics.candidatesFound).toBe(1);
     expect(runMetrics.uniqueCandidates).toBe(0);
-    expect(runMetrics.candidateResolutionSkipReasons).toEqual({ PRODUCT_NO_BUY_BOX_WINNER: 1 });
+    expect(runMetrics.productLeafWithoutWinner).toBe(1);
+    expect(runMetrics.candidateResolutionSkipReasons).toEqual({ PRODUCT_LEAF_NO_BUY_BOX_WINNER: 1 });
   });
 });

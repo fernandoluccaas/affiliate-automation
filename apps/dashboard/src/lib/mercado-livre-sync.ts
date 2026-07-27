@@ -7,6 +7,7 @@ import {
   type MarketplaceOfferCandidate,
   type MercadoLivreHighlightCandidate,
   type MercadoLivreHighlightSkipReason,
+  type MercadoLivreProductResolutionDiagnostics,
   type MercadoLivreResolvedHighlightCandidate,
 } from "@affiliate/marketplace-connectors";
 import { prisma } from "@affiliate/database";
@@ -85,6 +86,13 @@ function baseRunMetrics() {
     highlightProductCount: 0,
     highlightUserProductCount: 0,
     highlightUnknownTypeCount: 0,
+    productDirectWinnerCount: 0,
+    productParentCount: 0,
+    productLeafCount: 0,
+    productResolvedDirectly: 0,
+    productResolvedViaChild: 0,
+    productLeafWithoutWinner: 0,
+    productParentWithoutResolvableChild: 0,
     resolvedItemCandidates: 0,
     unresolvedCandidates: 0,
     candidateResolutionSkipReasons: {} as Record<string, number>,
@@ -125,6 +133,23 @@ function countHighlight(metrics: ReturnType<typeof baseRunMetrics>, candidate: M
   } else {
     metrics.highlightUnknownTypeCount += 1;
   }
+}
+
+function recordProductDiagnostics(
+  metrics: ReturnType<typeof baseRunMetrics>,
+  diagnostics?: MercadoLivreProductResolutionDiagnostics,
+) {
+  if (!diagnostics) {
+    return;
+  }
+
+  metrics.productDirectWinnerCount += diagnostics.productDirectWinnerCount;
+  metrics.productParentCount += diagnostics.productParentCount;
+  metrics.productLeafCount += diagnostics.productLeafCount;
+  metrics.productResolvedDirectly += diagnostics.productResolvedDirectly;
+  metrics.productResolvedViaChild += diagnostics.productResolvedViaChild;
+  metrics.productLeafWithoutWinner += diagnostics.productLeafWithoutWinner;
+  metrics.productParentWithoutResolvableChild += diagnostics.productParentWithoutResolvableChild;
 }
 
 function discountPercentage(originalPrice: number | null | undefined, currentPrice: number) {
@@ -210,6 +235,7 @@ export async function discoverCandidatesFromLeafCategories(
       countHighlight(metrics, item);
 
       const result = await resolver.resolveCandidate(item);
+      recordProductDiagnostics(metrics, result.diagnostics);
 
       if (!result.ok) {
         recordCandidateSkip(metrics, result.reason);
@@ -240,7 +266,9 @@ export async function discoverCandidatesFromLeafCategories(
       ...item,
       sourceHighlightId: source.sourceHighlightId,
       sourceHighlightType: source.sourceHighlightType,
+      ...(source.resolvedProductId ? { resolvedProductId: source.resolvedProductId } : {}),
       resolvedItemId: source.resolvedItemId,
+      resolutionStrategy: source.resolutionStrategy,
     };
   });
 }

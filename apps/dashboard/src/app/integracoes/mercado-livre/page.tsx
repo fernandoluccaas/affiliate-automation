@@ -391,6 +391,12 @@ export default async function MercadoLivreIntegrationPage({ searchParams }: Merc
                 <Result label="PRODUCT" value={single(testResult.highlightProductCount) ?? "0"} />
                 <Result label="USER_PRODUCT" value={single(testResult.highlightUserProductCount) ?? "0"} />
                 <Result label="Tipo desconhecido" value={single(testResult.highlightUnknownTypeCount) ?? "0"} />
+                <Result label="PRODUCTS encontrados" value={single(testResult.highlightProductCount) ?? "0"} />
+                <Result label="Com winner direto" value={single(testResult.productResolvedDirectly) ?? "0"} />
+                <Result label="Produtos pai" value={single(testResult.productParentCount) ?? "0"} />
+                <Result label="Resolvidos via filho" value={single(testResult.productResolvedViaChild) ?? "0"} />
+                <Result label="Terminais sem winner" value={single(testResult.productLeafWithoutWinner) ?? "0"} />
+                <Result label="Pais sem filho resolvivel" value={single(testResult.productParentWithoutResolvableChild) ?? "0"} />
                 <Result label="Resolvidos para item" value={single(testResult.resolvedItemCandidates) ?? "0"} />
                 <Result label="Nao resolvidos" value={single(testResult.unresolvedCandidates) ?? "0"} />
                 <Result label="Motivos de descarte" value={single(testResult.resolutionReasons) || "-"} />
