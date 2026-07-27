@@ -12,6 +12,7 @@ import {
   getMercadoLivreConfig,
   type MarketplaceConnector,
   type MercadoLivreCategory,
+  type MercadoLivreCategorySearchProbeAttempt,
   type MercadoLivreHighlightCandidate,
 } from "@affiliate/marketplace-connectors";
 import {
@@ -855,6 +856,56 @@ export async function syncMercadoLivreNowAction() {
   redirect(`/integracoes/mercado-livre?message=${message}`);
 }
 
+function appendCategorySearchAttempt(
+  query: URLSearchParams,
+  prefix: "probeAuthenticated" | "probePublic",
+  attempt?: MercadoLivreCategorySearchProbeAttempt,
+) {
+  query.set(`${prefix}Attempted`, String(Boolean(attempt)));
+
+  if (!attempt) {
+    return;
+  }
+
+  query.set(`${prefix}AuthenticationMode`, attempt.authenticationMode);
+  query.set(`${prefix}ApiResponded`, String(attempt.httpStatus !== undefined));
+  query.set(`${prefix}Ok`, String(attempt.ok));
+  query.set(`${prefix}HttpStatus`, attempt.httpStatus?.toString() ?? "");
+  query.set(`${prefix}ResultsFound`, String(attempt.resultsFound));
+  query.set(`${prefix}UsableItems`, String(attempt.usableItemIds.length));
+  query.set(`${prefix}ErrorCode`, attempt.errorCode ?? "");
+  query.set(`${prefix}ErrorMessage`, attempt.errorMessage ?? "");
+  query.set(
+    `${prefix}MercadoLivreCode`,
+    attempt.apiError?.code ?? "",
+  );
+  query.set(
+    `${prefix}MercadoLivreError`,
+    attempt.apiError?.error ?? "",
+  );
+  query.set(
+    `${prefix}Cause`,
+    JSON.stringify(attempt.apiError?.cause ?? []),
+  );
+  query.set(
+    `${prefix}BlockedBy`,
+    attempt.apiError?.blocked_by ?? "",
+  );
+  query.set(
+    `${prefix}ForbiddenClassification`,
+    attempt.forbiddenClassification ?? "",
+  );
+  query.set(
+    `${prefix}Sample`,
+    JSON.stringify(
+      attempt.sample.map((item) => ({
+        itemId: item.itemId,
+        title: item.title ?? "",
+      })),
+    ),
+  );
+}
+
 export async function probeMercadoLivreCategorySearchAction(
   formData: FormData,
 ) {
@@ -894,25 +945,27 @@ export async function probeMercadoLivreCategorySearchAction(
     siteId: config?.siteId ?? getMercadoLivreConfig().siteId,
     categoryId: validation.category.id,
     limit: 5,
+    testPublicAttempt: true,
+    shortCircuitOnAuthenticatedSuccess: true,
   });
   const query = new URLSearchParams({
     message: "category-search-tested",
     categoryId: validation.category.id,
     probeCategoryName: validation.category.name,
     probeCategoryPath: categoryPath(validation.category),
-    probeApiResponded: String(result.httpStatus !== undefined),
-    probeOk: String(result.ok),
-    probeHttpStatus: result.httpStatus?.toString() ?? "",
-    probeResultsFound: String(result.resultsFound),
-    probeUsableItems: String(result.usableItemIds.length),
-    probeErrorCode: result.errorCode ?? "",
-    probeSample: JSON.stringify(
-      result.sample.map((item) => ({
-        itemId: item.itemId,
-        title: item.title ?? "",
-      })),
-    ),
+    probeMethod: result.method,
+    probeEndpoint: result.endpoint,
+    probeCategoryParameter: result.parameters.category,
+    probeLimitParameter: String(result.parameters.limit),
+    probeDiagnosis: result.diagnosis ?? "",
   });
+
+  appendCategorySearchAttempt(
+    query,
+    "probeAuthenticated",
+    result.authenticatedAttempt,
+  );
+  appendCategorySearchAttempt(query, "probePublic", result.publicAttempt);
 
   redirect(`/integracoes/mercado-livre?${query.toString()}`);
 }

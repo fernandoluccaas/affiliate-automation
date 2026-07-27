@@ -27,6 +27,8 @@ type MercadoLivrePageProps = {
   searchParams?: Promise<Record<string, string | string[] | undefined>>;
 };
 
+type SearchParamRecord = Record<string, string | string[] | undefined>;
+
 function messageText(message?: string | string[]) {
   const value = Array.isArray(message) ? message[0] : message;
 
@@ -120,6 +122,152 @@ function probeSample(value: string | string[] | undefined) {
   }
 }
 
+function probeCause(value: string | string[] | undefined) {
+  const raw = single(value);
+
+  if (!raw) return "-";
+
+  try {
+    const parsed = JSON.parse(raw);
+
+    if (!Array.isArray(parsed)) return "-";
+
+    const entries = parsed.flatMap((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        return [];
+      }
+
+      const cause = item as Record<string, unknown>;
+      const parts = [
+        cause.code,
+        cause.message,
+        cause.type,
+        cause.department,
+        cause.causeId,
+      ].filter((part): part is string => typeof part === "string" && !!part);
+
+      return parts.length > 0 ? [parts.join(": ")] : [];
+    });
+
+    return entries.length > 0 ? entries.join(" | ") : "-";
+  } catch {
+    return "-";
+  }
+}
+
+function CategorySearchAttempt({
+  label,
+  prefix,
+  result,
+}: {
+  label: string;
+  prefix: "probeAuthenticated" | "probePublic";
+  result: SearchParamRecord;
+}) {
+  const attempted = single(result[`${prefix}Attempted`]) === "true";
+
+  if (!attempted) {
+    return (
+      <div className="grid gap-1 border-t pt-3">
+        <div className="text-sm font-medium">{label}</div>
+        <p className="text-xs text-[var(--muted-foreground)]">
+          Nao executada. A tentativa autenticada foi bem-sucedida e o
+          short-circuit esta ativo.
+        </p>
+      </div>
+    );
+  }
+
+  const authenticationMode = single(
+    result[`${prefix}AuthenticationMode`],
+  );
+  const sample = probeSample(result[`${prefix}Sample`]);
+
+  return (
+    <div className="grid gap-3 border-t pt-3">
+      <div className="text-sm font-medium">{label}</div>
+      <dl className="grid gap-2">
+        <Result
+          label="Modo de autenticacao"
+          value={
+            authenticationMode === "BEARER_TOKEN"
+              ? "Bearer token (token oculto)"
+              : "Publico, sem Authorization"
+          }
+        />
+        <Result
+          label="API respondeu"
+          value={
+            single(result[`${prefix}ApiResponded`]) === "true" ? "sim" : "nao"
+          }
+        />
+        <Result
+          label="HTTP"
+          value={single(result[`${prefix}HttpStatus`]) || "-"}
+        />
+        <Result
+          label="Resultados encontrados"
+          value={single(result[`${prefix}ResultsFound`]) ?? "0"}
+        />
+        <Result
+          label="Itens utilizaveis"
+          value={single(result[`${prefix}UsableItems`]) ?? "0"}
+        />
+        <Result
+          label="Erro do probe"
+          value={single(result[`${prefix}ErrorCode`]) || "-"}
+        />
+        <Result
+          label="Codigo Mercado Livre"
+          value={single(result[`${prefix}MercadoLivreCode`]) || "-"}
+        />
+        <Result
+          label="Erro Mercado Livre"
+          value={single(result[`${prefix}MercadoLivreError`]) || "-"}
+        />
+        <Result
+          label="Mensagem Mercado Livre"
+          value={single(result[`${prefix}ErrorMessage`]) || "-"}
+        />
+        <Result
+          label="Cause"
+          value={probeCause(result[`${prefix}Cause`])}
+        />
+        <Result
+          label="blocked_by"
+          value={single(result[`${prefix}BlockedBy`]) || "-"}
+        />
+        <Result
+          label="Classificacao do 403"
+          value={
+            single(result[`${prefix}ForbiddenClassification`]) || "-"
+          }
+        />
+      </dl>
+      {sample.length > 0 ? (
+        <div className="grid gap-2">
+          <div className="text-xs font-medium text-[var(--muted-foreground)]">
+            Amostra
+          </div>
+          {sample.map((item) => (
+            <div
+              key={item.itemId}
+              className="rounded-md border bg-white p-2"
+            >
+              <div className="text-xs font-medium">{item.itemId}</div>
+              {item.title ? (
+                <div className="text-xs text-[var(--muted-foreground)]">
+                  {item.title}
+                </div>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function categoryPath(category: MercadoLivreCategory | null) {
   if (!category) {
     return "-";
@@ -193,7 +341,6 @@ export default async function MercadoLivreIntegrationPage({
     single(params?.message) === "category-tested" ? params : null;
   const categorySearchResult =
     single(params?.message) === "category-search-tested" ? params : null;
-  const categorySearchSample = probeSample(categorySearchResult?.probeSample);
 
   return (
     <AdminShell currentPath="/integracoes" title="Mercado Livre">
@@ -679,52 +826,39 @@ export default async function MercadoLivreIntegrationPage({
                     }
                   />
                   <Result
-                    label="API respondeu"
+                    label="Endpoint logico"
+                    value={`${single(categorySearchResult.probeMethod) ?? "GET"} ${single(categorySearchResult.probeEndpoint) ?? "-"}`}
+                  />
+                  <Result
+                    label="Parametro category"
                     value={
-                      single(categorySearchResult.probeApiResponded) === "true"
-                        ? "sim"
-                        : "nao"
+                      single(categorySearchResult.probeCategoryParameter) ?? "-"
                     }
                   />
                   <Result
-                    label="HTTP"
-                    value={single(categorySearchResult.probeHttpStatus) || "-"}
-                  />
-                  <Result
-                    label="Resultados encontrados"
+                    label="Parametro limit"
                     value={
-                      single(categorySearchResult.probeResultsFound) ?? "0"
+                      single(categorySearchResult.probeLimitParameter) ?? "-"
                     }
                   />
                   <Result
-                    label="Itens utilizaveis"
-                    value={single(categorySearchResult.probeUsableItems) ?? "0"}
-                  />
-                  <Result
-                    label="Erro"
-                    value={single(categorySearchResult.probeErrorCode) || "-"}
+                    label="Diagnostico"
+                    value={
+                      single(categorySearchResult.probeDiagnosis) ||
+                      "SEM_CLASSIFICACAO_403"
+                    }
                   />
                 </dl>
-                {categorySearchSample.length > 0 ? (
-                  <div className="grid gap-2">
-                    <div className="text-xs font-medium text-[var(--muted-foreground)]">
-                      Amostra
-                    </div>
-                    {categorySearchSample.map((item) => (
-                      <div
-                        key={item.itemId}
-                        className="rounded-md border bg-white p-2"
-                      >
-                        <div className="text-xs font-medium">{item.itemId}</div>
-                        {item.title ? (
-                          <div className="text-xs text-[var(--muted-foreground)]">
-                            {item.title}
-                          </div>
-                        ) : null}
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
+                <CategorySearchAttempt
+                  label="Tentativa autenticada"
+                  prefix="probeAuthenticated"
+                  result={categorySearchResult}
+                />
+                <CategorySearchAttempt
+                  label="Tentativa publica"
+                  prefix="probePublic"
+                  result={categorySearchResult}
+                />
               </div>
             ) : null}
 

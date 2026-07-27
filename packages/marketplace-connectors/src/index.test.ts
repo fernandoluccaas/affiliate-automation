@@ -128,6 +128,65 @@ describe("MercadoLivreApiClient", () => {
     expect(fetchFn).toHaveBeenCalledOnce();
   });
 
+  it("preserves only sanitized API error fields", async () => {
+    const accessToken = "access-token-that-must-not-leak";
+    const fetchFn = vi.fn(async () =>
+      jsonResponse(
+        {
+          error: "access_denied",
+          code: "FORBIDDEN",
+          message: `Authorization: Bearer ${accessToken}`,
+          cause: [
+            {
+              code: "invalid_scope",
+              message: `access_token=${accessToken}`,
+              authorization: accessToken,
+            },
+          ],
+          blocked_by: "access policy",
+          access_token: accessToken,
+          refresh_token: "refresh-secret",
+          client_secret: "client-secret",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        403,
+      ),
+    );
+    const client = new MercadoLivreApiClient({
+      accessToken,
+      fetchFn,
+      retries: 2,
+    });
+
+    const error = await client
+      .request("/sites/MLB/search")
+      .catch((value) => value);
+
+    expect(error).toBeInstanceOf(MercadoLivreApiError);
+    expect(error).toMatchObject({
+      status: 403,
+      details: {
+        httpStatus: 403,
+        error: "access_denied",
+        code: "FORBIDDEN",
+        message: "[REDACTED_CREDENTIAL]",
+        cause: [
+          {
+            code: "invalid_scope",
+            message: "access_token=[REDACTED]",
+          },
+        ],
+        blocked_by: "access policy",
+      },
+    });
+    expect(JSON.stringify(error.details)).not.toContain(accessToken);
+    expect(JSON.stringify(error.details)).not.toMatch(/authorization/i);
+    expect(JSON.stringify(error.details)).not.toContain("refresh-secret");
+    expect(JSON.stringify(error.details)).not.toContain("client-secret");
+    expect(error.details).not.toHaveProperty("Authorization");
+    expect(fetchFn).toHaveBeenCalledOnce();
+  });
+
   it("times out stalled requests", async () => {
     const fetchFn: ApiFetch = (_input, init) =>
       new Promise((_resolve, reject) => {
@@ -345,7 +404,7 @@ describe("category search probe", () => {
   function connectorFor(fetchFn: ApiFetch) {
     return new MercadoLivreConnector({
       client: new MercadoLivreApiClient({
-        accessToken: "token",
+        accessToken: "test-access-token-value",
         fetchFn,
         retries: 0,
         timeoutMs: 1,
@@ -365,32 +424,193 @@ describe("category search probe", () => {
     ).probeCategorySearch({ siteId: "MLB", categoryId: "MLB123", limit: 10 });
 
     expect(result).toMatchObject({
-      ok: true,
-      httpStatus: 200,
+      method: "GET",
+      endpoint: "/sites/MLB/search",
+      parameters: { category: "MLB123", limit: 10 },
       categoryId: "MLB123",
-      resultsFound: 7,
+      authenticatedAttempt: {
+        authenticationMode: "BEARER_TOKEN",
+        ok: true,
+        httpStatus: 200,
+        resultsFound: 7,
+      },
     });
-    expect(result.usableItemIds).toHaveLength(7);
-    expect(result.sample).toHaveLength(5);
+    expect(result.authenticatedAttempt.usableItemIds).toHaveLength(7);
+    expect(result.authenticatedAttempt.sample).toHaveLength(5);
+    expect(result.publicAttempt).toBeUndefined();
   });
 
   it("returns an empty successful diagnostic", async () => {
-    await expect(
-      connectorFor(
-        vi.fn(async () => jsonResponse({ paging: { total: 0 }, results: [] })),
-      ).probeCategorySearch({ siteId: "MLB", categoryId: "MLB123", limit: 5 }),
-    ).resolves.toMatchObject({ ok: true, resultsFound: 0, usableItemIds: [] });
+    const result = await connectorFor(
+      vi.fn(async () => jsonResponse({ paging: { total: 0 }, results: [] })),
+    ).probeCategorySearch({ siteId: "MLB", categoryId: "MLB123", limit: 5 });
+
+    expect(result.authenticatedAttempt).toMatchObject({
+      ok: true,
+      resultsFound: 0,
+      usableItemIds: [],
+    });
   });
 
   it.each([
     [429, "RATE_LIMITED"],
     [503, "API_ERROR"],
   ])("maps HTTP %s without throwing", async (status, errorCode) => {
-    await expect(
-      connectorFor(
-        vi.fn(async () => jsonResponse({ error: "failure" }, status)),
-      ).probeCategorySearch({ siteId: "MLB", categoryId: "MLB123", limit: 5 }),
-    ).resolves.toMatchObject({ ok: false, httpStatus: status, errorCode });
+    const result = await connectorFor(
+      vi.fn(async () => jsonResponse({ error: "failure" }, status)),
+    ).probeCategorySearch({
+      siteId: "MLB",
+      categoryId: "MLB123",
+      limit: 5,
+      testPublicAttempt: false,
+    });
+
+    expect(result.authenticatedAttempt).toMatchObject({
+      ok: false,
+      httpStatus: status,
+      errorCode,
+    });
+  });
+
+  it.each([
+    {
+      body: { code: "invalid_scope", message: "Invalid scopes" },
+      classification: "INVALID_SCOPES",
+    },
+    {
+      body: { error: "access_denied", code: "FORBIDDEN" },
+      classification: "ACCESS_DENIED",
+    },
+    {
+      body: {
+        code: "application_restricted",
+        message: "Application restricted",
+      },
+      classification: "APPLICATION_RESTRICTED",
+    },
+    {
+      body: { code: "token_forbidden", message: "Token forbidden" },
+      classification: "TOKEN_FORBIDDEN",
+    },
+    {
+      body: { code: "policy_denied", blocked_by: "access policy" },
+      classification: "POLICY_DENIED",
+    },
+    {
+      body: {
+        error: "forbidden",
+        code: "FORBIDDEN",
+        message: "Request forbidden",
+      },
+      classification: "UNKNOWN_FORBIDDEN",
+    },
+  ])(
+    "classifies 403 evidence as $classification",
+    async ({ body, classification }) => {
+      const result = await connectorFor(
+        vi.fn(async () => jsonResponse(body, 403)),
+      ).probeCategorySearch({
+        siteId: "MLB",
+        categoryId: "MLB123",
+        limit: 5,
+        testPublicAttempt: false,
+      });
+
+      expect(result.authenticatedAttempt).toMatchObject({
+        ok: false,
+        httpStatus: 403,
+        errorCode: "API_ERROR",
+        apiError: { httpStatus: 403, ...body },
+        forbiddenClassification: classification,
+      });
+      expect(result.diagnosis).toBe(classification);
+    },
+  );
+
+  it("runs a public diagnostic after authenticated 403 without leaking Authorization", async () => {
+    const fetchFn = vi
+      .fn()
+      .mockImplementationOnce(async (_input, init) => {
+        expect(new Headers(init?.headers).get("Authorization")).toBe(
+          "Bearer test-access-token-value",
+        );
+        return jsonResponse(
+          {
+            error: "access_denied",
+            code: "FORBIDDEN",
+            message: "Access denied",
+          },
+          403,
+        );
+      })
+      .mockImplementationOnce(async (_input, init) => {
+        expect(new Headers(init?.headers).has("Authorization")).toBe(false);
+        return jsonResponse({
+          paging: { total: 1 },
+          results: [{ id: "MLB1", title: "Produto" }],
+        });
+      });
+
+    const result = await connectorFor(fetchFn).probeCategorySearch({
+      siteId: "MLB",
+      categoryId: "MLB123",
+      limit: 5,
+    });
+
+    expect(result.authenticatedAttempt).toMatchObject({
+      ok: false,
+      httpStatus: 403,
+      forbiddenClassification: "ACCESS_DENIED",
+    });
+    expect(result.publicAttempt).toMatchObject({
+      authenticationMode: "PUBLIC",
+      ok: true,
+      httpStatus: 200,
+      resultsFound: 1,
+    });
+    expect(JSON.stringify(result)).not.toContain("test-access-token-value");
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
+  it("preserves separate failures when authenticated and public attempts return 403", async () => {
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({ error: "access_denied", code: "FORBIDDEN" }, 403),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ code: "policy_denied", message: "Policy denied" }, 403),
+      );
+
+    const result = await connectorFor(fetchFn).probeCategorySearch({
+      siteId: "MLB",
+      categoryId: "MLB123",
+      limit: 5,
+    });
+
+    expect(result.authenticatedAttempt.forbiddenClassification).toBe(
+      "ACCESS_DENIED",
+    );
+    expect(result.publicAttempt?.forbiddenClassification).toBe("POLICY_DENIED");
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
+  it("short-circuits the public attempt after authenticated success", async () => {
+    const fetchFn = vi.fn(async () =>
+      jsonResponse({ paging: { total: 0 }, results: [] }),
+    );
+
+    const result = await connectorFor(fetchFn).probeCategorySearch({
+      siteId: "MLB",
+      categoryId: "MLB123",
+      limit: 5,
+      testPublicAttempt: true,
+      shortCircuitOnAuthenticatedSuccess: true,
+    });
+
+    expect(result.authenticatedAttempt.ok).toBe(true);
+    expect(result.publicAttempt).toBeUndefined();
+    expect(fetchFn).toHaveBeenCalledOnce();
   });
 
   it("maps timeout without requiring a live API", async () => {
@@ -406,8 +626,14 @@ describe("category search probe", () => {
         siteId: "MLB",
         categoryId: "MLB123",
         limit: 5,
+        testPublicAttempt: false,
       }),
-    ).resolves.toMatchObject({ ok: false, errorCode: "NETWORK_OR_TIMEOUT" });
+    ).resolves.toMatchObject({
+      authenticatedAttempt: {
+        ok: false,
+        errorCode: "NETWORK_OR_TIMEOUT",
+      },
+    });
   });
 });
 

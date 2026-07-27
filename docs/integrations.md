@@ -39,7 +39,11 @@ A `PRODUCT` with `buy_box_winner: null` is not automatically an error. If it has
 
 `bestSellersEnabled=true` enables the highlights source. When it is false, discovery returns `DISCOVERY_SOURCE_DISABLED` and does not call highlights. No automatic category-search fallback exists yet.
 
-The manual category-search probe is available only for a validated leaf category. It reports HTTP status, total results, usable item IDs and up to five ID/title samples. It does not call `ingestOffer` and does not create Product, Offer or Publication records. Its purpose is to verify the real behavior of the official endpoint with the connected Brazilian account before a later fallback decision.
+The manual category-search probe is available only for a validated leaf category and remains `EXPERIMENTAL`. It reports the logical endpoint and parameters, authentication mode, HTTP status, total results, usable item IDs and up to five ID/title samples. Non-2xx responses preserve only the sanitized Mercado Livre fields `error`, `code`, `message`, `cause` and `blocked_by`. Authorization headers, access tokens, refresh tokens and client secrets are never included in the result or logs.
+
+The probe first makes an authenticated request. If it fails, the probe can make the same request without `Authorization` and reports the two attempts separately. A successful authenticated attempt may short-circuit the public comparison. This public request exists only to diagnose endpoint behavior; it does not change the connector's authenticated production requests.
+
+The probe does not call `ingestOffer`, does not create Product, Offer or Publication records and does not change a `CONNECTED` account after a 403. Category search is still not an automatic discovery source or fallback. Its real behavior depends on the permissions and policies Mercado Livre makes available to the application.
 
 Discovery applies zero-valued policies explicitly. `minimumDiscountPercentage=0` means no discount requirement, including when the API did not provide an original price. A positive minimum requires a provable discount. `minimumScore=0` is passed as zero to ingestion and saved in `Offer.minimumScoreApplied`, so adding an affiliate URL later uses the same policy.
 

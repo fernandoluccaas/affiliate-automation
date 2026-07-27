@@ -115,7 +115,7 @@ Status: implemented.
 - Added discovery locking and refresh-token loser polling without expired-token reuse.
 - Kept transient API errors separate from OAuth reauthentication status.
 - Added central baseline affiliate URL validation and blocked explicitly ineligible Offers.
-- Added a manual category-search probe with no persistence and no automatic fallback.
+- Added an experimental category-search probe with separate authenticated/public diagnostics, sanitized API errors, no persistence and no automatic fallback.
 - Documented score versus completeness; no minimum-completeness policy was added.
 - Did not add Shopee, scraping, WhatsApp or automatic category-search fallback.
 

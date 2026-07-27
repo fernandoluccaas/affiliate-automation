@@ -4,12 +4,17 @@ const redirectMock = vi.fn((url: string) => {
   throw new Error(`REDIRECT:${url}`);
 });
 const findMarketplaceAccount = vi.fn();
+const updateMarketplaceAccount = vi.fn();
 const findDiscoveryConfig = vi.fn();
 const createDiscoveryConfig = vi.fn();
 const updateDiscoveryConfig = vi.fn();
+const upsertProduct = vi.fn();
+const createOffer = vi.fn();
+const createPublication = vi.fn();
 const createMercadoLivreConnector = vi.fn();
 const getMercadoLivreConfig = vi.fn();
 const collectMercadoLivreCandidates = vi.fn();
+const ingestOffer = vi.fn();
 const consoleError = vi
   .spyOn(console, "error")
   .mockImplementation(() => undefined);
@@ -43,11 +48,21 @@ vi.mock("@affiliate/database", () => ({
   prisma: {
     marketplaceAccount: {
       findFirst: findMarketplaceAccount,
+      update: updateMarketplaceAccount,
     },
     mercadoLivreDiscoveryConfig: {
       findFirst: findDiscoveryConfig,
       create: createDiscoveryConfig,
       update: updateDiscoveryConfig,
+    },
+    product: {
+      upsert: upsertProduct,
+    },
+    offer: {
+      create: createOffer,
+    },
+    publication: {
+      create: createPublication,
     },
   },
 }));
@@ -65,15 +80,29 @@ vi.mock("@affiliate/marketplace-discovery", () => ({
   },
 }));
 
+vi.mock("@affiliate/ingestion", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@affiliate/ingestion")>();
+
+  return {
+    ...actual,
+    ingestOffer,
+  };
+});
+
 describe("phase 3a imports", () => {
   beforeEach(() => {
     redirectMock.mockClear();
     consoleError.mockClear();
     findMarketplaceAccount.mockReset();
+    updateMarketplaceAccount.mockReset();
     findDiscoveryConfig.mockReset();
     createDiscoveryConfig.mockReset();
     updateDiscoveryConfig.mockReset();
+    upsertProduct.mockReset();
+    createOffer.mockReset();
+    createPublication.mockReset();
     createMercadoLivreConnector.mockReset();
+    ingestOffer.mockReset();
     getMercadoLivreConfig.mockReturnValue({
       clientId: "client-id",
       clientSecret: "client-secret",
@@ -239,15 +268,39 @@ describe("phase 3a imports", () => {
     );
   });
 
-  it("runs category search probe without writing discovery configuration", async () => {
+  it("reports authenticated and public probe attempts without persistence", async () => {
     const { probeMercadoLivreCategorySearchAction } = await import("./actions");
     const probeCategorySearch = vi.fn().mockResolvedValue({
-      ok: true,
-      httpStatus: 200,
+      method: "GET",
+      endpoint: "/sites/MLB/search",
+      parameters: { category: "MLB123", limit: 5 },
       categoryId: "MLB123",
-      resultsFound: 1,
-      usableItemIds: ["MLB1"],
-      sample: [{ itemId: "MLB1", title: "Produto" }],
+      authenticatedAttempt: {
+        authenticationMode: "BEARER_TOKEN",
+        ok: false,
+        httpStatus: 403,
+        resultsFound: 0,
+        usableItemIds: [],
+        sample: [],
+        errorCode: "API_ERROR",
+        errorMessage: "Access denied",
+        apiError: {
+          httpStatus: 403,
+          error: "access_denied",
+          code: "FORBIDDEN",
+          message: "Access denied",
+        },
+        forbiddenClassification: "ACCESS_DENIED",
+      },
+      publicAttempt: {
+        authenticationMode: "PUBLIC",
+        ok: true,
+        httpStatus: 200,
+        resultsFound: 1,
+        usableItemIds: ["MLB1"],
+        sample: [{ itemId: "MLB1", title: "Produto" }],
+      },
+      diagnosis: "ACCESS_DENIED",
     });
     createMercadoLivreConnector.mockResolvedValueOnce({
       getCategory: vi.fn().mockResolvedValue({
@@ -271,8 +324,28 @@ describe("phase 3a imports", () => {
       siteId: "MLB",
       categoryId: "MLB123",
       limit: 5,
+      testPublicAttempt: true,
+      shortCircuitOnAuthenticatedSuccess: true,
     });
+    const redirectUrl = redirectMock.mock.calls.at(-1)?.[0];
+    const redirectQuery = new URL(
+      redirectUrl ?? "",
+      "http://localhost",
+    ).searchParams;
+
+    expect(redirectQuery.get("probeAuthenticatedHttpStatus")).toBe("403");
+    expect(redirectQuery.get("probeAuthenticatedMercadoLivreCode")).toBe(
+      "FORBIDDEN",
+    );
+    expect(redirectQuery.get("probePublicHttpStatus")).toBe("200");
+    expect(redirectQuery.get("probePublicAuthenticationMode")).toBe("PUBLIC");
+    expect(redirectUrl).not.toContain("Bearer");
     expect(createDiscoveryConfig).not.toHaveBeenCalled();
     expect(updateDiscoveryConfig).not.toHaveBeenCalled();
+    expect(updateMarketplaceAccount).not.toHaveBeenCalled();
+    expect(ingestOffer).not.toHaveBeenCalled();
+    expect(upsertProduct).not.toHaveBeenCalled();
+    expect(createOffer).not.toHaveBeenCalled();
+    expect(createPublication).not.toHaveBeenCalled();
   });
 });

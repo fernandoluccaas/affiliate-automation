@@ -137,6 +137,8 @@ export type MercadoLivreCategorySearchProbeInput = {
   siteId: string;
   categoryId: string;
   limit: number;
+  testPublicAttempt?: boolean;
+  shortCircuitOnAuthenticatedSuccess?: boolean;
 };
 
 export type MercadoLivreCategorySearchProbeSample = {
@@ -146,15 +148,56 @@ export type MercadoLivreCategorySearchProbeSample = {
   permalink?: string;
 };
 
-export type MercadoLivreCategorySearchProbeResult = {
+export type MercadoLivreApiErrorCause = {
+  code?: string;
+  message?: string;
+  type?: string;
+  department?: string;
+  causeId?: string;
+};
+
+export type MercadoLivreApiErrorDetails = {
+  httpStatus: number;
+  error?: string;
+  code?: string;
+  message?: string;
+  cause?: MercadoLivreApiErrorCause[];
+  blocked_by?: string;
+};
+
+export type MercadoLivreForbiddenClassification =
+  | "INVALID_SCOPES"
+  | "ACCESS_DENIED"
+  | "APPLICATION_RESTRICTED"
+  | "TOKEN_FORBIDDEN"
+  | "POLICY_DENIED"
+  | "UNKNOWN_FORBIDDEN";
+
+export type MercadoLivreCategorySearchProbeAttempt = {
+  authenticationMode: "BEARER_TOKEN" | "PUBLIC";
   ok: boolean;
   httpStatus?: number;
-  categoryId: string;
   resultsFound: number;
   usableItemIds: string[];
   sample: MercadoLivreCategorySearchProbeSample[];
   errorCode?:
     "RATE_LIMITED" | "API_ERROR" | "INVALID_RESPONSE" | "NETWORK_OR_TIMEOUT";
+  errorMessage?: string;
+  apiError?: MercadoLivreApiErrorDetails;
+  forbiddenClassification?: MercadoLivreForbiddenClassification;
+};
+
+export type MercadoLivreCategorySearchProbeResult = {
+  method: "GET";
+  endpoint: string;
+  parameters: {
+    category: string;
+    limit: number;
+  };
+  categoryId: string;
+  authenticatedAttempt: MercadoLivreCategorySearchProbeAttempt;
+  publicAttempt?: MercadoLivreCategorySearchProbeAttempt;
+  diagnosis?: MercadoLivreForbiddenClassification;
 };
 
 export type MercadoLivreHighlightType = "ITEM" | "PRODUCT" | "USER_PRODUCT";
@@ -266,13 +309,16 @@ export type ApiFetch = (
 }>;
 
 export class MercadoLivreApiError extends Error {
+  readonly responseBody: MercadoLivreApiErrorDetails;
+
   constructor(
     message: string,
     readonly status: number,
-    readonly responseBody?: unknown,
+    readonly details: MercadoLivreApiErrorDetails = { httpStatus: status },
   ) {
     super(message);
     this.name = "MercadoLivreApiError";
+    this.responseBody = details;
   }
 }
 
@@ -422,11 +468,206 @@ function asNumber(value: unknown) {
   return null;
 }
 
-function responseErrorMessage(body: unknown, fallback: string) {
+const MAX_DIAGNOSTIC_TEXT_LENGTH = 500;
+
+function sanitizeDiagnosticText(value: unknown, secrets: string[] = []) {
+  const raw = asString(value);
+
+  if (!raw) {
+    return undefined;
+  }
+
+  let sanitized = raw
+    .replace(
+      /(\bauthorization\s*[:=]\s*)(?:Bearer\s+)?[^\s,;}]+/gi,
+      "[REDACTED_CREDENTIAL]",
+    )
+    .replace(/\bBearer\s+[^\s,;}]+/gi, "Bearer [REDACTED]")
+    .replace(
+      /((?:access[\s_-]?token|refresh[\s_-]?token|client[\s_-]?secret)\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;}]+)/gi,
+      "$1[REDACTED]",
+    );
+
+  for (const secret of secrets) {
+    if (secret.length >= 8) {
+      sanitized = sanitized.split(secret).join("[REDACTED]");
+    }
+  }
+
+  return sanitized.slice(0, MAX_DIAGNOSTIC_TEXT_LENGTH);
+}
+
+function sanitizeDiagnosticIdentifier(
+  value: unknown,
+  secrets: string[] = [],
+) {
+  const raw = asStringId(value);
+
+  if (!raw) {
+    return undefined;
+  }
+
+  let sanitized = raw;
+
+  for (const secret of secrets) {
+    if (secret.length >= 8) {
+      sanitized = sanitized.split(secret).join("[REDACTED]");
+    }
+  }
+
+  return sanitized.slice(0, MAX_DIAGNOSTIC_TEXT_LENGTH);
+}
+
+function sanitizeApiErrorCause(value: unknown, secrets: string[]) {
+  const values = Array.isArray(value)
+    ? value
+    : value === undefined
+      ? []
+      : [value];
+  const causes = values.slice(0, 10).flatMap((item) => {
+    const record = asRecord(item);
+
+    if (!record) {
+      const message = sanitizeDiagnosticText(item, secrets);
+      return message ? [{ message }] : [];
+    }
+
+    const cause: MercadoLivreApiErrorCause = {};
+    const code = sanitizeDiagnosticIdentifier(record.code, secrets);
+    const message = sanitizeDiagnosticText(record.message, secrets);
+    const type = sanitizeDiagnosticIdentifier(record.type, secrets);
+    const department = sanitizeDiagnosticIdentifier(
+      record.department,
+      secrets,
+    );
+    const causeId = sanitizeDiagnosticIdentifier(
+      record.cause_id ?? record.causeId,
+      secrets,
+    );
+
+    if (code) cause.code = code;
+    if (message) cause.message = message;
+    if (type) cause.type = type;
+    if (department) cause.department = department;
+    if (causeId) cause.causeId = causeId;
+
+    return Object.keys(cause).length > 0 ? [cause] : [];
+  });
+
+  return causes.length > 0 ? causes : undefined;
+}
+
+function sanitizeApiErrorDetails(
+  body: unknown,
+  httpStatus: number,
+  secrets: string[],
+): MercadoLivreApiErrorDetails {
+  const record = asRecord(body);
+  const details: MercadoLivreApiErrorDetails = { httpStatus };
+  const error = sanitizeDiagnosticIdentifier(record?.error, secrets);
+  const code = sanitizeDiagnosticIdentifier(record?.code, secrets);
+  const message = sanitizeDiagnosticText(record?.message, secrets);
+  const cause = sanitizeApiErrorCause(record?.cause, secrets);
+  const blockedBy = sanitizeDiagnosticText(record?.blocked_by, secrets);
+
+  if (error) details.error = error;
+  if (code) details.code = code;
+  if (message) details.message = message;
+  if (cause) details.cause = cause;
+  if (blockedBy) details.blocked_by = blockedBy;
+
+  return details;
+}
+
+function responseErrorMessage(
+  details: MercadoLivreApiErrorDetails,
+  fallback: string,
+) {
+  const message = details.message ?? details.error;
+
+  return message ? `${fallback}: ${message}` : fallback;
+}
+
+function oauthResponseErrorMessage(body: unknown, fallback: string) {
   const record = asRecord(body);
   const message = asString(record?.message) ?? asString(record?.error);
 
   return message ? `${fallback}: ${message}` : fallback;
+}
+
+function normalizedDiagnosticValues(details: MercadoLivreApiErrorDetails) {
+  return [
+    details.error,
+    details.code,
+    details.message,
+    details.blocked_by,
+    ...(details.cause ?? []).flatMap((cause) => [
+      cause.code,
+      cause.message,
+      cause.type,
+      cause.department,
+    ]),
+  ]
+    .filter((value): value is string => Boolean(value))
+    .map((value) => value.toLowerCase());
+}
+
+export function classifyMercadoLivreForbidden(
+  details: MercadoLivreApiErrorDetails,
+): MercadoLivreForbiddenClassification | undefined {
+  if (details.httpStatus !== 403) {
+    return undefined;
+  }
+
+  const values = normalizedDiagnosticValues(details);
+  const machineValues = [
+    details.error,
+    details.code,
+    ...(details.cause ?? []).map((cause) => cause.code),
+  ]
+    .filter((value): value is string => Boolean(value))
+    .map((value) => value.toLowerCase().replace(/[\s-]+/g, "_"));
+  const text = values.join(" ");
+
+  if (
+    machineValues.some((value) =>
+      ["invalid_scope", "invalid_scopes", "insufficient_scope"].includes(value),
+    ) ||
+    /\b(?:invalid|insufficient|missing)\s+scopes?\b/.test(text)
+  ) {
+    return "INVALID_SCOPES";
+  }
+
+  if (
+    machineValues.includes("application_restricted") ||
+    /\b(?:application|app)\s+(?:is\s+)?restricted\b/.test(text)
+  ) {
+    return "APPLICATION_RESTRICTED";
+  }
+
+  if (
+    machineValues.includes("token_forbidden") ||
+    /\btoken\s+(?:is\s+)?(?:forbidden|not allowed)\b/.test(text)
+  ) {
+    return "TOKEN_FORBIDDEN";
+  }
+
+  if (
+    machineValues.includes("policy_denied") ||
+    /\b(?:policy\s+denied|blocked\s+by\s+(?:a\s+)?policy)\b/.test(text) ||
+    /\bpolicy\b/.test(details.blocked_by?.toLowerCase() ?? "")
+  ) {
+    return "POLICY_DENIED";
+  }
+
+  if (
+    machineValues.includes("access_denied") ||
+    /\baccess[\s_-]+denied\b/.test(text)
+  ) {
+    return "ACCESS_DENIED";
+  }
+
+  return "UNKNOWN_FORBIDDEN";
 }
 
 function timeoutSignal(timeoutMs: number) {
@@ -446,7 +687,11 @@ export class MercadoLivreApiClient {
     },
   ) {}
 
-  async request(path: string, init: RequestInit = {}) {
+  async request(
+    path: string,
+    init: RequestInit = {},
+    requestOptions: { authentication?: "BEARER_TOKEN" | "PUBLIC" } = {},
+  ) {
     const url = `${this.options.baseUrl ?? MERCADO_LIVRE_API_BASE_URL}${path}`;
     const retries = this.options.retries ?? 2;
     let lastError: unknown;
@@ -455,12 +700,17 @@ export class MercadoLivreApiClient {
       const timeout = timeoutSignal(this.options.timeoutMs ?? 10_000);
 
       try {
+        const headers = new Headers(init.headers);
+
+        if ((requestOptions.authentication ?? "BEARER_TOKEN") === "PUBLIC") {
+          headers.delete("Authorization");
+        } else {
+          headers.set("Authorization", `Bearer ${this.options.accessToken}`);
+        }
+
         const response = await (this.options.fetchFn ?? fetch)(url, {
           ...init,
-          headers: {
-            ...(init.headers ?? {}),
-            Authorization: `Bearer ${this.options.accessToken}`,
-          },
+          headers,
           signal: timeout.signal,
         });
 
@@ -485,10 +735,15 @@ export class MercadoLivreApiClient {
           }
 
           const fallback = `Mercado Livre API ${response.status}: ${response.statusText}`;
-          throw new MercadoLivreApiError(
-            responseErrorMessage(body, fallback),
-            response.status,
+          const details = sanitizeApiErrorDetails(
             body,
+            response.status,
+            [this.options.accessToken],
+          );
+          throw new MercadoLivreApiError(
+            responseErrorMessage(details, fallback),
+            response.status,
+            details,
           );
         }
       } catch (error) {
@@ -575,7 +830,7 @@ export class MercadoLivreOAuthClient {
         const record = asRecord(body);
         const code = asString(record?.error) ?? undefined;
         throw new MercadoLivreOAuthError(
-          responseErrorMessage(
+          oauthResponseErrorMessage(
             body,
             `Mercado Livre OAuth ${response.status}: ${response.statusText}`,
           ),
@@ -1177,88 +1432,136 @@ export class MercadoLivreConnector implements MarketplaceConnector {
     siteId,
     categoryId,
     limit,
+    testPublicAttempt = true,
+    shortCircuitOnAuthenticatedSuccess = true,
   }: MercadoLivreCategorySearchProbeInput): Promise<MercadoLivreCategorySearchProbeResult> {
     const safeLimit = Math.min(Math.max(Math.trunc(limit), 1), 20);
+    const endpoint = `/sites/${encodeURIComponent(siteId)}/search`;
+    const path = `${endpoint}?category=${encodeURIComponent(categoryId)}&limit=${safeLimit}`;
 
-    try {
-      const body = asRecord(
-        await this.options.client.request(
-          `/sites/${encodeURIComponent(siteId)}/search?category=${encodeURIComponent(categoryId)}&limit=${safeLimit}`,
-        ),
-      );
-
-      if (!body) {
-        return {
-          ok: false,
-          categoryId,
-          resultsFound: 0,
-          usableItemIds: [],
-          sample: [],
-          errorCode: "INVALID_RESPONSE",
-        };
-      }
-
-      const rows = asArray(body.results);
-      const paging = asRecord(body.paging);
-      const usableItems = rows
-        .map(asRecord)
-        .filter(isRecord)
-        .map((item) => {
-          const itemId = asStringId(item.id);
-
-          if (!itemId) {
-            return null;
-          }
-
-          const result: MercadoLivreCategorySearchProbeSample = { itemId };
-          const title = asString(item.title);
-          const price = asNumber(item.price);
-          const permalink = asString(item.permalink);
-
-          if (title) result.title = title;
-          if (price !== null) result.price = price;
-          if (permalink) result.permalink = permalink;
-          return result;
-        })
-        .filter(
-          (item): item is MercadoLivreCategorySearchProbeSample =>
-            item !== null,
+    const runAttempt = async (
+      authenticationMode: MercadoLivreCategorySearchProbeAttempt["authenticationMode"],
+    ): Promise<MercadoLivreCategorySearchProbeAttempt> => {
+      try {
+        const body = asRecord(
+          await this.options.client.request(
+            path,
+            {},
+            { authentication: authenticationMode },
+          ),
         );
-      const sample = usableItems.slice(0, 5);
 
-      return {
-        ok: true,
-        httpStatus: 200,
-        categoryId,
-        resultsFound: asNumber(paging?.total) ?? rows.length,
-        usableItemIds: usableItems.map((item) => item.itemId),
-        sample,
-      };
-    } catch (error) {
-      if (error instanceof MercadoLivreApiError) {
+        if (!body) {
+          return {
+            authenticationMode,
+            ok: false,
+            httpStatus: 200,
+            resultsFound: 0,
+            usableItemIds: [],
+            sample: [],
+            errorCode: "INVALID_RESPONSE",
+            errorMessage: "Mercado Livre returned an invalid search response.",
+          };
+        }
+
+        const rows = asArray(body.results);
+        const paging = asRecord(body.paging);
+        const usableItems = rows
+          .map(asRecord)
+          .filter(isRecord)
+          .map((item) => {
+            const itemId = asStringId(item.id);
+
+            if (!itemId) {
+              return null;
+            }
+
+            const result: MercadoLivreCategorySearchProbeSample = { itemId };
+            const title = asString(item.title);
+            const price = asNumber(item.price);
+            const permalink = asString(item.permalink);
+
+            if (title) result.title = title;
+            if (price !== null) result.price = price;
+            if (permalink) result.permalink = permalink;
+            return result;
+          })
+          .filter(
+            (item): item is MercadoLivreCategorySearchProbeSample =>
+              item !== null,
+          );
+
         return {
+          authenticationMode,
+          ok: true,
+          httpStatus: 200,
+          resultsFound: asNumber(paging?.total) ?? rows.length,
+          usableItemIds: usableItems.map((item) => item.itemId),
+          sample: usableItems.slice(0, 5),
+        };
+      } catch (error) {
+        if (error instanceof MercadoLivreApiError) {
+          const forbiddenClassification = classifyMercadoLivreForbidden(
+            error.details,
+          );
+
+          return {
+            authenticationMode,
+            ok: false,
+            httpStatus: error.status,
+            resultsFound: 0,
+            usableItemIds: [],
+            sample: [],
+            errorCode: error.status === 429 ? "RATE_LIMITED" : "API_ERROR",
+            errorMessage: error.details.message ?? error.message,
+            apiError: error.details,
+            ...(forbiddenClassification
+              ? { forbiddenClassification }
+              : {}),
+          };
+        }
+
+        return {
+          authenticationMode,
           ok: false,
-          httpStatus: error.status,
-          categoryId,
           resultsFound: 0,
           usableItemIds: [],
           sample: [],
-          errorCode: error.status === 429 ? "RATE_LIMITED" : "API_ERROR",
+          errorCode:
+            error instanceof MercadoLivreInvalidResponseError
+              ? "INVALID_RESPONSE"
+              : "NETWORK_OR_TIMEOUT",
+          errorMessage:
+            error instanceof MercadoLivreInvalidResponseError
+              ? error.message
+              : "Mercado Livre category search did not complete.",
         };
       }
+    };
 
-      return {
-        ok: false,
-        categoryId,
-        resultsFound: 0,
-        usableItemIds: [],
-        sample: [],
-        errorCode:
-          error instanceof MercadoLivreInvalidResponseError
-            ? "INVALID_RESPONSE"
-            : "NETWORK_OR_TIMEOUT",
-      };
+    const authenticatedAttempt = await runAttempt("BEARER_TOKEN");
+    let publicAttempt: MercadoLivreCategorySearchProbeAttempt | undefined;
+
+    if (
+      testPublicAttempt &&
+      (!authenticatedAttempt.ok || !shortCircuitOnAuthenticatedSuccess)
+    ) {
+      publicAttempt = await runAttempt("PUBLIC");
     }
+
+    const diagnosis =
+      authenticatedAttempt.forbiddenClassification ??
+      publicAttempt?.forbiddenClassification;
+
+    return {
+      method: "GET",
+      endpoint,
+      parameters: { category: categoryId, limit: safeLimit },
+      categoryId,
+      authenticatedAttempt,
+      ...(publicAttempt ? { publicAttempt } : {}),
+      ...(diagnosis ? { diagnosis } : {}),
+    };
   }
 
   private async normalizeItem(item: Record<string, unknown>): Promise<{
