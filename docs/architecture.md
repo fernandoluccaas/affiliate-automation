@@ -14,7 +14,18 @@ Phase 2B adds the publication and tracking loop. The worker selects active compa
 
 Phase 2C adds multi-provider copy generation between channel selection and publication creation. The worker requests structured JSON copy from the configured provider, validates the returned text against confirmed offer facts, persists message metadata on `Publication`, and falls back to the deterministic composer without blocking Telegram, manual export, tracking or Redis locks. Ollama is the default provider and is called over HTTP at the configured `OLLAMA_BASE_URL`; OpenAI remains optional.
 
-Phase 3A adds the official Mercado Livre connector. OAuth starts from `/integracoes`, returns to `/api/integrations/mercadolivre/callback`, validates a server-side `state` cookie, exchanges the code for tokens and stores encrypted rotating credentials in `MarketplaceAccount`. Discovery is configured in `/integracoes/mercado-livre` and uses official categories, `/highlights/{siteId}/category/{categoryId}`, catalog `/products/{PRODUCT_ID}` resolution, multiget `/items?ids=...` and `/items/{ITEM_ID}/prices`. The connector only normalizes external facts and then calls ingestion; it does not score, version or publish.
+Phase 3A adds the official Mercado Livre connector. OAuth starts from `/integracoes`, returns to `/api/integrations/mercadolivre/callback`, validates a server-side `state` cookie, exchanges the code for tokens and stores encrypted rotating credentials in `MarketplaceAccount`. Discovery is configured in `/integracoes/mercado-livre` and uses official categories, `/highlights/{siteId}/category/{categoryId}`, catalog `/products/{PRODUCT_ID}` resolution, multiget `/items?ids=...` and `/items/{ITEM_ID}/prices`.
+
+Phase 3A.1 consolidates orchestration into one shared service:
+
+```text
+Dashboard ─┐
+           ├─> MercadoLivreDiscoveryService ─> @affiliate/ingestion
+Worker ────┘                 │
+                             └─> MercadoLivreConnector ─> official HTTP API
+```
+
+`MercadoLivreConnector` owns HTTP, response parsing and API-source diagnostics. `MercadoLivreDiscoveryService` owns configuration/account loading, category/highlight resolution, deduplication, filtering, locks, metrics and calls to ingestion. `@affiliate/ingestion` owns Product/Offer persistence, deterministic validation, scoring and versioning. Neither dashboard nor worker contains an independent discovery pipeline.
 
 Mercado Livre highlight `PRODUCT` entries can be catalog parents. A parent catalog product is not necessarily a purchasable item. Product resolution preserves the source highlight identity, resolves direct buy-box winners when present, and otherwise traverses bounded `children_ids` to find a terminal child with `buy_box_winner.item_id`. Terminal products without a winner are skipped with an explicit reason instead of fabricating an item.
 
@@ -39,11 +50,14 @@ The dashboard uses a reusable administrative shell with real navigation for dash
 
 Scoring does not treat unavailable enrichment as zero. It computes the final score from available component weights and persists a separate completeness percentage so publication policy can distinguish a strong sparse candidate from a fully enriched candidate.
 
+Score and completeness are independent. A candidate can score 100 with 10% completeness when novelty is the only available component. Phase 3A.1 records both values but does not add a minimum-completeness policy; that remains a later policy decision.
+
 ## Packages
 
 - `packages/database`: Prisma client, persistence utilities and credential encryption boundaries.
 - `packages/ingestion`: shared offer ingestion schema, discount calculation, product upsert, offer versioning, validation, scoring and affiliate-link status selection.
 - `packages/marketplace-connectors`: official marketplace API connector contracts and implementations.
+- `packages/marketplace-discovery`: shared Mercado Livre discovery orchestration, result contract, metrics and highlight resolution.
 - `packages/publisher-connectors`: publication adapters for supported channels.
 - `packages/publication`: deterministic message composition and channel policy checks.
 - `packages/redis`: Upstash/local Redis health checks and distributed locks.
@@ -56,6 +70,10 @@ Scoring does not treat unavailable enrichment as zero. It computes the final sco
 ## Automation Boundary
 
 Workers and automation workflows must use locks and idempotency keys before mutating publication or import state. Upstash Redis is the intended distributed coordination layer. Railway runs workers and scheduled automation, with n8n reserved for external workflow orchestration where needed. The dashboard remains a control and observability plane.
+
+Mercado Livre discovery uses `mercado-livre:discovery:{accountId}` with a ten-minute TTL. A second caller receives `DISCOVERY_ALREADY_RUNNING` as a skipped run. Token refresh uses `mercado-livre:token-refresh:{accountId}`; a loser polls for the rotated token and returns `TOKEN_REFRESH_IN_PROGRESS` on timeout instead of using an expired token.
+
+Marketplace authentication status is separate from operational sync health. `invalid_grant`, an invalid refresh token or an authentication-related 401/403 can set `REAUTH_REQUIRED`. Rate limits, 5xx responses, timeouts, network errors and transient invalid responses keep the account `CONNECTED` while updating `lastErrorAt` and `lastError`.
 
 Manual export is not treated as publication delivery. `ManualExportPublisher` returns an exported-only status so downstream code cannot count a copied/exported message as a published message.
 

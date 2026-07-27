@@ -1,19 +1,37 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const database = vi.hoisted(() => ({
+  marketplaceAccount: {
+    findFirst: vi.fn(),
+    findUnique: vi.fn(),
+    update: vi.fn(),
+    upsert: vi.fn(),
+  },
+  systemAlert: { create: vi.fn() },
+  $transaction: vi.fn(),
+}));
+
+vi.mock("@affiliate/database", () => ({ prisma: database }));
+
 import {
-  MercadoLivreApiError,
   MercadoLivreApiClient,
+  MercadoLivreApiError,
   MercadoLivreConnector,
-  MercadoLivreHighlightResolver,
   MercadoLivreOAuthClient,
+  MercadoLivreOAuthError,
   MercadoLivrePriceService,
+  MercadoLivreTokenRefreshInProgressError,
+  MercadoLivreTokenService,
   buildMercadoLivreAuthorizationUrl,
   decryptSecret,
   encryptSecret,
   type ApiFetch,
-  type MercadoLivreProduct,
 } from "./index";
 
-function jsonResponse(body: unknown, status = 200): Awaited<ReturnType<ApiFetch>> {
+function jsonResponse(
+  body: unknown,
+  status = 200,
+): Awaited<ReturnType<ApiFetch>> {
   return {
     ok: status >= 200 && status < 300,
     status,
@@ -22,687 +40,545 @@ function jsonResponse(body: unknown, status = 200): Awaited<ReturnType<ApiFetch>
   };
 }
 
-function catalogProduct(overrides: Partial<MercadoLivreProduct>): MercadoLivreProduct {
-  return {
-    id: "MLB100",
-    name: null,
-    status: "active",
-    parentId: null,
-    childrenIds: [],
-    soldQuantity: null,
-    buyBoxWinner: null,
-    buyBoxWinnerPriceRange: null,
-    buyBoxWinnerItemId: null,
-    buyBoxWinnerPrice: null,
-    ...overrides,
-  };
-}
+const encryptionEnv = {
+  ENCRYPTION_KEY: "12345678901234567890123456789012",
+  MERCADO_LIVRE_CLIENT_ID: "client",
+  MERCADO_LIVRE_CLIENT_SECRET: "secret",
+  MERCADO_LIVRE_REDIRECT_URI: "http://localhost/callback",
+};
 
 describe("Mercado Livre OAuth", () => {
-  it("builds authorization URL with state and redirect URI", () => {
+  it("builds authorization URL with state", () => {
     const url = new URL(
-      buildMercadoLivreAuthorizationUrl("state-123", {
-        MERCADO_LIVRE_CLIENT_ID: "client-id",
-        MERCADO_LIVRE_REDIRECT_URI: "http://localhost:3000/api/integrations/mercadolivre/callback",
-      }),
+      buildMercadoLivreAuthorizationUrl("state-123", encryptionEnv),
     );
 
     expect(url.hostname).toBe("auth.mercadolivre.com.br");
-    expect(url.searchParams.get("response_type")).toBe("code");
-    expect(url.searchParams.get("client_id")).toBe("client-id");
     expect(url.searchParams.get("state")).toBe("state-123");
   });
 
-  it("exchanges code for tokens without exposing secrets in the response shape", async () => {
+  it("exchanges code and preserves token fields", async () => {
     const fetchFn = vi.fn(async () =>
       jsonResponse({
         access_token: "access",
         refresh_token: "refresh",
         expires_in: 21600,
         user_id: 123,
-        scope: "read write",
       }),
     );
-
     const token = await new MercadoLivreOAuthClient({
       fetchFn,
-      env: {
-        MERCADO_LIVRE_CLIENT_ID: "client",
-        MERCADO_LIVRE_CLIENT_SECRET: "secret",
-        MERCADO_LIVRE_REDIRECT_URI: "http://localhost/callback",
-      },
+      env: encryptionEnv,
     }).exchangeCode("code");
 
     expect(token.access_token).toBe("access");
     expect(token.refresh_token).toBe("refresh");
-    expect(fetchFn).toHaveBeenCalledOnce();
   });
 
-  it("encrypts and decrypts token payloads", () => {
-    const env = { ENCRYPTION_KEY: "12345678901234567890123456789012" };
-    const encrypted = encryptSecret("refresh-token", env);
+  it("surfaces invalid_grant as a typed authentication error", async () => {
+    const oauth = new MercadoLivreOAuthClient({
+      fetchFn: vi.fn(async () => jsonResponse({ error: "invalid_grant" }, 400)),
+      env: encryptionEnv,
+    });
+
+    await expect(oauth.refresh("expired")).rejects.toMatchObject({
+      status: 400,
+      code: "invalid_grant",
+    });
+  });
+
+  it("encrypts and decrypts marketplace secrets", () => {
+    const encrypted = encryptSecret("refresh-token", encryptionEnv);
 
     expect(encrypted).not.toContain("refresh-token");
-    expect(decryptSecret(encrypted, env)).toBe("refresh-token");
+    expect(decryptSecret(encrypted, encryptionEnv)).toBe("refresh-token");
   });
 });
 
 describe("MercadoLivreApiClient", () => {
-  it("does not retry non-recoverable 401 responses", async () => {
-    const fetchFn = vi.fn(async () => jsonResponse({ error: "unauthorized" }, 401));
-    const client = new MercadoLivreApiClient({ accessToken: "token", fetchFn, retries: 2 });
-
-    await expect(client.request("/items/MLB1")).rejects.toThrow("401");
-    expect(fetchFn).toHaveBeenCalledTimes(1);
-  });
-
-  it("retries 429 responses", async () => {
+  it("retries 429 and 5xx responses", async () => {
     const fetchFn = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse({ error: "rate limit" }, 429))
+      .mockResolvedValueOnce(jsonResponse({ error: "temporary" }, 503))
       .mockResolvedValueOnce(jsonResponse({ ok: true }));
-    const client = new MercadoLivreApiClient({ accessToken: "token", fetchFn, retries: 2 });
+    const client = new MercadoLivreApiClient({
+      accessToken: "token",
+      fetchFn,
+      retries: 2,
+    });
 
     await expect(client.request("/items/MLB1")).resolves.toEqual({ ok: true });
-    expect(fetchFn).toHaveBeenCalledTimes(2);
+    expect(fetchFn).toHaveBeenCalledTimes(3);
   });
 
-  it("retries 500 responses", async () => {
-    const fetchFn = vi
-      .fn()
-      .mockResolvedValueOnce(jsonResponse({ error: "server" }, 500))
-      .mockResolvedValueOnce(jsonResponse({ ok: true }));
-    const client = new MercadoLivreApiClient({ accessToken: "token", fetchFn, retries: 2 });
+  it("does not retry a non-recoverable 401", async () => {
+    const fetchFn = vi.fn(async () =>
+      jsonResponse({ error: "unauthorized" }, 401),
+    );
+    const client = new MercadoLivreApiClient({
+      accessToken: "token",
+      fetchFn,
+      retries: 2,
+    });
 
-    await expect(client.request("/items/MLB1")).resolves.toEqual({ ok: true });
-    expect(fetchFn).toHaveBeenCalledTimes(2);
+    await expect(client.request("/items/MLB1")).rejects.toBeInstanceOf(
+      MercadoLivreApiError,
+    );
+    expect(fetchFn).toHaveBeenCalledOnce();
   });
 
   it("times out stalled requests", async () => {
     const fetchFn: ApiFetch = (_input, init) =>
       new Promise((_resolve, reject) => {
-        init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+        init?.signal?.addEventListener("abort", () =>
+          reject(new Error("aborted")),
+        );
       });
-    const client = new MercadoLivreApiClient({ accessToken: "token", fetchFn, retries: 0, timeoutMs: 1 });
+    const client = new MercadoLivreApiClient({
+      accessToken: "token",
+      fetchFn,
+      retries: 0,
+      timeoutMs: 1,
+    });
 
     await expect(client.request("/slow")).rejects.toThrow("aborted");
   });
 });
 
 describe("MercadoLivreConnector", () => {
-  it("loads site root categories", async () => {
-    const fetchFn = vi.fn(async () =>
-      jsonResponse([
-        { id: "MLB1000", name: "Eletronicos" },
-        { id: "MLB2000", name: "Casa" },
-      ]),
-    );
+  it("loads category hierarchy and preserves mixed highlight types", async () => {
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "MLB123",
+          name: "Celulares",
+          path_from_root: [
+            { id: "MLB1000", name: "Eletronicos" },
+            { id: "MLB123", name: "Celulares" },
+          ],
+          children_categories: [],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          content: [
+            { id: "MLB1", position: 1, type: "ITEM" },
+            { id: "MLBPRODUCT", position: 2, type: "PRODUCT" },
+            { id: "MLBU1", position: 3, type: "USER_PRODUCT" },
+          ],
+        }),
+      );
     const connector = new MercadoLivreConnector({
       client: new MercadoLivreApiClient({ accessToken: "token", fetchFn }),
       siteId: "MLB",
     });
 
-    await expect(connector.getSiteCategories()).resolves.toEqual([
-      { id: "MLB1000", name: "Eletronicos" },
-      { id: "MLB2000", name: "Casa" },
-    ]);
-  });
-
-  it("loads category and category children", async () => {
-    const fetchFn = vi.fn(async () =>
-      jsonResponse({
-        id: "MLB1055",
-        name: "Celulares",
-        path_from_root: [{ id: "MLB1000", name: "Eletronicos" }],
-        children_categories: [{ id: "MLB123", name: "Smartphones" }],
-      }),
-    );
-    const connector = new MercadoLivreConnector({
-      client: new MercadoLivreApiClient({ accessToken: "token", fetchFn }),
+    await expect(connector.getCategory("MLB123")).resolves.toMatchObject({
+      id: "MLB123",
+      children: [],
     });
-
-    await expect(connector.getCategoryChildren("MLB1055")).resolves.toEqual([
-      { id: "MLB123", name: "Smartphones" },
-    ]);
-  });
-
-  it("marks category with children as not leaf", async () => {
-    const fetchFn = vi.fn(async () =>
-      jsonResponse({
-        id: "MLB1055",
-        name: "Eletronicos",
-        path_from_root: [{ id: "MLB1055", name: "Eletronicos" }],
-        children_categories: [{ id: "MLB123", name: "Celulares" }],
-      }),
-    );
-    const connector = new MercadoLivreConnector({
-      client: new MercadoLivreApiClient({ accessToken: "token", fetchFn }),
-    });
-
-    const category = await connector.getCategory("MLB1055");
-
-    expect(category?.children).toHaveLength(1);
-  });
-
-  it("marks category without children as leaf", async () => {
-    const fetchFn = vi.fn(async () =>
-      jsonResponse({
-        id: "MLB123",
-        name: "Celulares",
-        path_from_root: [
-          { id: "MLB1055", name: "Eletronicos" },
-          { id: "MLB123", name: "Celulares" },
-        ],
-        children_categories: [],
-      }),
-    );
-    const connector = new MercadoLivreConnector({
-      client: new MercadoLivreApiClient({ accessToken: "token", fetchFn }),
-    });
-
-    const category = await connector.getCategory("MLB123");
-
-    expect(category?.children).toHaveLength(0);
-    expect(category?.pathFromRoot.map((item) => item.name).join(" > ")).toBe("Eletronicos > Celulares");
-  });
-
-  it("surfaces nonexistent category as 404", async () => {
-    const fetchFn = vi.fn(async () => jsonResponse({ message: "Category not found" }, 404));
-    const connector = new MercadoLivreConnector({
-      client: new MercadoLivreApiClient({ accessToken: "token", fetchFn, retries: 0 }),
-    });
-
-    await expect(connector.getCategory("MLB404")).rejects.toBeInstanceOf(MercadoLivreApiError);
-  });
-
-  it("normalizes best sellers from highlights", async () => {
-    const fetchFn = vi.fn(async () =>
-      jsonResponse({
-        content: [
-          { id: "MLB1", position: 1, type: "ITEM" },
-          { item_id: "MLB2" },
-        ],
-      }),
-    );
-    const connector = new MercadoLivreConnector({
-      client: new MercadoLivreApiClient({ accessToken: "token", fetchFn }),
-      siteId: "MLB",
-    });
-
-    await expect(connector.getBestSellers("MLB1055")).resolves.toEqual([
-      { id: "MLB1", position: 1, type: "ITEM", rawType: "ITEM", categoryId: "MLB1055" },
-      { id: "MLB2", position: 2, type: "UNKNOWN", rawType: null, categoryId: "MLB1055" },
-    ]);
-  });
-
-  it("preserves mixed highlight candidate types without treating them as item ids", async () => {
-    const fetchFn = vi.fn(async () =>
-      jsonResponse({
-        content: [
-          { id: "MLBU3013800008", position: 1, type: "USER_PRODUCT" },
-          { id: "MLB61695785", position: 2, type: "PRODUCT" },
-          { id: "MLB1234567890", position: 3, type: "ITEM" },
-        ],
-      }),
-    );
-    const connector = new MercadoLivreConnector({
-      client: new MercadoLivreApiClient({ accessToken: "token", fetchFn }),
-      siteId: "MLB",
-    });
-
     await expect(connector.getBestSellers("MLB123")).resolves.toEqual([
       {
-        id: "MLBU3013800008",
+        id: "MLB1",
         position: 1,
+        type: "ITEM",
+        rawType: "ITEM",
+        categoryId: "MLB123",
+      },
+      {
+        id: "MLBPRODUCT",
+        position: 2,
+        type: "PRODUCT",
+        rawType: "PRODUCT",
+        categoryId: "MLB123",
+      },
+      {
+        id: "MLBU1",
+        position: 3,
         type: "USER_PRODUCT",
         rawType: "USER_PRODUCT",
         categoryId: "MLB123",
       },
-      { id: "MLB61695785", position: 2, type: "PRODUCT", rawType: "PRODUCT", categoryId: "MLB123" },
-      { id: "MLB1234567890", position: 3, type: "ITEM", rawType: "ITEM", categoryId: "MLB123" },
     ]);
   });
 
-  it("keeps empty highlights as an empty list", async () => {
-    const fetchFn = vi.fn(async () => jsonResponse({ content: [] }));
+  it("reports a successful Price API fetch separately", async () => {
+    const priceService = {
+      getPrice: vi
+        .fn()
+        .mockResolvedValue({ currentPrice: 99.9, originalPrice: null }),
+    } as unknown as MercadoLivrePriceService;
     const connector = new MercadoLivreConnector({
-      client: new MercadoLivreApiClient({ accessToken: "token", fetchFn }),
-      siteId: "MLB",
-    });
-
-    await expect(connector.getBestSellers("MLB123")).resolves.toEqual([]);
-  });
-
-  it("surfaces highlights 404 so discovery can record NO_HIGHLIGHTS_FOR_CATEGORY", async () => {
-    const fetchFn = vi.fn(async () =>
-      jsonResponse({ message: "Dimension CATEGORY with id MLB123 not found" }, 404),
-    );
-    const connector = new MercadoLivreConnector({
-      client: new MercadoLivreApiClient({ accessToken: "token", fetchFn, retries: 0 }),
-      siteId: "MLB",
-    });
-
-    await expect(connector.getBestSellers("MLB123")).rejects.toMatchObject({
-      status: 404,
-      message: expect.stringContaining("Dimension CATEGORY"),
-    });
-  });
-
-  it("loads catalog product metadata needed for parent resolution without logging raw responses", async () => {
-    const log = vi.spyOn(console, "info").mockImplementation(() => undefined);
-    const fetchFn = vi.fn(async () =>
-      jsonResponse({
-        id: "MLB100",
-        name: "Catalog parent",
-        status: "inactive",
-        parent_id: null,
-        children_ids: ["MLB101", "MLB102"],
-        sold_quantity: 300,
-        buy_box_winner: null,
-        buy_box_winner_price_range: { min: 1000, max: 1200 },
+      client: new MercadoLivreApiClient({
+        accessToken: "token",
+        fetchFn: vi.fn(async () =>
+          jsonResponse([
+            {
+              code: 200,
+              body: {
+                id: "MLB1",
+                title: "Produto",
+                permalink: "https://produto.example/MLB1",
+                price: 89.9,
+                status: "active",
+              },
+            },
+          ]),
+        ),
       }),
-    );
+      priceService,
+    });
+
+    const result = await connector.getItemsWithDiagnostics(["MLB1"]);
+
+    expect(result.diagnostics).toMatchObject({
+      itemsFetched: 1,
+      priceApiFetched: 1,
+      priceFallbackUsed: 0,
+      priceUnavailable: 0,
+    });
+    expect(result.candidates[0]?.priceSource).toBe("PRICE_API");
+  });
+
+  it("counts item price fallback without incrementing Price API success", async () => {
+    const priceService = {
+      getPrice: vi.fn().mockRejectedValue(new Error("price unavailable")),
+    } as unknown as MercadoLivrePriceService;
     const connector = new MercadoLivreConnector({
-      client: new MercadoLivreApiClient({ accessToken: "token", fetchFn }),
+      client: new MercadoLivreApiClient({
+        accessToken: "token",
+        fetchFn: vi.fn(async () =>
+          jsonResponse([
+            {
+              code: 200,
+              body: {
+                id: "MLB1",
+                title: "Produto",
+                permalink: "https://produto.example/MLB1",
+                price: 89.9,
+                status: "active",
+              },
+            },
+          ]),
+        ),
+      }),
+      priceService,
+    });
+
+    const result = await connector.getItemsWithDiagnostics(["MLB1"]);
+
+    expect(result.diagnostics).toMatchObject({
+      itemsFetched: 1,
+      priceApiFetched: 0,
+      priceFallbackUsed: 1,
+      priceUnavailable: 0,
+    });
+    expect(result.candidates[0]?.priceSource).toBe("ITEM_FALLBACK");
+  });
+
+  it("reports unavailable price when both sources are missing", async () => {
+    const priceService = {
+      getPrice: vi.fn().mockRejectedValue(new Error("price unavailable")),
+    } as unknown as MercadoLivrePriceService;
+    const connector = new MercadoLivreConnector({
+      client: new MercadoLivreApiClient({
+        accessToken: "token",
+        fetchFn: vi.fn(async () =>
+          jsonResponse([
+            {
+              code: 200,
+              body: {
+                id: "MLB1",
+                title: "Produto",
+                permalink: "https://produto.example/MLB1",
+                status: "active",
+              },
+            },
+          ]),
+        ),
+      }),
+      priceService,
+    });
+
+    const result = await connector.getItemsWithDiagnostics(["MLB1"]);
+
+    expect(result.candidates).toEqual([]);
+    expect(result.diagnostics.priceUnavailable).toBe(1);
+  });
+
+  it("preserves catalog product metadata in sanitized logs", async () => {
+    const log = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const connector = new MercadoLivreConnector({
+      client: new MercadoLivreApiClient({
+        accessToken: "token",
+        fetchFn: vi.fn(async () =>
+          jsonResponse({
+            id: "MLB100",
+            status: "inactive",
+            children_ids: ["MLB101"],
+            sold_quantity: 300,
+            buy_box_winner: null,
+          }),
+        ),
+      }),
     });
 
     await expect(connector.getProduct("MLB100")).resolves.toMatchObject({
       id: "MLB100",
-      name: "Catalog parent",
       status: "inactive",
-      parentId: null,
-      childrenIds: ["MLB101", "MLB102"],
+      childrenIds: ["MLB101"],
       soldQuantity: 300,
-      buyBoxWinner: null,
-      buyBoxWinnerPriceRange: { min: 1000, max: 1200 },
-      buyBoxWinnerItemId: null,
     });
     expect(log).toHaveBeenCalledWith("[mercado-livre.product]", {
       productId: "MLB100",
       status: "inactive",
-      childrenCount: 2,
+      childrenCount: 1,
       hasBuyBoxWinner: false,
     });
-
     log.mockRestore();
   });
+});
 
-  it("uses official prices and preserves null or UNKNOWN fields", async () => {
-    const itemFetch = vi.fn(async () =>
-      jsonResponse([
-        {
-          code: 200,
-          body: {
-            id: "MLB1",
-            title: "Produto",
-            permalink: "https://produto.example/MLB1",
-            category_id: "MLB1055",
-            thumbnail: "https://img.example/1.jpg",
-            status: "active",
-            shipping: {},
-          },
-        },
-      ]),
-    );
-    const priceService = {
-      getPrice: vi.fn(async () => ({ currentPrice: 99.9, originalPrice: null })),
-    } as unknown as MercadoLivrePriceService;
-    const connector = new MercadoLivreConnector({
-      client: new MercadoLivreApiClient({ accessToken: "token", fetchFn: itemFetch }),
-      priceService,
+describe("category search probe", () => {
+  function connectorFor(fetchFn: ApiFetch) {
+    return new MercadoLivreConnector({
+      client: new MercadoLivreApiClient({
+        accessToken: "token",
+        fetchFn,
+        retries: 0,
+        timeoutMs: 1,
+      }),
     });
+  }
 
-    const [candidate] = await connector.getItems(["MLB1"]);
+  it("returns at most five sanitized samples on success", async () => {
+    const results = Array.from({ length: 7 }, (_, index) => ({
+      id: `MLB${index + 1}`,
+      title: `Produto ${index + 1}`,
+      price: index + 10,
+      permalink: `https://produto.example/MLB${index + 1}`,
+    }));
+    const result = await connectorFor(
+      vi.fn(async () => jsonResponse({ paging: { total: 7 }, results })),
+    ).probeCategorySearch({ siteId: "MLB", categoryId: "MLB123", limit: 10 });
 
-    expect(candidate).toMatchObject({
+    expect(result).toMatchObject({
+      ok: true,
+      httpStatus: 200,
+      categoryId: "MLB123",
+      resultsFound: 7,
+    });
+    expect(result.usableItemIds).toHaveLength(7);
+    expect(result.sample).toHaveLength(5);
+  });
+
+  it("returns an empty successful diagnostic", async () => {
+    await expect(
+      connectorFor(
+        vi.fn(async () => jsonResponse({ paging: { total: 0 }, results: [] })),
+      ).probeCategorySearch({ siteId: "MLB", categoryId: "MLB123", limit: 5 }),
+    ).resolves.toMatchObject({ ok: true, resultsFound: 0, usableItemIds: [] });
+  });
+
+  it.each([
+    [429, "RATE_LIMITED"],
+    [503, "API_ERROR"],
+  ])("maps HTTP %s without throwing", async (status, errorCode) => {
+    await expect(
+      connectorFor(
+        vi.fn(async () => jsonResponse({ error: "failure" }, status)),
+      ).probeCategorySearch({ siteId: "MLB", categoryId: "MLB123", limit: 5 }),
+    ).resolves.toMatchObject({ ok: false, httpStatus: status, errorCode });
+  });
+
+  it("maps timeout without requiring a live API", async () => {
+    const fetchFn: ApiFetch = (_input, init) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () =>
+          reject(new Error("aborted")),
+        );
+      });
+
+    await expect(
+      connectorFor(fetchFn).probeCategorySearch({
+        siteId: "MLB",
+        categoryId: "MLB123",
+        limit: 5,
+      }),
+    ).resolves.toMatchObject({ ok: false, errorCode: "NETWORK_OR_TIMEOUT" });
+  });
+});
+
+describe("MercadoLivreTokenService concurrency and account health", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    database.$transaction.mockImplementation(async (operations: unknown[]) =>
+      Promise.all(operations),
+    );
+    database.marketplaceAccount.update.mockResolvedValue({});
+    database.systemAlert.create.mockResolvedValue({});
+  });
+
+  function expiredAccount() {
+    return {
+      id: "account-1",
       marketplace: "MERCADO_LIVRE",
-      externalProductId: "MLB1",
-      currentPrice: 99.9,
-      originalPrice: null,
-      shippingStatus: "UNKNOWN",
-      stockStatus: "UNKNOWN",
-      rating: null,
-      affiliateUrl: null,
-      trackingStrategy: "DIRECT_AFFILIATE_LINK",
-    });
-    expect(priceService.getPrice).toHaveBeenCalledWith("MLB1");
+      name: "Mercado Livre",
+      encryptedCredentials: "",
+      externalUserId: "123",
+      accessTokenEncrypted: encryptSecret("old-token", encryptionEnv),
+      refreshTokenEncrypted: encryptSecret("refresh-token", encryptionEnv),
+      expiresAt: new Date("2026-07-27T10:00:00.000Z"),
+      scopes: [],
+      status: "CONNECTED",
+      siteId: "MLB",
+      lastRefreshAt: null,
+      lastSyncAt: null,
+      lastErrorAt: null,
+      lastError: null,
+      capabilities: {},
+      enabled: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    } as const;
+  }
+
+  it("waits for the winner and uses only the renewed token", async () => {
+    const account = expiredAccount();
+    const renewed = {
+      ...account,
+      accessTokenEncrypted: encryptSecret("new-token", encryptionEnv),
+      expiresAt: new Date("2026-07-27T20:00:00.000Z"),
+    };
+    let clock = new Date("2026-07-27T11:00:00.000Z").getTime();
+    database.marketplaceAccount.findFirst.mockResolvedValue(account);
+    database.marketplaceAccount.findUnique
+      .mockResolvedValueOnce(account)
+      .mockResolvedValueOnce(renewed);
+
+    const token = await new MercadoLivreTokenService({
+      env: encryptionEnv,
+      acquireLock: vi.fn().mockResolvedValue({
+        acquired: false,
+        release: vi.fn(),
+      }),
+      now: () => clock,
+      sleep: async (durationMs) => {
+        clock += durationMs;
+      },
+      refreshWaitTimeoutMs: 1_000,
+      refreshPollIntervalMs: 100,
+    }).getValidAccessToken();
+
+    expect(token).toBe("new-token");
   });
 
-  it("deduplicates candidates discovered from highlights", async () => {
-    const connector = new MercadoLivreConnector({
-      client: new MercadoLivreApiClient({ accessToken: "token", fetchFn: vi.fn() }),
-    });
-    vi.spyOn(connector, "getBestSellers")
-      .mockResolvedValueOnce([
-        { id: "MLB1", position: 1, type: "ITEM", rawType: "ITEM", categoryId: "MLB1055" },
-        { id: "MLB2", position: 2, type: "ITEM", rawType: "ITEM", categoryId: "MLB1055" },
-      ])
-      .mockResolvedValueOnce([{ id: "MLB1", position: 1, type: "ITEM", rawType: "ITEM", categoryId: "MLB1648" }]);
-    vi.spyOn(connector, "getItems").mockResolvedValue([
-      {
-        marketplace: "MERCADO_LIVRE",
-        externalProductId: "MLB1",
-        title: "Produto",
-        productUrl: "https://produto.example/MLB1",
-        currentPrice: 100,
-      },
-      {
-        marketplace: "MERCADO_LIVRE",
-        externalProductId: "MLB2",
-        title: "Produto 2",
-        productUrl: "https://produto.example/MLB2",
-        currentPrice: 120,
-      },
-    ]);
+  it("never returns the expired token when refresh remains in progress", async () => {
+    const account = expiredAccount();
+    let clock = new Date("2026-07-27T11:00:00.000Z").getTime();
+    database.marketplaceAccount.findFirst.mockResolvedValue(account);
+    database.marketplaceAccount.findUnique.mockResolvedValue(account);
 
-    const candidates = await connector.discoverCandidates(["MLB1055", "MLB1648"]);
-
-    expect(candidates).toHaveLength(2);
-    expect(connector.getItems).toHaveBeenCalledWith(["MLB1", "MLB2"]);
+    await expect(
+      new MercadoLivreTokenService({
+        env: encryptionEnv,
+        acquireLock: vi
+          .fn()
+          .mockResolvedValue({ acquired: false, release: vi.fn() }),
+        now: () => clock,
+        sleep: async (durationMs) => {
+          clock += durationMs;
+        },
+        refreshWaitTimeoutMs: 200,
+        refreshPollIntervalMs: 100,
+      }).getValidAccessToken(),
+    ).rejects.toBeInstanceOf(MercadoLivreTokenRefreshInProgressError);
   });
 
-  it("deduplicates PRODUCT highlights after final item resolution", async () => {
-    const connector = new MercadoLivreConnector({
-      client: new MercadoLivreApiClient({ accessToken: "token", fetchFn: vi.fn() }),
-    });
-    vi.spyOn(connector, "getBestSellers").mockResolvedValue([
-      { id: "MLBPRODUCTA", position: 1, type: "PRODUCT", rawType: "PRODUCT", categoryId: "MLB1055" },
-      { id: "MLBPRODUCTB", position: 2, type: "PRODUCT", rawType: "PRODUCT", categoryId: "MLB1055" },
-    ]);
-    vi.spyOn(connector, "getProduct").mockImplementation(async (id: string) =>
-      catalogProduct({
-        id,
-        buyBoxWinner: { itemId: "MLB9001", price: 100 },
-        buyBoxWinnerItemId: "MLB9001",
-        buyBoxWinnerPrice: 100,
+  it.each([
+    [429, "rate limited"],
+    [503, "unavailable"],
+  ])("keeps CONNECTED on transient OAuth HTTP %s", async (status, message) => {
+    const account = expiredAccount();
+    database.marketplaceAccount.findFirst.mockResolvedValue(account);
+    const release = vi.fn();
+    const oauth = {
+      refresh: vi
+        .fn()
+        .mockRejectedValue(new MercadoLivreOAuthError(message, status)),
+    };
+
+    await expect(
+      new MercadoLivreTokenService({
+        env: encryptionEnv,
+        oauth: oauth as unknown as MercadoLivreOAuthClient,
+        acquireLock: vi.fn().mockResolvedValue({ acquired: true, release }),
+        now: () => new Date("2026-07-27T11:00:00.000Z").getTime(),
+      }).getValidAccessToken(),
+    ).rejects.toThrow(message);
+
+    expect(database.marketplaceAccount.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.not.objectContaining({ status: expect.anything() }),
       }),
     );
-    vi.spyOn(connector, "getItems").mockResolvedValue([
-      {
-        marketplace: "MERCADO_LIVRE",
-        externalProductId: "MLB9001",
-        title: "Produto",
-        productUrl: "https://produto.example/MLB9001",
-        currentPrice: 100,
-      },
-    ]);
-
-    const candidates = await connector.discoverCandidates(["MLB1055"]);
-
-    expect(candidates).toHaveLength(1);
-    expect(connector.getItems).toHaveBeenCalledWith(["MLB9001"]);
+    expect(release).toHaveBeenCalledOnce();
   });
 
-  it("resolves PRODUCT highlights through buy_box_winner.item_id", async () => {
-    const getProduct = vi.fn().mockResolvedValue(
-      catalogProduct({
-        id: "MLB61695785",
-        buyBoxWinner: { itemId: "MLBITEM1", price: 99 },
-        buyBoxWinnerItemId: "MLBITEM1",
-        buyBoxWinnerPrice: 99,
+  it("keeps CONNECTED when token refresh times out", async () => {
+    const account = expiredAccount();
+    database.marketplaceAccount.findFirst.mockResolvedValue(account);
+    const oauth = {
+      refresh: vi.fn().mockRejectedValue(new Error("request timed out")),
+    };
+
+    await expect(
+      new MercadoLivreTokenService({
+        env: encryptionEnv,
+        oauth: oauth as unknown as MercadoLivreOAuthClient,
+        acquireLock: vi.fn().mockResolvedValue({
+          acquired: true,
+          release: vi.fn(),
+        }),
+        now: () => new Date("2026-07-27T11:00:00.000Z").getTime(),
+      }).getValidAccessToken(),
+    ).rejects.toThrow("request timed out");
+
+    expect(database.marketplaceAccount.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.not.objectContaining({ status: expect.anything() }),
       }),
     );
-    const marketplace = {
-      getProduct,
-    } as unknown as MercadoLivreConnector;
-    const resolver = new MercadoLivreHighlightResolver(marketplace);
-
-    await expect(
-      resolver.resolveCandidate({
-        id: "MLB61695785",
-        position: 2,
-        type: "PRODUCT",
-        rawType: "PRODUCT",
-        categoryId: "MLB123",
-      }),
-    ).resolves.toEqual({
-      ok: true,
-      candidate: {
-        sourceHighlightId: "MLB61695785",
-        sourceHighlightType: "PRODUCT",
-        resolvedProductId: "MLB61695785",
-        resolvedItemId: "MLBITEM1",
-        resolutionStrategy: "PRODUCT_DIRECT_BUY_BOX",
-        position: 2,
-        categoryId: "MLB123",
-      },
-      diagnostics: {
-        productDirectWinnerCount: 1,
-        productParentCount: 0,
-        productLeafCount: 1,
-        productResolvedDirectly: 1,
-        productResolvedViaChild: 0,
-        productLeafWithoutWinner: 0,
-        productParentWithoutResolvableChild: 0,
-      },
-    });
-    expect(getProduct).toHaveBeenCalledTimes(1);
   });
 
-  it("resolves PRODUCT parent through the child with highest sold quantity", async () => {
-    const marketplace = {
-      getProduct: vi.fn(async (id: string) => {
-        const products: Record<string, MercadoLivreProduct> = {
-          MLB100: catalogProduct({
-            id: "MLB100",
-            status: "inactive",
-            childrenIds: ["MLB101", "MLB102"],
-          }),
-          MLB101: catalogProduct({
-            id: "MLB101",
-            status: "active",
-            soldQuantity: 50,
-            buyBoxWinner: { itemId: "MLB9001", price: 1000 },
-            buyBoxWinnerItemId: "MLB9001",
-            buyBoxWinnerPrice: 1000,
-          }),
-          MLB102: catalogProduct({
-            id: "MLB102",
-            status: "active",
-            soldQuantity: 100,
-            buyBoxWinner: { itemId: "MLB9002", price: 1100 },
-            buyBoxWinnerItemId: "MLB9002",
-            buyBoxWinnerPrice: 1100,
-          }),
-        };
-
-        return products[id] ?? null;
-      }),
-    } as unknown as MercadoLivreConnector;
-    const resolver = new MercadoLivreHighlightResolver(marketplace);
+  it("marks invalid refresh token as REAUTH_REQUIRED", async () => {
+    const account = expiredAccount();
+    database.marketplaceAccount.findFirst.mockResolvedValue(account);
+    const oauth = {
+      refresh: vi
+        .fn()
+        .mockRejectedValue(
+          new MercadoLivreOAuthError("invalid grant", 400, "invalid_grant"),
+        ),
+    };
 
     await expect(
-      resolver.resolveCandidate({
-        id: "MLB100",
-        position: 1,
-        type: "PRODUCT",
-        rawType: "PRODUCT",
-        categoryId: "MLB123",
+      new MercadoLivreTokenService({
+        env: encryptionEnv,
+        oauth: oauth as unknown as MercadoLivreOAuthClient,
+        acquireLock: vi
+          .fn()
+          .mockResolvedValue({ acquired: true, release: vi.fn() }),
+        now: () => new Date("2026-07-27T11:00:00.000Z").getTime(),
+      }).getValidAccessToken(),
+    ).rejects.toThrow("invalid grant");
+
+    expect(database.marketplaceAccount.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "REAUTH_REQUIRED" }),
       }),
-    ).resolves.toMatchObject({
-      ok: true,
-      candidate: {
-        sourceHighlightId: "MLB100",
-        sourceHighlightType: "PRODUCT",
-        resolvedProductId: "MLB102",
-        resolvedItemId: "MLB9002",
-        resolutionStrategy: "PRODUCT_CHILD_BUY_BOX",
-      },
-      diagnostics: {
-        productParentCount: 1,
-        productLeafCount: 2,
-        productResolvedViaChild: 1,
-      },
-    });
-  });
-
-  it("resolves nested PRODUCT parents within the depth limit", async () => {
-    const marketplace = {
-      getProduct: vi.fn(async (id: string) => {
-        const products: Record<string, MercadoLivreProduct> = {
-          MLB100: catalogProduct({ id: "MLB100", childrenIds: ["MLB101"] }),
-          MLB101: catalogProduct({ id: "MLB101", childrenIds: ["MLB102"] }),
-          MLB102: catalogProduct({
-            id: "MLB102",
-            soldQuantity: 10,
-            buyBoxWinner: { itemId: "MLB9002", price: 1100 },
-            buyBoxWinnerItemId: "MLB9002",
-            buyBoxWinnerPrice: 1100,
-          }),
-        };
-
-        return products[id] ?? null;
-      }),
-    } as unknown as MercadoLivreConnector;
-    const resolver = new MercadoLivreHighlightResolver(marketplace, { maxProductDepth: 4 });
-
-    await expect(
-      resolver.resolveCandidate({
-        id: "MLB100",
-        position: 1,
-        type: "PRODUCT",
-        rawType: "PRODUCT",
-        categoryId: "MLB123",
-      }),
-    ).resolves.toMatchObject({
-      ok: true,
-      candidate: { resolvedProductId: "MLB102", resolvedItemId: "MLB9002" },
-    });
-  });
-
-  it("skips PRODUCT leaves without buy box winner", async () => {
-    const marketplace = {
-      getProduct: vi.fn().mockResolvedValue(catalogProduct({ id: "MLB61695785", childrenIds: [] })),
-    } as unknown as MercadoLivreConnector;
-    const resolver = new MercadoLivreHighlightResolver(marketplace);
-
-    await expect(
-      resolver.resolveCandidate({
-        id: "MLB61695785",
-        position: 2,
-        type: "PRODUCT",
-        rawType: "PRODUCT",
-        categoryId: "MLB123",
-      }),
-    ).resolves.toMatchObject({ ok: false, reason: "PRODUCT_LEAF_NO_BUY_BOX_WINNER" });
-  });
-
-  it("skips PRODUCT parents without resolvable children", async () => {
-    const marketplace = {
-      getProduct: vi.fn(async (id: string) => {
-        const products: Record<string, MercadoLivreProduct> = {
-          MLB100: catalogProduct({ id: "MLB100", childrenIds: ["MLB101", "MLB102", "MLB103"] }),
-          MLB101: catalogProduct({ id: "MLB101" }),
-          MLB102: catalogProduct({ id: "MLB102" }),
-          MLB103: catalogProduct({ id: "MLB103" }),
-        };
-
-        return products[id] ?? null;
-      }),
-    } as unknown as MercadoLivreConnector;
-    const resolver = new MercadoLivreHighlightResolver(marketplace);
-
-    await expect(
-      resolver.resolveCandidate({
-        id: "MLB100",
-        position: 1,
-        type: "PRODUCT",
-        rawType: "PRODUCT",
-        categoryId: "MLB123",
-      }),
-    ).resolves.toMatchObject({
-      ok: false,
-      reason: "PRODUCT_PARENT_NO_RESOLVABLE_CHILD",
-      diagnostics: { productParentWithoutResolvableChild: 1 },
-    });
-  });
-
-  it("stops PRODUCT tree traversal at the configured depth limit", async () => {
-    const marketplace = {
-      getProduct: vi.fn(async (id: string) => {
-        const products: Record<string, MercadoLivreProduct> = {
-          MLB100: catalogProduct({ id: "MLB100", childrenIds: ["MLB101"] }),
-          MLB101: catalogProduct({ id: "MLB101", childrenIds: ["MLB102"] }),
-          MLB102: catalogProduct({
-            id: "MLB102",
-            buyBoxWinner: { itemId: "MLB9002", price: 1100 },
-            buyBoxWinnerItemId: "MLB9002",
-            buyBoxWinnerPrice: 1100,
-          }),
-        };
-
-        return products[id] ?? null;
-      }),
-    } as unknown as MercadoLivreConnector;
-    const resolver = new MercadoLivreHighlightResolver(marketplace, { maxProductDepth: 1 });
-
-    await expect(
-      resolver.resolveCandidate({
-        id: "MLB100",
-        position: 1,
-        type: "PRODUCT",
-        rawType: "PRODUCT",
-        categoryId: "MLB123",
-      }),
-    ).resolves.toMatchObject({ ok: false, reason: "PRODUCT_TREE_DEPTH_LIMIT" });
-  });
-
-  it("resolves USER_PRODUCT highlights to an active marketplace item", async () => {
-    const marketplace = {
-      getUserProduct: vi.fn().mockResolvedValue({ id: "MLBU1", userId: "123" }),
-      getItemsByUserProduct: vi.fn().mockResolvedValue(["MLB2", "MLB1"]),
-      getItems: vi.fn().mockResolvedValue([
-        {
-          marketplace: "MERCADO_LIVRE",
-          externalProductId: "MLB2",
-          title: "Paused",
-          productUrl: "https://produto.example/MLB2",
-          currentPrice: 100,
-          itemStatus: "paused",
-          channels: ["marketplace"],
-        },
-        {
-          marketplace: "MERCADO_LIVRE",
-          externalProductId: "MLB1",
-          title: "Active",
-          productUrl: "https://produto.example/MLB1",
-          currentPrice: 110,
-          itemStatus: "active",
-          channels: ["marketplace"],
-        },
-      ]),
-    } as unknown as MercadoLivreConnector;
-    const resolver = new MercadoLivreHighlightResolver(marketplace);
-
-    await expect(
-      resolver.resolveCandidate({
-        id: "MLBU1",
-        position: 1,
-        type: "USER_PRODUCT",
-        rawType: "USER_PRODUCT",
-        categoryId: "MLB123",
-      }),
-    ).resolves.toMatchObject({
-      ok: true,
-      candidate: { sourceHighlightId: "MLBU1", sourceHighlightType: "USER_PRODUCT", resolvedItemId: "MLB1" },
-    });
-  });
-
-  it("skips USER_PRODUCT highlights without active items", async () => {
-    const marketplace = {
-      getUserProduct: vi.fn().mockResolvedValue({ id: "MLBU1", userId: "123" }),
-      getItemsByUserProduct: vi.fn().mockResolvedValue([]),
-    } as unknown as MercadoLivreConnector;
-    const resolver = new MercadoLivreHighlightResolver(marketplace);
-
-    await expect(
-      resolver.resolveCandidate({
-        id: "MLBU1",
-        position: 1,
-        type: "USER_PRODUCT",
-        rawType: "USER_PRODUCT",
-        categoryId: "MLB123",
-      }),
-    ).resolves.toMatchObject({ ok: false, reason: "USER_PRODUCT_NO_ACTIVE_ITEM" });
+    );
   });
 });

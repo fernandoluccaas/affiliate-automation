@@ -31,6 +31,8 @@ Monetary and percentage values use Prisma `Decimal`. Discount percentage is calc
 
 `Product` is identity. It can update current product metadata without rewriting historical publications.
 
+Partial external responses do not erase known Product metadata. An undefined description, category, image, rating or sales count means the source omitted that field in the current collection, so the existing value is preserved. Explicit clearing requires a separate domain rule.
+
 `Offer` is a commercial snapshot/version. `offerFingerprint` is a SHA-256 hash over normalized material condition fields:
 
 - `productId`
@@ -43,6 +45,8 @@ Monetary and percentage values use Prisma `Decimal`. Discount percentage is calc
 - `stockStatus`
 
 `collectedAt`, `createdAt`, `updatedAt`, score and operational status are not part of the fingerprint.
+
+Affiliate URL normalization lowercases only the URL scheme and hostname. Path, query values and fragments preserve case so case-sensitive affiliate tokens are not changed.
 
 The first Offer for a Product is `version = 1`. A new material condition for the same Product receives the next version. A published Offer, exported Offer or any Offer with a `Publication` is treated as historical and is not overwritten by later ingestion.
 
@@ -63,6 +67,8 @@ Offers default to `PENDING_VALIDATION`. The manual ingestion service then sets o
 
 `Offer.statusReason` stores the deterministic reason shown in the operational panel. `OfferScore` keeps each scoring component, the weights used for auditability and `completenessPercentage`.
 
+`Offer.minimumScoreApplied` stores the publication score policy used for that Offer version. Mercado Livre affiliate-link enrichment reuses this value, including zero, rather than falling back to the global ingestion default.
+
 Mercado Livre adds operational fields to `Offer`: `affiliateEligibility`, `affiliateLabel`, `sellerId`, `officialStoreId` and `trackingStrategy`. `TrackingStrategy.INTERNAL_REDIRECT` keeps the existing `/go/[slug]` flow. `TrackingStrategy.DIRECT_AFFILIATE_LINK` is used for Mercado Livre so the worker sends the official affiliate URL directly and does not create an internal `AffiliateLink` slug.
 
 Shipping uses `ShippingStatus` with `FREE`, `NOT_FREE` and `UNKNOWN`. A missing shipping field from an external API is `UNKNOWN`, not `NOT_FREE`. `freeShipping` remains as a compatibility boolean derived from `shippingStatus === FREE`.
@@ -74,6 +80,8 @@ Validation is separated into three levels:
 - `MINIMUM_PUBLICATION_DATA`: valid Offer data plus affiliate URL and channel policy compatibility.
 
 Scoring distinguishes unavailable data from zero values. It normalizes the final score by available component weights and records `scoreCompletenessPercentage` on `Offer` and `completenessPercentage` on `OfferScore`.
+
+Completeness is not the score. A normalized score can be 100 with 10% completeness when only one component is available and maximized. No `minimumScoreCompleteness` policy is applied in Phase 3A.1.
 
 ## Channel Configuration
 
@@ -121,7 +129,7 @@ The published/exported text remains in `messagePayload`. These fields do not sto
 
 ## Mercado Livre Integration State
 
-`MarketplaceAccount` stores Mercado Livre OAuth state:
+`MarketplaceAccount` stores Mercado Livre OAuth state and operational timestamps:
 
 - `externalUserId`
 - `accessTokenEncrypted`
@@ -133,5 +141,7 @@ The published/exported text remains in `messagePayload`. These fields do not sto
 - `lastRefreshAt`, `lastSyncAt`, `lastErrorAt`, `lastError`
 
 Tokens are encrypted at rest and never sent to the browser. Refresh tokens are rotated on successful refresh.
+
+Authentication and operational health are separate. Only definitive token/authentication failures move the status to `REAUTH_REQUIRED`. Rate limits, 5xx responses, timeouts and network errors leave `status=CONNECTED` and update `lastErrorAt`/`lastError`.
 
 `MercadoLivreDiscoveryConfig` stores `enabled`, `siteId`, `categoryIds`, `bestSellersEnabled`, price filters, minimum discount, minimum score, max candidates per category, refresh interval, last run timestamp and last run metrics.

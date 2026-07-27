@@ -241,6 +241,7 @@ model Offer {
   stockStatus          StockStatus @default(UNKNOWN)
   score                Int?
   scoreCompletenessPercentage Decimal? @db.Decimal(5, 2)
+  minimumScoreApplied  Int         @default(70)
   status               OfferStatus @default(PENDING_VALIDATION)
   statusReason         String?
   collectedAt          DateTime

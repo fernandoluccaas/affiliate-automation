@@ -4,7 +4,10 @@ import {
   type ChannelPolicy,
   type PolicyFailureCode,
 } from "@affiliate/publication";
-import { generateMessageForOffer, type MessageGenerationResult } from "@affiliate/ai-copywriter";
+import {
+  generateMessageForOffer,
+  type MessageGenerationResult,
+} from "@affiliate/ai-copywriter";
 import {
   ManualExportPublisher,
   TelegramPublisher,
@@ -20,7 +23,10 @@ import {
   type Prisma,
   type Publication,
 } from "@affiliate/database";
-import { collectMercadoLivreCandidates, refreshMercadoLivreOffers } from "./mercado-livre";
+import {
+  collectMercadoLivreCandidates,
+  refreshMercadoLivreOffers,
+} from "@affiliate/marketplace-discovery";
 
 const DEFAULT_POLL_INTERVAL_MS = 60_000;
 const DEFAULT_MAX_ATTEMPTS = 3;
@@ -38,7 +44,12 @@ type JobMetrics = {
 };
 
 type OfferWithLinks = Offer & {
-  affiliateLinks: Array<{ id: string; slug: string; destination: string; active: boolean }>;
+  affiliateLinks: Array<{
+    id: string;
+    slug: string;
+    destination: string;
+    active: boolean;
+  }>;
 };
 
 type PublicationWithRelations = Publication & {
@@ -105,7 +116,9 @@ function recordSkip(metrics: JobMetrics, reason: WorkerSkipReason) {
 }
 
 function asStringArray(value: unknown) {
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
 }
 
 function startOfDay(date: Date) {
@@ -130,7 +143,8 @@ function channelPolicy(channel: Channel): ChannelPolicy {
     allowedStartTime: channel.allowedStartTime,
     allowedEndTime: channel.allowedEndTime,
     minimumScore: channel.minimumScore,
-    minimumDiscountPercentage: channel.minDiscountPercentage?.toString() ?? null,
+    minimumDiscountPercentage:
+      channel.minDiscountPercentage?.toString() ?? null,
     productRepeatIntervalDays: channel.productRepeatIntervalDays,
     allowedMarketplaces: asStringArray(channel.allowedMarketplaces),
     allowedCategories: asStringArray(channel.allowedCategories),
@@ -138,10 +152,11 @@ function channelPolicy(channel: Channel): ChannelPolicy {
 }
 
 function getBaseUrl() {
-  return (process.env.APP_BASE_URL ?? process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000").replace(
-    /\/$/,
-    "",
-  );
+  return (
+    process.env.APP_BASE_URL ??
+    process.env.NEXT_PUBLIC_APP_URL ??
+    "http://localhost:3000"
+  ).replace(/\/$/, "");
 }
 
 function trackingUrlForSlug(slug: string) {
@@ -149,12 +164,19 @@ function trackingUrlForSlug(slug: string) {
 }
 
 export function resolvePublicationUrl(offer: OfferWithLinks) {
-  if (offer.marketplace === "MERCADO_LIVRE" || offer.trackingStrategy === "DIRECT_AFFILIATE_LINK") {
-    return offer.affiliateUrl ? { url: offer.affiliateUrl, affiliateLinkId: null } : null;
+  if (
+    offer.marketplace === "MERCADO_LIVRE" ||
+    offer.trackingStrategy === "DIRECT_AFFILIATE_LINK"
+  ) {
+    return offer.affiliateUrl
+      ? { url: offer.affiliateUrl, affiliateLinkId: null }
+      : null;
   }
 
   const link = offer.affiliateLinks.find((item) => item.active);
-  return link ? { url: trackingUrlForSlug(link.slug), affiliateLinkId: link.id } : null;
+  return link
+    ? { url: trackingUrlForSlug(link.slug), affiliateLinkId: link.id }
+    : null;
 }
 
 async function messagePayloadFor(
@@ -202,7 +224,11 @@ async function messagePayloadFor(
 function getTelegramChatId(channel: Channel) {
   const configuration = channel.configuration;
 
-  if (configuration && typeof configuration === "object" && !Array.isArray(configuration)) {
+  if (
+    configuration &&
+    typeof configuration === "object" &&
+    !Array.isArray(configuration)
+  ) {
     const record = configuration as Record<string, unknown>;
 
     if (typeof record.chatId === "string" && record.chatId.trim()) {
@@ -252,7 +278,10 @@ async function lastChannelPublication(channelId: string) {
   });
 }
 
-async function lastProductPublication(channelId: string, productId?: string | null) {
+async function lastProductPublication(
+  channelId: string,
+  productId?: string | null,
+) {
   if (!productId) {
     return null;
   }
@@ -339,7 +368,8 @@ export async function scheduleReadyOffers(now = new Date()) {
           marketplace: offer.marketplace,
           category: offer.category,
           score: offer.score,
-          scoreCompletenessPercentage: offer.scoreCompletenessPercentage?.toString() ?? null,
+          scoreCompletenessPercentage:
+            offer.scoreCompletenessPercentage?.toString() ?? null,
           discountPercentage: offer.discountPercentage?.toString() ?? null,
           stockStatus: offer.stockStatus,
           shippingStatus: offer.shippingStatus,
@@ -359,18 +389,22 @@ export async function scheduleReadyOffers(now = new Date()) {
         continue;
       }
 
-      const [publicationsToday, lastPublication, productPublication] = await Promise.all([
-        channelDailyCount(channel.id, now),
-        lastChannelPublication(channel.id),
-        lastProductPublication(channel.id, offer.productId),
-      ]);
+      const [publicationsToday, lastPublication, productPublication] =
+        await Promise.all([
+          channelDailyCount(channel.id, now),
+          lastChannelPublication(channel.id),
+          lastProductPublication(channel.id, offer.productId),
+        ]);
       const windowResult = canScheduleInWindow({
         channel: policy,
         now,
         publicationsToday,
-        lastPublicationAt: lastPublication?.publishedAt ?? lastPublication?.scheduledAt ?? null,
+        lastPublicationAt:
+          lastPublication?.publishedAt ?? lastPublication?.scheduledAt ?? null,
         lastProductPublicationAt:
-          productPublication?.publishedAt ?? productPublication?.scheduledAt ?? null,
+          productPublication?.publishedAt ??
+          productPublication?.scheduledAt ??
+          null,
       });
 
       if (!windowResult.ok) {
@@ -385,7 +419,10 @@ export async function scheduleReadyOffers(now = new Date()) {
         continue;
       }
 
-      const lock = await acquireLock(`publication:${channel.id}:${offer.id}`, 60_000);
+      const lock = await acquireLock(
+        `publication:${channel.id}:${offer.id}`,
+        60_000,
+      );
 
       if (!lock.acquired) {
         recordSkip(metrics, "LOCK_NOT_ACQUIRED");
@@ -394,7 +431,13 @@ export async function scheduleReadyOffers(now = new Date()) {
 
       try {
         const created = await prisma.$transaction(async (tx) => {
-          const publication = await createPublicationIdempotently(tx, offer, channel, payload, now);
+          const publication = await createPublicationIdempotently(
+            tx,
+            offer,
+            channel,
+            payload,
+            now,
+          );
           await tx.offer.update({
             where: { id: offer.id },
             data: { status: "SCHEDULED", scheduledAt: now },
@@ -417,19 +460,27 @@ export async function scheduleReadyOffers(now = new Date()) {
   return metrics;
 }
 
-async function payloadFromPublication(publication: PublicationWithRelations): Promise<PublicationPayload | null> {
+async function payloadFromPublication(
+  publication: PublicationWithRelations,
+): Promise<PublicationPayload | null> {
   const payload = publication.messagePayload;
 
   if (payload && typeof payload === "object" && !Array.isArray(payload)) {
     const record = payload as Record<string, unknown>;
 
-    if (typeof record.message === "string" && typeof record.trackingUrl === "string") {
+    if (
+      typeof record.message === "string" &&
+      typeof record.trackingUrl === "string"
+    ) {
       return {
         offerId: publication.offerId,
         channelId: publication.channelId,
         trackingUrl: record.trackingUrl,
         message: record.message,
-        imageUrl: typeof record.imageUrl === "string" ? record.imageUrl : publication.offer.imageUrl,
+        imageUrl:
+          typeof record.imageUrl === "string"
+            ? record.imageUrl
+            : publication.offer.imageUrl,
       };
     }
   }
@@ -444,7 +495,11 @@ async function recordPublicationResult(
   maxAttempts: number,
 ) {
   const attemptStatus =
-    result.status === "PUBLISHED" ? "SUCCESS" : result.status === "EXPORTED" ? "EXPORTED" : "FAILED";
+    result.status === "PUBLISHED"
+      ? "SUCCESS"
+      : result.status === "EXPORTED"
+        ? "EXPORTED"
+        : "FAILED";
 
   await prisma.publicationAttempt.create({
     data: {
@@ -515,7 +570,9 @@ async function recordPublicationResult(
 
 export async function publishScheduledOffers(now = new Date()) {
   const metrics = emptyMetrics();
-  const maxAttempts = Number(process.env.WORKER_MAX_ATTEMPTS ?? DEFAULT_MAX_ATTEMPTS);
+  const maxAttempts = Number(
+    process.env.WORKER_MAX_ATTEMPTS ?? DEFAULT_MAX_ATTEMPTS,
+  );
   const publications = await prisma.publication.findMany({
     where: {
       status: "SCHEDULED",
@@ -538,14 +595,22 @@ export async function publishScheduledOffers(now = new Date()) {
       metrics.failed += 1;
       await prisma.publication.update({
         where: { id: publication.id },
-        data: { status: "PUBLICATION_FAILED", errorMessage: "Publisher unavailable." },
+        data: {
+          status: "PUBLICATION_FAILED",
+          errorMessage: "Publisher unavailable.",
+        },
       });
       continue;
     }
 
     const result = await publisher.publish(payload);
     const attemptNumber = publication.attempts.length + 1;
-    await recordPublicationResult(publication, result, attemptNumber, maxAttempts);
+    await recordPublicationResult(
+      publication,
+      result,
+      attemptNumber,
+      maxAttempts,
+    );
 
     if (result.status === "PUBLISHED") {
       metrics.published += 1;
@@ -561,7 +626,9 @@ export async function publishScheduledOffers(now = new Date()) {
 
 export async function retryFailedPublications(now = new Date()) {
   const metrics = emptyMetrics();
-  const maxAttempts = Number(process.env.WORKER_MAX_ATTEMPTS ?? DEFAULT_MAX_ATTEMPTS);
+  const maxAttempts = Number(
+    process.env.WORKER_MAX_ATTEMPTS ?? DEFAULT_MAX_ATTEMPTS,
+  );
   const publications = await prisma.publication.findMany({
     where: { status: "FAILED" },
     include: { attempts: { select: { id: true } } },
@@ -618,7 +685,14 @@ export async function runWorkerCycle(now = new Date()) {
 
   try {
     mergeMetrics(metrics, await expireInvalidOffers(now));
-    mergeMetrics(metrics, await collectMercadoLivreCandidates(now));
+    const discovery = await collectMercadoLivreCandidates(now);
+
+    if (discovery.status === "FAILED") {
+      throw new Error(
+        discovery.errorMessage ?? "Mercado Livre discovery failed.",
+      );
+    }
+
     mergeMetrics(metrics, await refreshMercadoLivreOffers(now));
     mergeMetrics(metrics, await scheduleReadyOffers(now));
     mergeMetrics(metrics, await retryFailedPublications(now));
@@ -641,7 +715,8 @@ export async function runWorkerCycle(now = new Date()) {
         status: "FAILED",
         finishedAt: new Date(),
         metrics,
-        errorMessage: error instanceof Error ? error.message : "Worker cycle failed.",
+        errorMessage:
+          error instanceof Error ? error.message : "Worker cycle failed.",
       },
     });
     throw error;
@@ -650,7 +725,9 @@ export async function runWorkerCycle(now = new Date()) {
 
 let loopStarted = false;
 
-export async function startWorker(options: { once?: boolean; pollIntervalMs?: number } = {}) {
+export async function startWorker(
+  options: { once?: boolean; pollIntervalMs?: number } = {},
+) {
   if (loopStarted) {
     throw new Error("Worker loop already started in this process.");
   }
@@ -681,7 +758,9 @@ export async function startWorker(options: { once?: boolean; pollIntervalMs?: nu
 
 if (process.env.NODE_ENV !== "test") {
   const once = process.argv.includes("--once");
-  const pollIntervalMs = Number(process.env.WORKER_POLL_INTERVAL_MS ?? DEFAULT_POLL_INTERVAL_MS);
+  const pollIntervalMs = Number(
+    process.env.WORKER_POLL_INTERVAL_MS ?? DEFAULT_POLL_INTERVAL_MS,
+  );
 
   startWorker({ once, pollIntervalMs }).catch((error: unknown) => {
     console.error(error instanceof Error ? error.message : "Worker failed.");

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import type { Marketplace, OfferStatus, Prisma, ShippingStatus, StockStatus } from "@affiliate/database";
+import type {
+  Marketplace,
+  OfferStatus,
+  Prisma,
+  ShippingStatus,
+  StockStatus,
+} from "@affiliate/database";
 import {
   createOfferFingerprint,
   ingestOffer,
@@ -14,7 +20,12 @@ type ProductRecord = {
   marketplace: Marketplace;
   externalProductId: string;
   title: string;
+  description?: string | null;
+  category?: string | null;
+  imageUrl?: string | null;
   productUrl: string;
+  rating?: number | null;
+  salesCount?: number | null;
 };
 
 type OfferRecord = {
@@ -50,6 +61,7 @@ type OfferRecord = {
   statusReason: string | null;
   score: number | null;
   scoreCompletenessPercentage: number | null;
+  minimumScoreApplied: number;
 };
 
 type AffiliateLinkRecord = {
@@ -64,8 +76,15 @@ type PublicationRecord = {
   offerId: string;
 };
 
-type UpsertArgs<TRecord extends { marketplace: Marketplace; externalProductId: string }> = {
-  where: { marketplace_externalProductId: { marketplace: Marketplace; externalProductId: string } };
+type UpsertArgs<
+  TRecord extends { marketplace: Marketplace; externalProductId: string },
+> = {
+  where: {
+    marketplace_externalProductId: {
+      marketplace: Marketplace;
+      externalProductId: string;
+    };
+  };
   update: Partial<TRecord>;
   create: TRecord;
 };
@@ -89,7 +108,8 @@ function validOffer(overrides: Partial<OfferFormValues> = {}): OfferFormValues {
     rating: 5,
     salesCount: 100000,
     ...overrides,
-    freeShipping: overrides.freeShipping ?? (overrides.shippingStatus ?? "FREE") === "FREE",
+    freeShipping:
+      overrides.freeShipping ?? (overrides.shippingStatus ?? "FREE") === "FREE",
     shippingStatus: overrides.shippingStatus ?? "FREE",
     stockStatus: overrides.stockStatus ?? "IN_STOCK",
   };
@@ -104,11 +124,28 @@ class FakeTransaction {
   coupons: Array<Record<string, unknown>> = [];
 
   product = {
+    findUnique: async (args: {
+      where: {
+        marketplace_externalProductId: {
+          marketplace: Marketplace;
+          externalProductId: string;
+        };
+      };
+    }) =>
+      this.products.find(
+        (product) =>
+          product.marketplace ===
+            args.where.marketplace_externalProductId.marketplace &&
+          product.externalProductId ===
+            args.where.marketplace_externalProductId.externalProductId,
+      ) ?? null,
     upsert: async (args: UpsertArgs<ProductRecord>) => {
       const found = this.products.find(
         (product) =>
-          product.marketplace === args.where.marketplace_externalProductId.marketplace &&
-          product.externalProductId === args.where.marketplace_externalProductId.externalProductId,
+          product.marketplace ===
+            args.where.marketplace_externalProductId.marketplace &&
+          product.externalProductId ===
+            args.where.marketplace_externalProductId.externalProductId,
       );
 
       if (found) {
@@ -116,7 +153,10 @@ class FakeTransaction {
         return found;
       }
 
-      const product = { ...args.create, id: `product-${this.products.length + 1}` };
+      const product = {
+        ...args.create,
+        id: `product-${this.products.length + 1}`,
+      };
       this.products.push(product);
       return product;
     },
@@ -130,20 +170,29 @@ class FakeTransaction {
     }) => {
       const where = args.where ?? {};
 
-      if (typeof where.productId === "string" && typeof where.offerFingerprint === "string") {
+      if (
+        typeof where.productId === "string" &&
+        typeof where.offerFingerprint === "string"
+      ) {
         return (
           this.offers.find(
             (offer) =>
-              offer.productId === where.productId && offer.offerFingerprint === where.offerFingerprint,
+              offer.productId === where.productId &&
+              offer.offerFingerprint === where.offerFingerprint,
           ) ?? null
         );
       }
 
-      if (typeof where.productId === "string" && args.orderBy?.version === "desc") {
+      if (
+        typeof where.productId === "string" &&
+        args.orderBy?.version === "desc"
+      ) {
         const offer = this.offers
           .filter((item) => item.productId === where.productId)
           .sort((left, right) => right.version - left.version)[0];
-        return offer && args.select?.version ? { version: offer.version } : (offer ?? null);
+        return offer && args.select?.version
+          ? { version: offer.version }
+          : (offer ?? null);
       }
 
       if (
@@ -154,7 +203,10 @@ class FakeTransaction {
         Array.isArray(where.OR)
       ) {
         const productFilter = where.productId as { not: string };
-        const conditions = where.OR as Array<{ productUrl?: string; affiliateUrl?: string }>;
+        const conditions = where.OR as Array<{
+          productUrl?: string;
+          affiliateUrl?: string;
+        }>;
 
         return (
           this.offers.find(
@@ -173,7 +225,10 @@ class FakeTransaction {
       return null;
     },
     create: async (args: {
-      data: Omit<OfferRecord, "id" | "statusReason" | "score" | "scoreCompletenessPercentage">;
+      data: Omit<
+        OfferRecord,
+        "id" | "statusReason" | "score" | "scoreCompletenessPercentage"
+      >;
     }) => {
       const offer = {
         ...args.data,
@@ -185,7 +240,10 @@ class FakeTransaction {
       this.offers.push(offer);
       return offer;
     },
-    update: async (args: { where: { id: string }; data: Partial<OfferRecord> }) => {
+    update: async (args: {
+      where: { id: string };
+      data: Partial<OfferRecord>;
+    }) => {
       const offer = this.offers.find((item) => item.id === args.where.id);
 
       if (!offer) {
@@ -199,12 +257,16 @@ class FakeTransaction {
 
   publication = {
     count: async (args: { where: { offerId: string } }) =>
-      this.publications.filter((publication) => publication.offerId === args.where.offerId).length,
+      this.publications.filter(
+        (publication) => publication.offerId === args.where.offerId,
+      ).length,
   };
 
   coupon = {
     deleteMany: async (args: { where: { offerId: string } }) => {
-      this.coupons = this.coupons.filter((coupon) => coupon.offerId !== args.where.offerId);
+      this.coupons = this.coupons.filter(
+        (coupon) => coupon.offerId !== args.where.offerId,
+      );
       return { count: 0 };
     },
     create: async (args: { data: Record<string, unknown> }) => {
@@ -224,11 +286,20 @@ class FakeTransaction {
     findUnique: async (args: { where: { slug: string } }) =>
       this.affiliateLinks.find((link) => link.slug === args.where.slug) ?? null,
     findFirst: async (args: { where: { offerId: string } }) =>
-      this.affiliateLinks.find((link) => link.offerId === args.where.offerId) ?? null,
+      this.affiliateLinks.find((link) => link.offerId === args.where.offerId) ??
+      null,
     create: async (args: {
-      data: { offerId: string; slug: string; destination: string; marketplace: Marketplace };
+      data: {
+        offerId: string;
+        slug: string;
+        destination: string;
+        marketplace: Marketplace;
+      };
     }) => {
-      const link = { id: `link-${this.affiliateLinks.length + 1}`, ...args.data };
+      const link = {
+        id: `link-${this.affiliateLinks.length + 1}`,
+        ...args.data,
+      };
       this.affiliateLinks.push(link);
       return link;
     },
@@ -236,17 +307,40 @@ class FakeTransaction {
 }
 
 async function ingestWithFake(tx: FakeTransaction, input: OfferFormValues) {
-  return ingestOfferInTransaction(tx as unknown as Prisma.TransactionClient, input, {
-    now: new Date("2026-01-01T00:00:00.000Z"),
-    minScore: 70,
-  });
+  return ingestOfferInTransaction(
+    tx as unknown as Prisma.TransactionClient,
+    input,
+    {
+      now: new Date("2026-01-01T00:00:00.000Z"),
+      minScore: 70,
+    },
+  );
+}
+
+async function ingestWithMinimumScore(
+  tx: FakeTransaction,
+  input: OfferFormValues,
+  minScore: number,
+) {
+  return ingestOfferInTransaction(
+    tx as unknown as Prisma.TransactionClient,
+    input,
+    {
+      now: new Date("2026-01-01T00:00:00.000Z"),
+      minScore,
+    },
+  );
 }
 
 async function ingestRawWithFake(tx: FakeTransaction, input: unknown) {
-  return ingestOfferInTransaction(tx as unknown as Prisma.TransactionClient, input, {
-    now: new Date("2026-01-01T00:00:00.000Z"),
-    minScore: 70,
-  });
+  return ingestOfferInTransaction(
+    tx as unknown as Prisma.TransactionClient,
+    input,
+    {
+      now: new Date("2026-01-01T00:00:00.000Z"),
+      minScore: 70,
+    },
+  );
 }
 
 describe("offer form normalization", () => {
@@ -352,6 +446,10 @@ describe("ingestOfferInTransaction", () => {
       ok: true,
       status: "READY_TO_PUBLISH",
       discountPercentage: 60,
+      productCreated: true,
+      offerCreated: true,
+      offerReused: false,
+      version: 1,
     });
     expect(tx.offers).toHaveLength(1);
     expect(tx.offers[0]?.version).toBe(1);
@@ -400,8 +498,14 @@ describe("ingestOfferInTransaction", () => {
   it("creates a new Offer when couponExpiration changes", async () => {
     const tx = new FakeTransaction();
 
-    await ingestWithFake(tx, validOffer({ couponExpiration: new Date("2026-01-02T00:00:00.000Z") }));
-    await ingestWithFake(tx, validOffer({ couponExpiration: new Date("2026-01-03T00:00:00.000Z") }));
+    await ingestWithFake(
+      tx,
+      validOffer({ couponExpiration: new Date("2026-01-02T00:00:00.000Z") }),
+    );
+    await ingestWithFake(
+      tx,
+      validOffer({ couponExpiration: new Date("2026-01-03T00:00:00.000Z") }),
+    );
 
     expect(tx.offers).toHaveLength(2);
   });
@@ -409,8 +513,14 @@ describe("ingestOfferInTransaction", () => {
   it("creates a new Offer when affiliateUrl changes", async () => {
     const tx = new FakeTransaction();
 
-    await ingestWithFake(tx, validOffer({ affiliateUrl: "https://example.com/affiliate-a" }));
-    await ingestWithFake(tx, validOffer({ affiliateUrl: "https://example.com/affiliate-b" }));
+    await ingestWithFake(
+      tx,
+      validOffer({ affiliateUrl: "https://example.com/affiliate-a" }),
+    );
+    await ingestWithFake(
+      tx,
+      validOffer({ affiliateUrl: "https://example.com/affiliate-b" }),
+    );
 
     expect(tx.offers).toHaveLength(2);
   });
@@ -423,6 +533,21 @@ describe("ingestOfferInTransaction", () => {
 
     expect(tx.offers).toHaveLength(1);
     expect(tx.affiliateLinks).toHaveLength(1);
+  });
+
+  it("reports reused offers explicitly instead of inferring from status", async () => {
+    const tx = new FakeTransaction();
+
+    await ingestWithFake(tx, validOffer());
+    const result = await ingestWithFake(tx, validOffer());
+
+    expect(result).toMatchObject({
+      productCreated: false,
+      offerCreated: false,
+      offerReused: true,
+      offerUpdated: true,
+      version: 1,
+    });
   });
 
   it("does not overwrite a published Offer", async () => {
@@ -440,7 +565,10 @@ describe("ingestOfferInTransaction", () => {
   it("keeps Offer v1 tracking intact and creates a separate link for v2", async () => {
     const tx = new FakeTransaction();
 
-    await ingestWithFake(tx, validOffer({ affiliateUrl: "https://example.com/affiliate-v1" }));
+    await ingestWithFake(
+      tx,
+      validOffer({ affiliateUrl: "https://example.com/affiliate-v1" }),
+    );
     const v1Link = tx.affiliateLinks[0]!;
     await ingestWithFake(
       tx,
@@ -454,7 +582,9 @@ describe("ingestOfferInTransaction", () => {
     expect(tx.affiliateLinks).toHaveLength(2);
     expect(v1Link.destination).toBe("https://example.com/affiliate-v1");
     expect(tx.affiliateLinks[1]?.offerId).toBe(tx.offers[1]?.id);
-    expect(tx.affiliateLinks[1]?.destination).toBe("https://example.com/affiliate-v2");
+    expect(tx.affiliateLinks[1]?.destination).toBe(
+      "https://example.com/affiliate-v2",
+    );
   });
 
   it("persists an offer without original price and leaves discount unavailable", async () => {
@@ -530,6 +660,112 @@ describe("ingestOfferInTransaction", () => {
     expect(tx.offers[0]?.shippingStatus).toBe("UNKNOWN");
     expect(tx.offers[0]?.freeShipping).toBe(false);
     expect(result.scoreCompletenessPercentage).toBeLessThan(100);
+  });
+
+  it("preserves known Product metadata when a later collection omits it", async () => {
+    const tx = new FakeTransaction();
+
+    await ingestWithFake(
+      tx,
+      validOffer({
+        category: "Notebooks",
+        imageUrl: "https://example.com/notebook.jpg",
+        rating: 4.8,
+        salesCount: 500,
+      }),
+    );
+    await ingestWithFake(
+      tx,
+      validOffer({
+        category: undefined,
+        imageUrl: undefined,
+        rating: undefined,
+        salesCount: undefined,
+      }),
+    );
+
+    expect(tx.products[0]).toMatchObject({
+      category: "Notebooks",
+      imageUrl: "https://example.com/notebook.jpg",
+      rating: 4.8,
+      salesCount: 500,
+    });
+    expect(tx.offers[0]).toMatchObject({
+      category: "Notebooks",
+      imageUrl: "https://example.com/notebook.jpg",
+      rating: 4.8,
+      salesCount: 500,
+    });
+  });
+
+  it("keeps minimumScore zero during affiliate URL enrichment", async () => {
+    const tx = new FakeTransaction();
+    const sparseOffer = validOffer({
+      marketplace: "MERCADO_LIVRE",
+      affiliateUrl: undefined,
+      originalPrice: 100,
+      currentPrice: 100,
+      commissionPercentage: 0,
+      rating: 0,
+      salesCount: 0,
+      couponCode: undefined,
+      couponExpiration: undefined,
+      shippingStatus: "NOT_FREE",
+      freeShipping: false,
+    });
+    const discovery = await ingestWithMinimumScore(tx, sparseOffer, 0);
+    const enrichment = await ingestWithMinimumScore(
+      tx,
+      {
+        ...sparseOffer,
+        affiliateUrl: "https://mercadolivre.com.br/affiliate/AbC123",
+      },
+      tx.offers[0]!.minimumScoreApplied,
+    );
+
+    expect(discovery).toMatchObject({
+      status: "READY_FOR_AFFILIATE_LINK",
+      minimumScoreApplied: 0,
+    });
+    expect(enrichment).toMatchObject({
+      ok: true,
+      status: "READY_TO_PUBLISH",
+      minimumScoreApplied: 0,
+    });
+    expect(enrichment.score).toBeLessThan(70);
+  });
+
+  it("does not publish an explicitly ineligible offer with an affiliate URL", async () => {
+    const tx = new FakeTransaction();
+    const result = await ingestWithMinimumScore(
+      tx,
+      validOffer({
+        marketplace: "MERCADO_LIVRE",
+        affiliateEligibility: "INELIGIBLE",
+        affiliateUrl: "https://mercadolivre.com.br/affiliate/AbC123",
+      }),
+      0,
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      status: "REJECTED_INVALID_DATA",
+    });
+    expect(result.statusReason).toContain("inelegivel");
+  });
+
+  it("rejects an unsafe affiliate URL before publication", async () => {
+    const tx = new FakeTransaction();
+    const result = await ingestWithMinimumScore(
+      tx,
+      validOffer({ affiliateUrl: "http://localhost:3000/affiliate" }),
+      0,
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      status: "REJECTED_INVALID_DATA",
+    });
   });
 
   it("ingests the exact minimal optional-fields regression payload", async () => {
@@ -626,5 +862,35 @@ describe("createOfferFingerprint", () => {
 
     expect(first).toBe(second);
     expect(first).toHaveLength(64);
+  });
+
+  it("normalizes hostname casing while preserving case-sensitive path and query values", () => {
+    const base = {
+      productId: "product-1",
+      originalPrice: 100,
+      currentPrice: 40,
+      shippingStatus: "FREE",
+      stockStatus: "IN_STOCK",
+    };
+    const normalizedHost = createOfferFingerprint({
+      ...base,
+      affiliateUrl: "https://EXAMPLE.COM/AfF123?token=AbC#Section",
+    });
+    const sameHost = createOfferFingerprint({
+      ...base,
+      affiliateUrl: "https://example.com/AfF123?token=AbC#Section",
+    });
+    const changedPath = createOfferFingerprint({
+      ...base,
+      affiliateUrl: "https://example.com/aff123?token=AbC#Section",
+    });
+    const changedQuery = createOfferFingerprint({
+      ...base,
+      affiliateUrl: "https://example.com/AfF123?token=abc#Section",
+    });
+
+    expect(normalizedHost).toBe(sameHost);
+    expect(changedPath).not.toBe(normalizedHost);
+    expect(changedQuery).not.toBe(normalizedHost);
   });
 });

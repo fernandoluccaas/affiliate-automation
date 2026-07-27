@@ -1,4 +1,9 @@
-import { calculateDiscountPercentage, marketplaces, shippingStatuses, stockStatuses } from "@affiliate/shared";
+import {
+  calculateDiscountPercentage,
+  marketplaces,
+  shippingStatuses,
+  stockStatuses,
+} from "@affiliate/shared";
 import { z } from "zod";
 
 export const MINIMUM_INGESTION_DATA = [
@@ -26,10 +31,14 @@ export const offerInputSchema = z.object({
   productUrl: z.string().url(),
   affiliateUrl: z.string().url().optional(),
   affiliateLabel: z.string().optional().nullable(),
-  affiliateEligibility: z.enum(["ELIGIBLE", "INELIGIBLE", "UNKNOWN"]).default("UNKNOWN"),
+  affiliateEligibility: z
+    .enum(["ELIGIBLE", "INELIGIBLE", "UNKNOWN"])
+    .default("UNKNOWN"),
   sellerId: z.string().optional().nullable(),
   officialStoreId: z.string().optional().nullable(),
-  trackingStrategy: z.enum(["INTERNAL_REDIRECT", "DIRECT_AFFILIATE_LINK"]).optional(),
+  trackingStrategy: z
+    .enum(["INTERNAL_REDIRECT", "DIRECT_AFFILIATE_LINK"])
+    .optional(),
   originalPrice: z.number().positive().optional().nullable(),
   currentPrice: z.number().positive(),
   discountPercentage: z.number().min(0).max(100).optional().nullable(),
@@ -59,7 +68,10 @@ export type ValidationResult =
   | { ok: true; normalizedDiscountPercentage: number | null }
   | { ok: false; code: ValidationFailureCode; message: string };
 
-export function validateOfferFacts(input: unknown, now = new Date()): ValidationResult {
+export function validateOfferFacts(
+  input: unknown,
+  now = new Date(),
+): ValidationResult {
   const parsed = offerInputSchema.safeParse(input);
 
   if (!parsed.success) {
@@ -68,7 +80,11 @@ export function validateOfferFacts(input: unknown, now = new Date()): Validation
 
   const offer = parsed.data;
 
-  if (offer.originalPrice !== null && offer.originalPrice !== undefined && offer.currentPrice > offer.originalPrice) {
+  if (
+    offer.originalPrice !== null &&
+    offer.originalPrice !== undefined &&
+    offer.currentPrice > offer.originalPrice
+  ) {
     return {
       ok: false,
       code: "INVALID_PRICE",
@@ -90,7 +106,8 @@ export function validateOfferFacts(input: unknown, now = new Date()): Validation
     return {
       ok: false,
       code: "DISCOUNT_MISMATCH",
-      message: "Discount percentage must match the internally calculated value.",
+      message:
+        "Discount percentage must match the internally calculated value.",
     };
   }
 
@@ -99,13 +116,20 @@ export function validateOfferFacts(input: unknown, now = new Date()): Validation
   }
 
   if (offer.stockStatus === "OUT_OF_STOCK") {
-    return { ok: false, code: "OUT_OF_STOCK", message: "Offer is out of stock." };
+    return {
+      ok: false,
+      code: "OUT_OF_STOCK",
+      message: "Offer is out of stock.",
+    };
   }
 
   return { ok: true, normalizedDiscountPercentage: calculatedDiscount };
 }
 
-export function calculateValidatedDiscount(originalPrice: number | null | undefined, currentPrice: number) {
+export function calculateValidatedDiscount(
+  originalPrice: number | null | undefined,
+  currentPrice: number,
+) {
   if (currentPrice <= 0) {
     return {
       ok: false as const,
@@ -125,12 +149,105 @@ export function calculateValidatedDiscount(originalPrice: number | null | undefi
     return {
       ok: false as const,
       code: "INVALID_PRICE" as const,
-      message: "Current price cannot exceed original price, and original price must be greater than zero.",
+      message:
+        "Current price cannot exceed original price, and original price must be greater than zero.",
     };
   }
 
   return {
     ok: true as const,
-    discountPercentage: calculateDiscountPercentage(originalPrice, currentPrice),
+    discountPercentage: calculateDiscountPercentage(
+      originalPrice,
+      currentPrice,
+    ),
   };
+}
+
+function isPrivateIpv4(hostname: string) {
+  const parts = hostname.split(".").map(Number);
+
+  if (
+    parts.length !== 4 ||
+    parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)
+  ) {
+    return false;
+  }
+
+  const [first, second] = parts as [number, number, number, number];
+  return (
+    first === 0 ||
+    first === 10 ||
+    first === 127 ||
+    (first === 100 && second >= 64 && second <= 127) ||
+    (first === 169 && second === 254) ||
+    (first === 172 && second >= 16 && second <= 31) ||
+    (first === 192 && second === 168)
+  );
+}
+
+function isPrivateIpv6(hostname: string) {
+  const normalized = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  return (
+    normalized === "::" ||
+    normalized === "::1" ||
+    normalized.startsWith("fc") ||
+    normalized.startsWith("fd") ||
+    normalized.startsWith("fe8") ||
+    normalized.startsWith("fe9") ||
+    normalized.startsWith("fea") ||
+    normalized.startsWith("feb")
+  );
+}
+
+export type MarketplaceAffiliateUrlValidation =
+  | { ok: true; normalizedUrl: string }
+  | {
+      ok: false;
+      code: "INVALID_URL" | "HTTPS_REQUIRED" | "LOCAL_OR_PRIVATE_HOST";
+      message: string;
+    };
+
+export function validateMarketplaceAffiliateUrl(
+  _marketplace: string,
+  value: string,
+): MarketplaceAffiliateUrlValidation {
+  let url: URL;
+
+  try {
+    url = new URL(value);
+  } catch {
+    return {
+      ok: false,
+      code: "INVALID_URL",
+      message: "Affiliate URL is invalid.",
+    };
+  }
+
+  if (url.protocol !== "https:") {
+    return {
+      ok: false,
+      code: "HTTPS_REQUIRED",
+      message: "Affiliate URL must use HTTPS.",
+    };
+  }
+
+  const hostname = url.hostname.toLowerCase();
+
+  if (
+    !hostname ||
+    hostname === "localhost" ||
+    hostname.endsWith(".localhost") ||
+    hostname.endsWith(".local") ||
+    isPrivateIpv4(hostname) ||
+    isPrivateIpv6(hostname)
+  ) {
+    return {
+      ok: false,
+      code: "LOCAL_OR_PRIVATE_HOST",
+      message: "Affiliate URL cannot use a local or private host.",
+    };
+  }
+
+  // TODO: add a Mercado Livre host allowlist after validating real links from the affiliate portal.
+  return { ok: true, normalizedUrl: url.toString() };
 }

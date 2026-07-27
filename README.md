@@ -103,9 +103,15 @@ MERCADO_LIVRE_SITE_ID="MLB"
 
 Use `/integracoes` to connect or reconnect through OAuth 2.0. Tokens are encrypted in `MarketplaceAccount`, refresh tokens are treated as rotating credentials, and Redis locks prevent concurrent refresh.
 
-Use `/integracoes/mercado-livre` to enable discovery, choose official category IDs, set price/discount/score filters and run manual sync. Discovery uses official categories, highlights/best sellers, catalog product resolution, multiget item details and the official item prices endpoint. Highlight `PRODUCT` entries may be catalog parents; the resolver follows bounded `children_ids` to a child with `buy_box_winner.item_id` before deduplicating by final item ID. Missing original price, shipping certainty, image, rating, sales count or commission stays `null`/`UNKNOWN`.
+Use `/integracoes/mercado-livre` to enable discovery, choose official category IDs, set price/discount/score filters and run manual sync. Dashboard and worker call the same `MercadoLivreDiscoveryService`; the connector is limited to official HTTP access/parsing and `ingestOffer` owns Product/Offer persistence. A distributed lock at `mercado-livre:discovery:{accountId}` prevents manual and worker runs from overlapping.
+
+Discovery uses official categories, highlights/best sellers, catalog product resolution, multiget item details and the official item prices endpoint. Highlight `PRODUCT` entries may be catalog parents; the resolver follows bounded `children_ids` to a child with `buy_box_winner.item_id` before deduplicating by final item ID. Missing original price, shipping certainty, image, rating, sales count or commission stays `null`/`UNKNOWN`. A configured minimum discount of zero means no discount requirement, and a minimum score of zero is passed explicitly to ingestion and stored on the Offer version for later affiliate-link enrichment.
+
+The integration screen also provides a manual category-search probe using `/sites/{siteId}/search?category={categoryId}&limit={limit}`. It returns at most five diagnostic samples and never creates Product, Offer or Publication rows. It is not an automatic fallback for highlights in Phase 3A.1. When `bestSellersEnabled=false`, normal discovery returns `DISCOVERY_SOURCE_DISABLED`.
 
 Mercado Livre affiliate links are not generated automatically. Valid offers without an official affiliate URL become `READY_FOR_AFFILIATE_LINK`; fill the link in `/ofertas/affiliate-links`. Mercado Livre publications use `DIRECT_AFFILIATE_LINK`, so the worker sends the official affiliate URL directly instead of `/go/[slug]`.
+
+Affiliate URLs are validated centrally: HTTPS is required and localhost, private IPs and non-web schemes are rejected. A marketplace-specific host allowlist remains pending until real links from the Mercado Livre affiliate portal have been observed.
 
 ## Tracking
 

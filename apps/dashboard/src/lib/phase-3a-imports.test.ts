@@ -9,7 +9,10 @@ const createDiscoveryConfig = vi.fn();
 const updateDiscoveryConfig = vi.fn();
 const createMercadoLivreConnector = vi.fn();
 const getMercadoLivreConfig = vi.fn();
-const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+const collectMercadoLivreCandidates = vi.fn();
+const consoleError = vi
+  .spyOn(console, "error")
+  .mockImplementation(() => undefined);
 
 class MercadoLivreApiError extends Error {
   constructor(
@@ -55,6 +58,13 @@ vi.mock("@affiliate/marketplace-connectors", () => ({
   getMercadoLivreConfig,
 }));
 
+vi.mock("@affiliate/marketplace-discovery", () => ({
+  collectMercadoLivreCandidates,
+  MercadoLivreHighlightResolver: class {
+    resolveCandidate = vi.fn();
+  },
+}));
+
 describe("phase 3a imports", () => {
   beforeEach(() => {
     redirectMock.mockClear();
@@ -67,9 +77,11 @@ describe("phase 3a imports", () => {
     getMercadoLivreConfig.mockReturnValue({
       clientId: "client-id",
       clientSecret: "client-secret",
-      redirectUri: "http://localhost:3000/api/integrations/mercadolivre/callback",
+      redirectUri:
+        "http://localhost:3000/api/integrations/mercadolivre/callback",
       siteId: "MLB",
     });
+    collectMercadoLivreCandidates.mockReset();
   });
 
   it("imports dashboard actions through the public ingestion package", async () => {
@@ -101,7 +113,9 @@ describe("phase 3a imports", () => {
   it("does not report connected-account internal errors as not connected", async () => {
     const { testMercadoLivreIntegrationAction } = await import("./actions");
     findMarketplaceAccount.mockResolvedValueOnce({ status: "CONNECTED" });
-    createMercadoLivreConnector.mockRejectedValueOnce(new Error("Unexpected internal import failure."));
+    createMercadoLivreConnector.mockRejectedValueOnce(
+      new Error("Unexpected internal import failure."),
+    );
 
     await expect(testMercadoLivreIntegrationAction()).rejects.toThrow(
       "REDIRECT:/integracoes?message=meli-internal-error",
@@ -111,7 +125,9 @@ describe("phase 3a imports", () => {
   it("distinguishes Mercado Livre auth errors from API availability errors", async () => {
     const { testMercadoLivreIntegrationAction } = await import("./actions");
     findMarketplaceAccount.mockResolvedValueOnce({ status: "CONNECTED" });
-    createMercadoLivreConnector.mockRejectedValueOnce(new MercadoLivreApiError("Unauthorized", 401));
+    createMercadoLivreConnector.mockRejectedValueOnce(
+      new MercadoLivreApiError("Unauthorized", 401),
+    );
 
     await expect(testMercadoLivreIntegrationAction()).rejects.toThrow(
       "REDIRECT:/integracoes?message=meli-auth-error",
@@ -125,7 +141,9 @@ describe("phase 3a imports", () => {
       healthCheck: vi.fn().mockResolvedValue(true),
     });
 
-    await expect(testMercadoLivreIntegrationAction()).rejects.toThrow("REDIRECT:/integracoes?message=meli-ok");
+    await expect(testMercadoLivreIntegrationAction()).rejects.toThrow(
+      "REDIRECT:/integracoes?message=meli-ok",
+    );
   });
 
   it("does not silently add a parent category for discovery", async () => {
@@ -202,5 +220,59 @@ describe("phase 3a imports", () => {
     await expect(saveMercadoLivreConfigAction(formData)).rejects.toThrow(
       "REDIRECT:/integracoes/mercado-livre?message=category-not-leaf&categoryId=MLB1055",
     );
+  });
+
+  it.each([
+    ["SUCCEEDED", "sync-ok"],
+    ["PARTIAL", "sync-partial"],
+    ["FAILED", "sync-failed"],
+  ])("maps discovery status %s to UI message %s", async (status, message) => {
+    const { syncMercadoLivreNowAction } = await import("./actions");
+    collectMercadoLivreCandidates.mockResolvedValueOnce({
+      ok: status !== "FAILED",
+      status,
+      metrics: {},
+    });
+
+    await expect(syncMercadoLivreNowAction()).rejects.toThrow(
+      `REDIRECT:/integracoes/mercado-livre?message=${message}`,
+    );
+  });
+
+  it("runs category search probe without writing discovery configuration", async () => {
+    const { probeMercadoLivreCategorySearchAction } = await import("./actions");
+    const probeCategorySearch = vi.fn().mockResolvedValue({
+      ok: true,
+      httpStatus: 200,
+      categoryId: "MLB123",
+      resultsFound: 1,
+      usableItemIds: ["MLB1"],
+      sample: [{ itemId: "MLB1", title: "Produto" }],
+    });
+    createMercadoLivreConnector.mockResolvedValueOnce({
+      getCategory: vi.fn().mockResolvedValue({
+        id: "MLB123",
+        name: "Celulares",
+        pathFromRoot: [{ id: "MLB123", name: "Celulares" }],
+        children: [],
+      }),
+      probeCategorySearch,
+    });
+    findDiscoveryConfig.mockResolvedValueOnce({ siteId: "MLB" });
+    const formData = new FormData();
+    formData.set("categoryId", "MLB123");
+
+    await expect(
+      probeMercadoLivreCategorySearchAction(formData),
+    ).rejects.toThrow(
+      /REDIRECT:\/integracoes\/mercado-livre\?message=category-search-tested/,
+    );
+    expect(probeCategorySearch).toHaveBeenCalledWith({
+      siteId: "MLB",
+      categoryId: "MLB123",
+      limit: 5,
+    });
+    expect(createDiscoveryConfig).not.toHaveBeenCalled();
+    expect(updateDiscoveryConfig).not.toHaveBeenCalled();
   });
 });

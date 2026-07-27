@@ -1,25 +1,37 @@
 "use server";
 
 import { Prisma, prisma } from "@affiliate/database";
-import { MessageGenerationService, OllamaAiProvider, OpenAiProvider } from "@affiliate/ai-copywriter";
+import {
+  MessageGenerationService,
+  OllamaAiProvider,
+  OpenAiProvider,
+} from "@affiliate/ai-copywriter";
 import {
   MercadoLivreApiError,
-  MercadoLivreHighlightResolver,
   createMercadoLivreConnector,
   getMercadoLivreConfig,
   type MarketplaceConnector,
   type MercadoLivreCategory,
   type MercadoLivreHighlightCandidate,
-  type MercadoLivreProductResolutionDiagnostics,
 } from "@affiliate/marketplace-connectors";
-import { formatOfferFormError, ingestOffer, offerFormSchema, type OfferFormInput } from "@affiliate/ingestion";
+import {
+  MercadoLivreHighlightResolver,
+  collectMercadoLivreCandidates,
+  type MercadoLivreProductResolutionDiagnostics,
+} from "@affiliate/marketplace-discovery";
+import {
+  formatOfferFormError,
+  ingestOffer,
+  offerFormSchema,
+  type OfferFormInput,
+} from "@affiliate/ingestion";
+import { validateMarketplaceAffiliateUrl } from "@affiliate/validation";
 import bcrypt from "bcryptjs";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
 import { TelegramPublisher } from "@affiliate/publisher-connectors";
 import { createSession, destroySession } from "./session";
-import { collectMercadoLivreCandidates } from "./mercado-livre-sync";
 
 const loginSchema = z.object({
   email: z.string().email(),
@@ -30,7 +42,10 @@ export type LoginState = {
   error?: string;
 };
 
-export async function loginAction(_state: LoginState, formData: FormData): Promise<LoginState> {
+export async function loginAction(
+  _state: LoginState,
+  formData: FormData,
+): Promise<LoginState> {
   const parsed = loginSchema.safeParse({
     email: formData.get("email"),
     password: formData.get("password"),
@@ -49,7 +64,10 @@ export async function loginAction(_state: LoginState, formData: FormData): Promi
     return { error: "Credenciais invalidas." };
   }
 
-  const passwordMatches = await bcrypt.compare(parsed.data.password, user.passwordHash);
+  const passwordMatches = await bcrypt.compare(
+    parsed.data.password,
+    user.passwordHash,
+  );
 
   if (!passwordMatches) {
     return { error: "Credenciais invalidas." };
@@ -70,13 +88,16 @@ export type CreateOfferState = {
   offerId?: string | undefined;
 };
 
-export async function createManualOfferAction(input: OfferFormInput): Promise<CreateOfferState> {
+export async function createManualOfferAction(
+  input: OfferFormInput,
+): Promise<CreateOfferState> {
   const parsed = offerFormSchema.safeParse(input);
 
   if (!parsed.success) {
     return {
       ok: false,
-      message: formatOfferFormError(parsed.error) || "Dados da oferta invalidos.",
+      message:
+        formatOfferFormError(parsed.error) || "Dados da oferta invalidos.",
     };
   }
 
@@ -94,7 +115,12 @@ export async function createManualOfferAction(input: OfferFormInput): Promise<Cr
 const channelSchema = z.object({
   id: z.string().optional(),
   name: z.string().trim().min(1, "Informe o nome do canal."),
-  type: z.enum(["TELEGRAM", "MANUAL_EXPORT", "WHATSAPP_CLOUD_API", "WHATSAPP_GROUPS_API"]),
+  type: z.enum([
+    "TELEGRAM",
+    "MANUAL_EXPORT",
+    "WHATSAPP_CLOUD_API",
+    "WHATSAPP_GROUPS_API",
+  ]),
   enabled: z.boolean(),
   timezone: z.string().trim().min(1),
   dailyPublicationLimit: z.coerce.number().int().min(1),
@@ -173,7 +199,9 @@ function channelPayload(formData: FormData) {
   });
 
   if (!parsed.success) {
-    throw new Error(parsed.error.issues[0]?.message ?? "Dados do canal invalidos.");
+    throw new Error(
+      parsed.error.issues[0]?.message ?? "Dados do canal invalidos.",
+    );
   }
 
   const channel = parsed.data;
@@ -254,12 +282,17 @@ export async function testTelegramChannelAction(formData: FormData) {
   }
 
   const configuration =
-    channel.configuration && typeof channel.configuration === "object" && !Array.isArray(channel.configuration)
+    channel.configuration &&
+    typeof channel.configuration === "object" &&
+    !Array.isArray(channel.configuration)
       ? (channel.configuration as Record<string, unknown>)
       : {};
   const publisher = new TelegramPublisher({
     botToken: process.env.TELEGRAM_BOT_TOKEN,
-    chatId: typeof configuration.chatId === "string" ? configuration.chatId : process.env.TELEGRAM_CHAT_ID,
+    chatId:
+      typeof configuration.chatId === "string"
+        ? configuration.chatId
+        : process.env.TELEGRAM_CHAT_ID,
   });
   const ok = await publisher.validateCredentials();
 
@@ -271,8 +304,14 @@ function uniqueStringList(values: string[]) {
 }
 
 function categoryPath(category: MercadoLivreCategory) {
-  const path = category.pathFromRoot.length > 0 ? category.pathFromRoot : [{ id: category.id, name: category.name }];
-  return path.map((item) => item.name).filter(Boolean).join(" > ");
+  const path =
+    category.pathFromRoot.length > 0
+      ? category.pathFromRoot
+      : [{ id: category.id, name: category.name }];
+  return path
+    .map((item) => item.name)
+    .filter(Boolean)
+    .join(" > ");
 }
 
 function categoryTestQuery(params: Record<string, string | number | boolean>) {
@@ -330,7 +369,8 @@ function addProductDiagnostics(
   target.productResolvedDirectly += source.productResolvedDirectly;
   target.productResolvedViaChild += source.productResolvedViaChild;
   target.productLeafWithoutWinner += source.productLeafWithoutWinner;
-  target.productParentWithoutResolvableChild += source.productParentWithoutResolvableChild;
+  target.productParentWithoutResolvableChild +=
+    source.productParentWithoutResolvableChild;
 }
 
 async function validateMercadoLivreDiscoveryCategory(
@@ -373,7 +413,9 @@ async function upsertMercadoLivreConfig(data: {
   maxCandidatesPerCategory: number;
   refreshIntervalMinutes: number;
 }) {
-  const existing = await prisma.mercadoLivreDiscoveryConfig.findFirst({ select: { id: true } });
+  const existing = await prisma.mercadoLivreDiscoveryConfig.findFirst({
+    select: { id: true },
+  });
   const payload = {
     enabled: data.enabled,
     siteId: data.siteId,
@@ -388,7 +430,10 @@ async function upsertMercadoLivreConfig(data: {
   };
 
   if (existing) {
-    await prisma.mercadoLivreDiscoveryConfig.update({ where: { id: existing.id }, data: payload });
+    await prisma.mercadoLivreDiscoveryConfig.update({
+      where: { id: existing.id },
+      data: payload,
+    });
   } else {
     await prisma.mercadoLivreDiscoveryConfig.create({ data: payload });
   }
@@ -415,7 +460,9 @@ function mercadoLivreFailureMessage(code: MercadoLivreTestFailureCode) {
   }[code];
 }
 
-function classifyMercadoLivreTestError(error: unknown): MercadoLivreTestFailureCode {
+function classifyMercadoLivreTestError(
+  error: unknown,
+): MercadoLivreTestFailureCode {
   if (error instanceof MercadoLivreApiError) {
     if ([401, 403].includes(error.status)) {
       return "MELI_AUTH_ERROR";
@@ -537,12 +584,18 @@ export async function saveMercadoLivreConfigAction(formData: FormData) {
     }
 
     for (const categoryId of categoryIds) {
-      const validation = await validateMercadoLivreDiscoveryCategory(connector, categoryId, {
-        requireLeaf: data.bestSellersEnabled,
-      });
+      const validation = await validateMercadoLivreDiscoveryCategory(
+        connector,
+        categoryId,
+        {
+          requireLeaf: data.bestSellersEnabled,
+        },
+      );
 
       if (!validation.ok) {
-        redirect(`/integracoes/mercado-livre?message=${validation.message}&categoryId=${encodeURIComponent(categoryId)}`);
+        redirect(
+          `/integracoes/mercado-livre?message=${validation.message}&categoryId=${encodeURIComponent(categoryId)}`,
+        );
       }
     }
   }
@@ -575,7 +628,9 @@ export async function addMercadoLivreCategoryAction(formData: FormData) {
   }
 
   const [config, connector] = await Promise.all([
-    prisma.mercadoLivreDiscoveryConfig.findFirst({ orderBy: { updatedAt: "desc" } }),
+    prisma.mercadoLivreDiscoveryConfig.findFirst({
+      orderBy: { updatedAt: "desc" },
+    }),
     createMercadoLivreConnector().catch(() => null),
   ]);
 
@@ -583,9 +638,13 @@ export async function addMercadoLivreCategoryAction(formData: FormData) {
     redirect("/integracoes/mercado-livre?message=category-api-error");
   }
 
-  const validation = await validateMercadoLivreDiscoveryCategory(connector, parsed.data.categoryId, {
-    requireLeaf: true,
-  });
+  const validation = await validateMercadoLivreDiscoveryCategory(
+    connector,
+    parsed.data.categoryId,
+    {
+      requireLeaf: true,
+    },
+  );
 
   if (!validation.ok) {
     redirect(
@@ -596,18 +655,29 @@ export async function addMercadoLivreCategoryAction(formData: FormData) {
   await upsertMercadoLivreConfig({
     enabled: config?.enabled ?? false,
     siteId: config?.siteId ?? getMercadoLivreConfig().siteId,
-    categoryIds: [...stringList(Array.isArray(config?.categoryIds) ? config.categoryIds.join(",") : ""), validation.category.id],
+    categoryIds: [
+      ...stringList(
+        Array.isArray(config?.categoryIds) ? config.categoryIds.join(",") : "",
+      ),
+      validation.category.id,
+    ],
     bestSellersEnabled: config?.bestSellersEnabled ?? true,
     minimumPrice: config?.minimumPrice ? Number(config.minimumPrice) : null,
     maximumPrice: config?.maximumPrice ? Number(config.maximumPrice) : null,
-    minimumDiscountPercentage: config?.minimumDiscountPercentage ? Number(config.minimumDiscountPercentage) : null,
-    minimumScore: config?.minimumScore ?? 70,
+    minimumDiscountPercentage:
+      config?.minimumDiscountPercentage !== null &&
+      config?.minimumDiscountPercentage !== undefined
+        ? Number(config.minimumDiscountPercentage)
+        : null,
+    minimumScore: config?.minimumScore ?? 0,
     maxCandidatesPerCategory: config?.maxCandidatesPerCategory ?? 20,
     refreshIntervalMinutes: config?.refreshIntervalMinutes ?? 360,
   });
 
   revalidatePath("/integracoes/mercado-livre");
-  redirect(`/integracoes/mercado-livre?message=category-added&categoryId=${encodeURIComponent(validation.category.id)}`);
+  redirect(
+    `/integracoes/mercado-livre?message=category-added&categoryId=${encodeURIComponent(validation.category.id)}`,
+  );
 }
 
 export async function testMercadoLivreCategoryAction(formData: FormData) {
@@ -627,9 +697,13 @@ export async function testMercadoLivreCategoryAction(formData: FormData) {
     redirect("/integracoes/mercado-livre?message=category-api-error");
   }
 
-  const validation = await validateMercadoLivreDiscoveryCategory(connector, parsed.data.categoryId, {
-    requireLeaf: false,
-  });
+  const validation = await validateMercadoLivreDiscoveryCategory(
+    connector,
+    parsed.data.categoryId,
+    {
+      requireLeaf: false,
+    },
+  );
 
   if (!validation.ok) {
     redirect(
@@ -661,7 +735,9 @@ export async function testMercadoLivreCategoryAction(formData: FormData) {
     highlightProductCount = counts.product;
     highlightUserProductCount = counts.userProduct;
     highlightUnknownTypeCount = counts.unknown;
-    highlightsReason = highlightsAvailable ? "OK" : "NO_HIGHLIGHTS_FOR_CATEGORY";
+    highlightsReason = highlightsAvailable
+      ? "OK"
+      : "NO_HIGHLIGHTS_FOR_CATEGORY";
 
     for (const highlight of highlights) {
       const result = await resolver.resolveCandidate(highlight);
@@ -709,7 +785,8 @@ export async function testMercadoLivreCategoryAction(formData: FormData) {
       productResolvedDirectly: productDiagnostics.productResolvedDirectly,
       productResolvedViaChild: productDiagnostics.productResolvedViaChild,
       productLeafWithoutWinner: productDiagnostics.productLeafWithoutWinner,
-      productParentWithoutResolvableChild: productDiagnostics.productParentWithoutResolvableChild,
+      productParentWithoutResolvableChild:
+        productDiagnostics.productParentWithoutResolvableChild,
     })}`,
   );
 }
@@ -718,7 +795,9 @@ export async function testMercadoLivreIntegrationAction() {
   const config = getMercadoLivreConfig();
 
   if (!config.clientId || !config.clientSecret || !config.redirectUri) {
-    redirect(`/integracoes?message=${mercadoLivreFailureMessage("MELI_CONFIGURATION_ERROR")}`);
+    redirect(
+      `/integracoes?message=${mercadoLivreFailureMessage("MELI_CONFIGURATION_ERROR")}`,
+    );
   }
 
   const account = await prisma.marketplaceAccount.findFirst({
@@ -728,7 +807,9 @@ export async function testMercadoLivreIntegrationAction() {
   });
 
   if (!account || account.status !== "CONNECTED") {
-    redirect(`/integracoes?message=${mercadoLivreFailureMessage("MELI_NOT_CONNECTED")}`);
+    redirect(
+      `/integracoes?message=${mercadoLivreFailureMessage("MELI_NOT_CONNECTED")}`,
+    );
   }
 
   let message = "meli-ok";
@@ -753,18 +834,87 @@ export async function testMercadoLivreIntegrationAction() {
 }
 
 export async function syncMercadoLivreNowAction() {
-  let message = "sync-ok";
+  const result = await collectMercadoLivreCandidates(new Date(), {
+    force: true,
+  }).catch(() => null);
+  const message =
+    result?.status === "SUCCEEDED"
+      ? "sync-ok"
+      : result?.status === "PARTIAL"
+        ? "sync-partial"
+        : result?.errorCode === "DISCOVERY_ALREADY_RUNNING"
+          ? "sync-already-running"
+          : result?.errorCode === "DISCOVERY_SOURCE_DISABLED"
+            ? "sync-source-disabled"
+            : "sync-failed";
 
-  try {
-    await collectMercadoLivreCandidates(new Date(), { force: true });
-    revalidatePath("/integracoes");
-    revalidatePath("/integracoes/mercado-livre");
-    revalidatePath("/ofertas");
-  } catch {
-    message = "sync-failed";
-  }
+  revalidatePath("/integracoes");
+  revalidatePath("/integracoes/mercado-livre");
+  revalidatePath("/ofertas");
 
   redirect(`/integracoes/mercado-livre?message=${message}`);
+}
+
+export async function probeMercadoLivreCategorySearchAction(
+  formData: FormData,
+) {
+  const parsed = mercadoLivreCategorySchema.safeParse({
+    categoryId: formData.get("categoryId")?.toString(),
+  });
+
+  if (!parsed.success) {
+    redirect("/integracoes/mercado-livre?message=category-invalid");
+  }
+
+  let connector: MarketplaceConnector;
+
+  try {
+    connector = await createMercadoLivreConnector();
+  } catch {
+    redirect("/integracoes/mercado-livre?message=category-api-error");
+  }
+
+  const validation = await validateMercadoLivreDiscoveryCategory(
+    connector,
+    parsed.data.categoryId,
+    { requireLeaf: true },
+  );
+
+  if (!validation.ok) {
+    redirect(
+      `/integracoes/mercado-livre?message=${validation.message}&categoryId=${encodeURIComponent(parsed.data.categoryId)}`,
+    );
+  }
+
+  const config = await prisma.mercadoLivreDiscoveryConfig.findFirst({
+    orderBy: { updatedAt: "desc" },
+    select: { siteId: true },
+  });
+  const result = await connector.probeCategorySearch({
+    siteId: config?.siteId ?? getMercadoLivreConfig().siteId,
+    categoryId: validation.category.id,
+    limit: 5,
+  });
+  const query = new URLSearchParams({
+    message: "category-search-tested",
+    categoryId: validation.category.id,
+    probeCategoryName: validation.category.name,
+    probeCategoryPath: categoryPath(validation.category),
+    probeApiResponded: String(result.httpStatus !== undefined),
+    probeOk: String(result.ok),
+    probeHttpStatus: result.httpStatus?.toString() ?? "",
+    probeResultsFound: String(result.resultsFound),
+    probeUsableItems: String(result.usableItemIds.length),
+    probeErrorCode: result.errorCode ?? "",
+    probeSample: JSON.stringify(
+      result.sample.map((item) => ({
+        itemId: item.itemId,
+        title: item.title ?? "",
+      })),
+    ),
+  });
+
+  redirect(`/integracoes/mercado-livre?${query.toString()}`);
 }
 
 export async function saveMercadoLivreAffiliateUrlAction(formData: FormData) {
@@ -778,50 +928,69 @@ export async function saveMercadoLivreAffiliateUrlAction(formData: FormData) {
     redirect("/ofertas/affiliate-links?message=invalid");
   }
 
-  const offer = await prisma.offer.findUnique({ where: { id: parsed.data.offerId } });
+  const offer = await prisma.offer.findUnique({
+    where: { id: parsed.data.offerId },
+  });
 
   if (!offer || offer.marketplace !== "MERCADO_LIVRE") {
     redirect("/ofertas/affiliate-links?message=not-found");
   }
 
-  const result = await ingestOffer({
-    marketplace: offer.marketplace,
-    externalProductId: offer.externalProductId,
-    title: offer.title,
-    description: offer.description ?? undefined,
-    category: offer.category ?? undefined,
-    imageUrl: offer.imageUrl ?? undefined,
-    productUrl: offer.productUrl,
-    affiliateUrl: parsed.data.affiliateUrl,
-    affiliateLabel: parsed.data.affiliateLabel,
-    affiliateEligibility: offer.affiliateEligibility,
-    sellerId: offer.sellerId ?? undefined,
-    officialStoreId: offer.officialStoreId ?? undefined,
-    trackingStrategy: "DIRECT_AFFILIATE_LINK",
-    originalPrice: decimalToString(offer.originalPrice),
-    currentPrice: offer.currentPrice.toString(),
-    couponCode: offer.couponCode ?? undefined,
-    couponExpiration: offer.couponExpiration ?? undefined,
-    commissionPercentage: decimalToString(offer.commissionPercentage),
-    rating: decimalToString(offer.rating),
-    salesCount: offer.salesCount ?? undefined,
-    shippingStatus: offer.shippingStatus,
-    stockStatus: offer.stockStatus,
-  });
+  const affiliateUrlValidation = validateMarketplaceAffiliateUrl(
+    offer.marketplace,
+    parsed.data.affiliateUrl,
+  );
+
+  if (!affiliateUrlValidation.ok) {
+    redirect("/ofertas/affiliate-links?message=invalid");
+  }
+
+  const result = await ingestOffer(
+    {
+      marketplace: offer.marketplace,
+      externalProductId: offer.externalProductId,
+      title: offer.title,
+      description: offer.description ?? undefined,
+      category: offer.category ?? undefined,
+      imageUrl: offer.imageUrl ?? undefined,
+      productUrl: offer.productUrl,
+      affiliateUrl: affiliateUrlValidation.normalizedUrl,
+      affiliateLabel: parsed.data.affiliateLabel,
+      affiliateEligibility: offer.affiliateEligibility,
+      sellerId: offer.sellerId ?? undefined,
+      officialStoreId: offer.officialStoreId ?? undefined,
+      trackingStrategy: "DIRECT_AFFILIATE_LINK",
+      originalPrice: decimalToString(offer.originalPrice),
+      currentPrice: offer.currentPrice.toString(),
+      couponCode: offer.couponCode ?? undefined,
+      couponExpiration: offer.couponExpiration ?? undefined,
+      commissionPercentage: decimalToString(offer.commissionPercentage),
+      rating: decimalToString(offer.rating),
+      salesCount: offer.salesCount ?? undefined,
+      shippingStatus: offer.shippingStatus,
+      stockStatus: offer.stockStatus,
+    },
+    {
+      minScore: offer.minimumScoreApplied,
+    },
+  );
 
   if (result.ok && result.offerId !== offer.id) {
     await prisma.offer.update({
       where: { id: offer.id },
       data: {
         status: "REJECTED_DUPLICATE",
-        statusReason: "Substituida por versao validada com link oficial de afiliado.",
+        statusReason:
+          "Substituida por versao validada com link oficial de afiliado.",
       },
     });
   }
 
   revalidatePath("/ofertas");
   revalidatePath("/ofertas/affiliate-links");
-  redirect(`/ofertas/affiliate-links?message=${result.ok ? "saved" : "failed"}`);
+  redirect(
+    `/ofertas/affiliate-links?message=${result.ok ? "saved" : "failed"}`,
+  );
 }
 
 export async function acknowledgeAlertAction(formData: FormData) {
@@ -831,6 +1000,9 @@ export async function acknowledgeAlertAction(formData: FormData) {
     throw new Error("Alerta nao informado.");
   }
 
-  await prisma.systemAlert.update({ where: { id }, data: { acknowledged: true } });
+  await prisma.systemAlert.update({
+    where: { id },
+    data: { acknowledged: true },
+  });
   revalidatePath("/logs");
 }

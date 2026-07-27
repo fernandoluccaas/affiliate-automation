@@ -20,6 +20,7 @@ Phase 3A implements Mercado Livre through official HTTP APIs only:
 - Catalog product lookup through `/products/{productId}` when highlights return `PRODUCT`.
 - Item multiget through `/items?ids=...`.
 - Official item prices through `/items/{ITEM_ID}/prices`.
+- Manual category-search probe through `/sites/{siteId}/search?category={categoryId}&limit={limit}`.
 
 Required server variables:
 
@@ -30,13 +31,31 @@ MERCADO_LIVRE_REDIRECT_URI="http://localhost:3000/api/integrations/mercadolivre/
 MERCADO_LIVRE_SITE_ID="MLB"
 ```
 
-Tokens are stored in `MarketplaceAccount` as encrypted access and refresh tokens. Refresh uses a Redis lock and treats `refresh_token` as rotating. Definitive token failures set `REAUTH_REQUIRED` and create `SystemAlert`.
+Tokens are stored in `MarketplaceAccount` as encrypted access and refresh tokens. Refresh uses a Redis lock and treats `refresh_token` as rotating. A process that loses the lock waits briefly for the database token to change and never silently returns the old expired token. Definitive authentication failures (`invalid_grant`, invalid refresh token and authentication-related 401/403) set `REAUTH_REQUIRED`. Transient 429, 5xx, timeout and network failures keep `CONNECTED` and update only operational error fields.
 
-Discovery is configured in `/integracoes/mercado-livre`. Category IDs are selected by the operator; the system does not hardcode categories or import the complete category tree. Highlights preserve the Mercado Livre `content[].type`: `ITEM`, `PRODUCT` and `USER_PRODUCT` are not treated as interchangeable IDs. `ITEM` resolves directly to an item. `PRODUCT` may represent a catalog parent rather than a purchasable listing; the resolver loads the catalog product, follows `children_ids` with a visited set, depth limit and inspected-product limit, then selects a representative terminal child with `buy_box_winner.item_id` when available. Selection prefers active products, terminal products, higher `sold_quantity`, lower buy-box price and finally stable product ID order. This is a deterministic discovery heuristic for choosing a candidate variant; it is not an assertion that the selected child caused the aggregate parent ranking.
+Discovery is configured in `/integracoes/mercado-livre`. Dashboard and worker use the same `MercadoLivreDiscoveryService`; the former duplicated `collectMercadoLivreCandidates` implementations were removed. Category IDs are selected by the operator; the system does not hardcode categories or import the complete category tree. Highlights preserve the Mercado Livre `content[].type`: `ITEM`, `PRODUCT` and `USER_PRODUCT` are not treated as interchangeable IDs. `ITEM` resolves directly to an item. `PRODUCT` may represent a catalog parent rather than a purchasable listing; the resolver loads the catalog product, follows `children_ids` with a visited set, depth limit and inspected-product limit, then selects a representative terminal child with `buy_box_winner.item_id` when available. Selection prefers active products, terminal products, higher `sold_quantity`, lower buy-box price and finally stable product ID order. This is a deterministic discovery heuristic for choosing a candidate variant; it is not an assertion that the selected child caused the aggregate parent ranking.
 
 A `PRODUCT` with `buy_box_winner: null` is not automatically an error. If it has children, the resolver attempts child resolution first. If it is terminal and still lacks a winner, the skip reason is `PRODUCT_LEAF_NO_BUY_BOX_WINNER`. The system never invents an item for a terminal product without a buy-box winner. After resolution, the worker deduplicates by final `resolvedItemId`, fetches item details and official prices, normalizes only available facts and passes candidates into `ingestOffer`.
 
+`bestSellersEnabled=true` enables the highlights source. When it is false, discovery returns `DISCOVERY_SOURCE_DISABLED` and does not call highlights. No automatic category-search fallback exists yet.
+
+The manual category-search probe is available only for a validated leaf category. It reports HTTP status, total results, usable item IDs and up to five ID/title samples. It does not call `ingestOffer` and does not create Product, Offer or Publication records. Its purpose is to verify the real behavior of the official endpoint with the connected Brazilian account before a later fallback decision.
+
+Discovery applies zero-valued policies explicitly. `minimumDiscountPercentage=0` means no discount requirement, including when the API did not provide an original price. A positive minimum requires a provable discount. `minimumScore=0` is passed as zero to ingestion and saved in `Offer.minimumScoreApplied`, so adding an affiliate URL later uses the same policy.
+
+Shared discovery metrics are:
+
+- category processing/highlight availability and skip reasons;
+- highlight type and Product tree-resolution counts;
+- resolved, unresolved and unique candidates;
+- `itemsFetched`, `priceApiFetched`, `priceFallbackUsed` and `priceUnavailable`;
+- new Products, new Offer versions, reused Offers, affiliate-link-ready Offers, rejections and errors.
+
+Price fallback from the item payload never increments `priceApiFetched`. `SUCCEEDED`, `PARTIAL`, `FAILED` and `SKIPPED` are explicit service outcomes, and the dashboard maps them to different messages.
+
 Affiliate link generation is intentionally manual. Offers that are valid but do not have `affiliateUrl` become `READY_FOR_AFFILIATE_LINK`. Use `/ofertas/affiliate-links` to paste the official affiliate URL and optional label generated by Mercado Livre tools. Mercado Livre uses `DIRECT_AFFILIATE_LINK`; the worker does not generate or use `/go/[slug]` for these offers.
+
+Affiliate URLs must be valid HTTPS URLs and cannot target localhost or private IP ranges. A Mercado Livre-specific domain allowlist is intentionally deferred until links generated by the real affiliate portal have been validated.
 
 Operational alert codes:
 

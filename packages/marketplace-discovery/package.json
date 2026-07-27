@@ -1,0 +1,24 @@
+{
+  "name": "@affiliate/marketplace-discovery",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@affiliate/database": "0.1.0",
+    "@affiliate/ingestion": "0.1.0",
+    "@affiliate/marketplace-connectors": "0.1.0",
+    "@affiliate/redis": "0.1.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  }
+}

@@ -1,7 +1,16 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  randomBytes,
+} from "node:crypto";
 import { prisma, type MarketplaceAccount } from "@affiliate/database";
 import { acquireLock } from "@affiliate/redis";
-import type { Marketplace, ShippingStatus, StockStatus } from "@affiliate/shared";
+import type {
+  Marketplace,
+  ShippingStatus,
+  StockStatus,
+} from "@affiliate/shared";
 
 const MERCADO_LIVRE_API_BASE_URL = "https://api.mercadolibre.com";
 const MERCADO_LIVRE_AUTH_URL = "https://auth.mercadolivre.com.br/authorization";
@@ -39,6 +48,7 @@ export type MarketplaceOfferCandidate = {
   resolvedProductId?: string;
   resolvedItemId?: string;
   resolutionStrategy?: MercadoLivreResolutionStrategy;
+  priceSource?: MercadoLivrePriceSource;
   collectedAt?: Date;
 };
 
@@ -47,15 +57,23 @@ export interface MarketplaceConnector {
   healthCheck(): Promise<boolean>;
   getItem(id: string): Promise<MarketplaceOfferCandidate | null>;
   getItems(ids: string[]): Promise<MarketplaceOfferCandidate[]>;
+  getItemsWithDiagnostics(ids: string[]): Promise<MercadoLivreItemsResult>;
   getPrice(itemId: string): Promise<MercadoLivrePrice>;
   getSiteCategories(): Promise<MercadoLivreCategoryChild[]>;
   getCategory(categoryId: string): Promise<MercadoLivreCategory | null>;
   getCategoryChildren(categoryId: string): Promise<MercadoLivreCategoryChild[]>;
   getBestSellers(categoryId: string): Promise<MercadoLivreHighlightCandidate[]>;
   getProduct(productId: string): Promise<MercadoLivreProduct | null>;
-  getUserProduct(userProductId: string): Promise<MercadoLivreUserProduct | null>;
-  getItemsByUserProduct(userId: string, userProductId: string): Promise<string[]>;
-  discoverCandidates(categoryIds: string[], options?: { maxCandidatesPerCategory?: number }): Promise<MarketplaceOfferCandidate[]>;
+  getUserProduct(
+    userProductId: string,
+  ): Promise<MercadoLivreUserProduct | null>;
+  getItemsByUserProduct(
+    userId: string,
+    userProductId: string,
+  ): Promise<string[]>;
+  probeCategorySearch(
+    input: MercadoLivreCategorySearchProbeInput,
+  ): Promise<MercadoLivreCategorySearchProbeResult>;
 }
 
 export type MercadoLivreEnv = {
@@ -89,6 +107,20 @@ export type MercadoLivrePrice = {
   originalPrice: number | null;
 };
 
+export type MercadoLivrePriceSource = "PRICE_API" | "ITEM_FALLBACK";
+
+export type MercadoLivreItemFetchDiagnostics = {
+  itemsFetched: number;
+  priceApiFetched: number;
+  priceFallbackUsed: number;
+  priceUnavailable: number;
+};
+
+export type MercadoLivreItemsResult = {
+  candidates: MarketplaceOfferCandidate[];
+  diagnostics: MercadoLivreItemFetchDiagnostics;
+};
+
 export type MercadoLivreCategoryChild = {
   id: string;
   name: string;
@@ -99,6 +131,30 @@ export type MercadoLivreCategory = {
   name: string;
   pathFromRoot: MercadoLivreCategoryChild[];
   children: MercadoLivreCategoryChild[];
+};
+
+export type MercadoLivreCategorySearchProbeInput = {
+  siteId: string;
+  categoryId: string;
+  limit: number;
+};
+
+export type MercadoLivreCategorySearchProbeSample = {
+  itemId: string;
+  title?: string;
+  price?: number;
+  permalink?: string;
+};
+
+export type MercadoLivreCategorySearchProbeResult = {
+  ok: boolean;
+  httpStatus?: number;
+  categoryId: string;
+  resultsFound: number;
+  usableItemIds: string[];
+  sample: MercadoLivreCategorySearchProbeSample[];
+  errorCode?:
+    "RATE_LIMITED" | "API_ERROR" | "INVALID_RESPONSE" | "NETWORK_OR_TIMEOUT";
 };
 
 export type MercadoLivreHighlightType = "ITEM" | "PRODUCT" | "USER_PRODUCT";
@@ -187,7 +243,9 @@ export type MercadoLivreHighlightResolutionResult =
       diagnostics?: MercadoLivreProductResolutionDiagnostics;
     };
 
-function normalizeHighlightType(value: unknown): MercadoLivreHighlightCandidate["type"] {
+function normalizeHighlightType(
+  value: unknown,
+): MercadoLivreHighlightCandidate["type"] {
   const type = asString(value);
 
   if (type === "ITEM" || type === "PRODUCT" || type === "USER_PRODUCT") {
@@ -225,7 +283,29 @@ export class MercadoLivreInvalidResponseError extends Error {
   }
 }
 
-export function getMercadoLivreConfig(env: MercadoLivreEnv = process.env): MercadoLivreConfig {
+export class MercadoLivreOAuthError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code?: string,
+  ) {
+    super(message);
+    this.name = "MercadoLivreOAuthError";
+  }
+}
+
+export class MercadoLivreTokenRefreshInProgressError extends Error {
+  readonly code = "TOKEN_REFRESH_IN_PROGRESS";
+
+  constructor() {
+    super("Mercado Livre token refresh is still in progress.");
+    this.name = "MercadoLivreTokenRefreshInProgressError";
+  }
+}
+
+export function getMercadoLivreConfig(
+  env: MercadoLivreEnv = process.env,
+): MercadoLivreConfig {
   return {
     clientId: env.MERCADO_LIVRE_CLIENT_ID?.trim() ?? "",
     clientSecret: env.MERCADO_LIVRE_CLIENT_SECRET?.trim() ?? "",
@@ -236,7 +316,10 @@ export function getMercadoLivreConfig(env: MercadoLivreEnv = process.env): Merca
   };
 }
 
-export function buildMercadoLivreAuthorizationUrl(state: string, env: MercadoLivreEnv = process.env) {
+export function buildMercadoLivreAuthorizationUrl(
+  state: string,
+  env: MercadoLivreEnv = process.env,
+) {
   const config = getMercadoLivreConfig(env);
   const url = new URL(MERCADO_LIVRE_AUTH_URL);
   url.searchParams.set("response_type", "code");
@@ -250,28 +333,43 @@ function encryptionKey(env: MercadoLivreEnv = process.env) {
   const secret = env.ENCRYPTION_KEY || env.AUTH_SECRET;
 
   if (!secret || secret.length < 16) {
-    throw new Error("ENCRYPTION_KEY or AUTH_SECRET must be configured to encrypt marketplace tokens.");
+    throw new Error(
+      "ENCRYPTION_KEY or AUTH_SECRET must be configured to encrypt marketplace tokens.",
+    );
   }
 
   return createHash("sha256").update(secret).digest();
 }
 
-export function encryptSecret(value: string, env: MercadoLivreEnv = process.env) {
+export function encryptSecret(
+  value: string,
+  env: MercadoLivreEnv = process.env,
+) {
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", encryptionKey(env), iv);
-  const encrypted = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
+  const encrypted = Buffer.concat([
+    cipher.update(value, "utf8"),
+    cipher.final(),
+  ]);
   const tag = cipher.getAuthTag();
   return `v1:${iv.toString("base64url")}:${tag.toString("base64url")}:${encrypted.toString("base64url")}`;
 }
 
-export function decryptSecret(value: string, env: MercadoLivreEnv = process.env) {
+export function decryptSecret(
+  value: string,
+  env: MercadoLivreEnv = process.env,
+) {
   const [version, ivValue, tagValue, encryptedValue] = value.split(":");
 
   if (version !== "v1" || !ivValue || !tagValue || !encryptedValue) {
     throw new Error("Invalid encrypted secret payload.");
   }
 
-  const decipher = createDecipheriv("aes-256-gcm", encryptionKey(env), Buffer.from(ivValue, "base64url"));
+  const decipher = createDecipheriv(
+    "aes-256-gcm",
+    encryptionKey(env),
+    Buffer.from(ivValue, "base64url"),
+  );
   decipher.setAuthTag(Buffer.from(tagValue, "base64url"));
   return Buffer.concat([
     decipher.update(Buffer.from(encryptedValue, "base64url")),
@@ -280,10 +378,14 @@ export function decryptSecret(value: string, env: MercadoLivreEnv = process.env)
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
 }
 
-function isRecord(value: Record<string, unknown> | null): value is Record<string, unknown> {
+function isRecord(
+  value: Record<string, unknown> | null,
+): value is Record<string, unknown> {
   return value !== null;
 }
 
@@ -370,7 +472,10 @@ export class MercadoLivreApiClient {
           }
         }
 
-        if (![429, 500, 502, 503, 504].includes(response.status) || attempt >= retries) {
+        if (
+          ![429, 500, 502, 503, 504].includes(response.status) ||
+          attempt >= retries
+        ) {
           let body: unknown;
 
           try {
@@ -380,7 +485,11 @@ export class MercadoLivreApiClient {
           }
 
           const fallback = `Mercado Livre API ${response.status}: ${response.statusText}`;
-          throw new MercadoLivreApiError(responseErrorMessage(body, fallback), response.status, body);
+          throw new MercadoLivreApiError(
+            responseErrorMessage(body, fallback),
+            response.status,
+            body,
+          );
         }
       } catch (error) {
         lastError = error;
@@ -402,7 +511,9 @@ export class MercadoLivreApiClient {
       await new Promise((resolve) => setTimeout(resolve, 200 * (attempt + 1)));
     }
 
-    throw lastError instanceof Error ? lastError : new Error("Mercado Livre API request failed.");
+    throw lastError instanceof Error
+      ? lastError
+      : new Error("Mercado Livre API request failed.");
   }
 }
 
@@ -440,15 +551,37 @@ export class MercadoLivreOAuthClient {
     const timeout = timeoutSignal(this.options.timeoutMs ?? 10_000);
 
     try {
-      const response = await (this.options.fetchFn ?? fetch)(`${MERCADO_LIVRE_API_BASE_URL}/oauth/token`, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded; charset=utf-8" },
-        body: new URLSearchParams(payload).toString(),
-        signal: timeout.signal,
-      });
+      const response = await (this.options.fetchFn ?? fetch)(
+        `${MERCADO_LIVRE_API_BASE_URL}/oauth/token`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
+          },
+          body: new URLSearchParams(payload).toString(),
+          signal: timeout.signal,
+        },
+      );
 
       if (!response.ok) {
-        throw new Error(`Mercado Livre OAuth ${response.status}: ${response.statusText}`);
+        let body: unknown;
+
+        try {
+          body = await response.json();
+        } catch {
+          body = undefined;
+        }
+
+        const record = asRecord(body);
+        const code = asString(record?.error) ?? undefined;
+        throw new MercadoLivreOAuthError(
+          responseErrorMessage(
+            body,
+            `Mercado Livre OAuth ${response.status}: ${response.statusText}`,
+          ),
+          response.status,
+          code,
+        );
       }
 
       let json: unknown;
@@ -456,7 +589,9 @@ export class MercadoLivreOAuthClient {
       try {
         json = await response.json();
       } catch {
-        throw new MercadoLivreInvalidResponseError("Mercado Livre OAuth returned invalid JSON.");
+        throw new MercadoLivreInvalidResponseError(
+          "Mercado Livre OAuth returned invalid JSON.",
+        );
       }
 
       const body = asRecord(json);
@@ -467,7 +602,9 @@ export class MercadoLivreOAuthClient {
         typeof body.expires_in !== "number" ||
         (typeof body.user_id !== "number" && typeof body.user_id !== "string")
       ) {
-        throw new Error("Mercado Livre OAuth returned an invalid token response.");
+        throw new Error(
+          "Mercado Livre OAuth returned an invalid token response.",
+        );
       }
 
       return body as MercadoLivreTokenResponse;
@@ -484,7 +621,9 @@ export async function saveMercadoLivreTokenResponse(
   const config = getMercadoLivreConfig(env);
   const scopes = token.scope?.split(/\s+/).filter(Boolean) ?? [];
   const expiresAt = new Date(Date.now() + token.expires_in * 1000);
-  const refreshTokenEncrypted = token.refresh_token ? encryptSecret(token.refresh_token, env) : undefined;
+  const refreshTokenEncrypted = token.refresh_token
+    ? encryptSecret(token.refresh_token, env)
+    : undefined;
 
   return prisma.marketplaceAccount.upsert({
     where: { id: "mercado-livre-default" },
@@ -522,9 +661,20 @@ export async function saveMercadoLivreTokenResponse(
 }
 
 export class MercadoLivreTokenService {
-  constructor(private readonly options: { oauth?: MercadoLivreOAuthClient; env?: MercadoLivreEnv } = {}) {}
+  constructor(
+    private readonly options: {
+      oauth?: MercadoLivreOAuthClient;
+      env?: MercadoLivreEnv;
+      acquireLock?: typeof acquireLock;
+      sleep?: (durationMs: number) => Promise<void>;
+      refreshWaitTimeoutMs?: number;
+      refreshPollIntervalMs?: number;
+      now?: () => number;
+    } = {},
+  ) {}
 
   async getValidAccessToken() {
+    const now = this.options.now?.() ?? Date.now();
     const account = await prisma.marketplaceAccount.findFirst({
       where: { marketplace: "MERCADO_LIVRE", enabled: true },
       orderBy: { updatedAt: "desc" },
@@ -534,62 +684,153 @@ export class MercadoLivreTokenService {
       throw new Error("Mercado Livre account is not connected.");
     }
 
-    if (account.expiresAt.getTime() - Date.now() > TOKEN_REFRESH_SKEW_MS) {
+    if (account.expiresAt.getTime() - now > TOKEN_REFRESH_SKEW_MS) {
       return decryptSecret(account.accessTokenEncrypted, this.options.env);
     }
 
-    const lock = await acquireLock(`mercado-livre:token-refresh:${account.id}`, 60_000);
+    const lock = await (this.options.acquireLock ?? acquireLock)(
+      `mercado-livre:token-refresh:${account.id}`,
+      60_000,
+    );
 
     if (!lock.acquired) {
-      const fresh = await prisma.marketplaceAccount.findUnique({ where: { id: account.id } });
-
-      if (fresh?.accessTokenEncrypted) {
-        return decryptSecret(fresh.accessTokenEncrypted, this.options.env);
-      }
-
-      throw new Error("Mercado Livre token refresh is already running.");
+      return this.waitForConcurrentRefresh(account);
     }
 
     try {
-      return this.refreshAccount(account);
+      return await this.refreshAccount(account);
     } finally {
       await lock.release();
     }
   }
 
+  private async waitForConcurrentRefresh(account: MarketplaceAccount) {
+    const timeoutMs = this.options.refreshWaitTimeoutMs ?? 5_000;
+    const pollIntervalMs = this.options.refreshPollIntervalMs ?? 100;
+    const sleep =
+      this.options.sleep ??
+      ((durationMs: number) =>
+        new Promise<void>((resolve) => setTimeout(resolve, durationMs)));
+    const startedAt = this.options.now?.() ?? Date.now();
+
+    while ((this.options.now?.() ?? Date.now()) - startedAt < timeoutMs) {
+      await sleep(pollIntervalMs);
+      const fresh = await prisma.marketplaceAccount.findUnique({
+        where: { id: account.id },
+      });
+
+      if (fresh?.status === "REAUTH_REQUIRED") {
+        throw new Error("Mercado Livre account requires reauthentication.");
+      }
+
+      if (fresh?.accessTokenEncrypted && fresh.expiresAt) {
+        const tokenChanged =
+          fresh.accessTokenEncrypted !== account.accessTokenEncrypted ||
+          fresh.expiresAt.getTime() !== account.expiresAt?.getTime();
+
+        if (
+          tokenChanged &&
+          fresh.expiresAt.getTime() - (this.options.now?.() ?? Date.now()) >
+            TOKEN_REFRESH_SKEW_MS
+        ) {
+          return decryptSecret(fresh.accessTokenEncrypted, this.options.env);
+        }
+      }
+    }
+
+    throw new MercadoLivreTokenRefreshInProgressError();
+  }
+
   private async refreshAccount(account: MarketplaceAccount) {
     if (!account.refreshTokenEncrypted) {
-      await markMercadoLivreAccountError(account.id, "Refresh token is missing.", "REAUTH_REQUIRED");
+      await markMercadoLivreAccountError(
+        account.id,
+        "Refresh token is missing.",
+        "REAUTH_REQUIRED",
+      );
       throw new Error("Mercado Livre refresh token is missing.");
     }
 
     try {
       const oauth =
         this.options.oauth ??
-        new MercadoLivreOAuthClient(this.options.env ? { env: this.options.env } : {});
-      const response = await oauth.refresh(decryptSecret(account.refreshTokenEncrypted, this.options.env));
+        new MercadoLivreOAuthClient(
+          this.options.env ? { env: this.options.env } : {},
+        );
+      const response = await oauth.refresh(
+        decryptSecret(account.refreshTokenEncrypted, this.options.env),
+      );
 
       if (!response.refresh_token) {
-        throw new Error("Mercado Livre did not return a rotated refresh token.");
+        throw new Error(
+          "Mercado Livre did not return a rotated refresh token.",
+        );
       }
 
       await saveMercadoLivreTokenResponse(response, this.options.env);
       return response.access_token;
     } catch (error) {
-      await markMercadoLivreAccountError(
-        account.id,
-        error instanceof Error ? error.message : "Mercado Livre refresh failed.",
-        "REAUTH_REQUIRED",
-      );
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Mercado Livre refresh failed.";
+
+      if (isMercadoLivreReauthenticationError(error)) {
+        await markMercadoLivreAccountError(
+          account.id,
+          message,
+          "REAUTH_REQUIRED",
+        );
+      } else {
+        await recordMercadoLivreOperationalError(
+          account.id,
+          message,
+          "MELI_REFRESH_FAILED",
+        );
+      }
+
       throw error;
     }
   }
 }
 
+export function isMercadoLivreReauthenticationError(error: unknown) {
+  return (
+    error instanceof MercadoLivreOAuthError &&
+    (error.code === "invalid_grant" ||
+      error.status === 401 ||
+      error.status === 403)
+  );
+}
+
+export async function recordMercadoLivreOperationalError(
+  accountId: string,
+  message: string,
+  alertCode = "MELI_OPERATIONAL_FAILURE",
+) {
+  await prisma.$transaction([
+    prisma.marketplaceAccount.update({
+      where: { id: accountId },
+      data: {
+        lastErrorAt: new Date(),
+        lastError: message,
+      },
+    }),
+    prisma.systemAlert.create({
+      data: {
+        severity: "ERROR",
+        source: "mercado-livre.operation",
+        message: alertCode,
+        metadata: { marketplaceAccountId: accountId, error: message },
+      },
+    }),
+  ]);
+}
+
 export async function markMercadoLivreAccountError(
   accountId: string,
   message: string,
-  status: "REAUTH_REQUIRED" | "ERROR" = "ERROR",
+  status: "REAUTH_REQUIRED" = "REAUTH_REQUIRED",
 ) {
   await prisma.$transaction([
     prisma.marketplaceAccount.update({
@@ -604,7 +845,7 @@ export async function markMercadoLivreAccountError(
       data: {
         severity: "ERROR",
         source: "mercado-livre.token",
-        message: status === "REAUTH_REQUIRED" ? "MELI_AUTH_EXPIRED" : "MELI_REFRESH_FAILED",
+        message: "MELI_AUTH_EXPIRED",
         metadata: { marketplaceAccountId: accountId, error: message },
       },
     }),
@@ -615,17 +856,28 @@ export class MercadoLivrePriceService {
   constructor(private readonly client: MercadoLivreApiClient) {}
 
   async getPrice(itemId: string): Promise<MercadoLivrePrice> {
-    const body = asRecord(await this.client.request(`/items/${encodeURIComponent(itemId)}/prices`));
+    const body = asRecord(
+      await this.client.request(`/items/${encodeURIComponent(itemId)}/prices`),
+    );
     const prices = asArray(body?.prices);
-    const active = prices.find((price) => asRecord(price)?.type === "standard") ?? prices[0];
+    const active =
+      prices.find((price) => asRecord(price)?.type === "standard") ?? prices[0];
     const activeRecord = asRecord(active);
-    const amount = asNumber(activeRecord?.amount ?? activeRecord?.regular_amount);
+    const amount = asNumber(
+      activeRecord?.amount ?? activeRecord?.regular_amount,
+    );
     const metadata = asRecord(activeRecord?.metadata);
-    const original = asNumber(metadata?.campaign_discount_original_price ?? activeRecord?.regular_amount);
+    const original = asNumber(
+      metadata?.campaign_discount_original_price ??
+        activeRecord?.regular_amount,
+    );
 
     return {
       currentPrice: amount,
-      originalPrice: original !== null && amount !== null && original > amount ? original : null,
+      originalPrice:
+        original !== null && amount !== null && original > amount
+          ? original
+          : null,
     };
   }
 }
@@ -668,365 +920,6 @@ function normalizeItemUrl(item: Record<string, unknown>) {
   return asString(item.permalink) ?? "";
 }
 
-function resolvedHighlight(
-  candidate: MercadoLivreHighlightCandidate,
-  resolvedItemId: string,
-  strategy: MercadoLivreResolutionStrategy,
-  metadata: { resolvedProductId?: string } = {},
-  diagnostics?: MercadoLivreProductResolutionDiagnostics,
-): MercadoLivreHighlightResolutionResult {
-  return {
-    ok: true,
-    candidate: {
-      sourceHighlightId: candidate.id,
-      sourceHighlightType: candidate.type,
-      ...(metadata.resolvedProductId ? { resolvedProductId: metadata.resolvedProductId } : {}),
-      resolvedItemId,
-      resolutionStrategy: strategy,
-      position: candidate.position,
-      categoryId: candidate.categoryId,
-    },
-    ...(diagnostics ? { diagnostics } : {}),
-  };
-}
-
-function skippedHighlight(
-  candidate: MercadoLivreHighlightCandidate,
-  reason: MercadoLivreHighlightSkipReason,
-  diagnostics?: MercadoLivreProductResolutionDiagnostics,
-): MercadoLivreHighlightResolutionResult {
-  return { ok: false, candidate, reason, ...(diagnostics ? { diagnostics } : {}) };
-}
-
-function marketplaceChannels(candidate: MarketplaceOfferCandidate) {
-  return (candidate.channels ?? []).map((channel) => channel.toLowerCase());
-}
-
-function emptyProductDiagnostics(): MercadoLivreProductResolutionDiagnostics {
-  return {
-    productDirectWinnerCount: 0,
-    productParentCount: 0,
-    productLeafCount: 0,
-    productResolvedDirectly: 0,
-    productResolvedViaChild: 0,
-    productLeafWithoutWinner: 0,
-    productParentWithoutResolvableChild: 0,
-  };
-}
-
-function countProductShape(product: MercadoLivreProduct, diagnostics: MercadoLivreProductResolutionDiagnostics) {
-  if (product.childrenIds.length > 0) {
-    diagnostics.productParentCount += 1;
-  } else {
-    diagnostics.productLeafCount += 1;
-  }
-
-  if (product.buyBoxWinnerItemId) {
-    diagnostics.productDirectWinnerCount += 1;
-  }
-}
-
-function compareNullableNumberDesc(left: number | null, right: number | null) {
-  if (left !== null && right !== null && left !== right) {
-    return right - left;
-  }
-
-  if (left !== null && right === null) {
-    return -1;
-  }
-
-  if (left === null && right !== null) {
-    return 1;
-  }
-
-  return 0;
-}
-
-function compareNullablePriceAsc(left: number | null, right: number | null) {
-  if (left !== null && right !== null && left !== right) {
-    return left - right;
-  }
-
-  if (left !== null && right === null) {
-    return -1;
-  }
-
-  if (left === null && right !== null) {
-    return 1;
-  }
-
-  return 0;
-}
-
-type ProductChildCandidate = {
-  product: MercadoLivreProduct;
-  terminal: boolean;
-};
-
-type ProductChildResolution =
-  | { ok: true; product: MercadoLivreProduct }
-  | { ok: false; reason: MercadoLivreHighlightSkipReason };
-
-export class MercadoLivreHighlightResolver {
-  constructor(
-    private readonly connector: MarketplaceConnector,
-    private readonly options: { maxProductDepth?: number; maxProductsInspected?: number } = {},
-  ) {}
-
-  async resolveCandidate(candidate: MercadoLivreHighlightCandidate): Promise<MercadoLivreHighlightResolutionResult> {
-    try {
-      if (candidate.type === "UNKNOWN") {
-        return skippedHighlight(candidate, "UNSUPPORTED_HIGHLIGHT_TYPE");
-      }
-
-      if (candidate.type === "ITEM") {
-        return resolvedHighlight(candidate, candidate.id, "ITEM_DIRECT");
-      }
-
-      if (candidate.type === "PRODUCT") {
-        return this.resolveProductCandidate(candidate);
-      }
-
-      let userProduct: MercadoLivreUserProduct | null;
-
-      try {
-        userProduct = await this.connector.getUserProduct(candidate.id);
-      } catch (error) {
-        if (error instanceof MercadoLivreApiError && error.status === 404) {
-          return skippedHighlight(candidate, "USER_PRODUCT_NOT_FOUND");
-        }
-
-        throw error;
-      }
-
-      if (!userProduct) {
-        return skippedHighlight(candidate, "USER_PRODUCT_NOT_FOUND");
-      }
-
-      if (!userProduct.userId) {
-        return skippedHighlight(candidate, "USER_PRODUCT_NO_USER");
-      }
-
-      const itemIds = await this.connector.getItemsByUserProduct(userProduct.userId, userProduct.id);
-
-      if (itemIds.length === 0) {
-        return skippedHighlight(candidate, "USER_PRODUCT_NO_ACTIVE_ITEM");
-      }
-
-      const candidates = await this.connector.getItems(itemIds);
-      const order = new Map(itemIds.map((itemId, index) => [itemId, index]));
-      const [chosen] = candidates
-        .filter((item) => item.currentPrice > 0)
-        .filter((item) => !item.itemStatus || item.itemStatus === "active")
-        .filter((item) => {
-          const channels = marketplaceChannels(item);
-          return channels.length === 0 || channels.includes("marketplace");
-        })
-        .sort((left, right) => {
-          const leftOrder = order.get(left.externalProductId) ?? Number.MAX_SAFE_INTEGER;
-          const rightOrder = order.get(right.externalProductId) ?? Number.MAX_SAFE_INTEGER;
-
-          if (leftOrder !== rightOrder) {
-            return leftOrder - rightOrder;
-          }
-
-          return left.externalProductId.localeCompare(right.externalProductId);
-        });
-
-      if (!chosen) {
-        return skippedHighlight(candidate, "USER_PRODUCT_NO_ACTIVE_ITEM");
-      }
-
-      return resolvedHighlight(candidate, chosen.externalProductId, "USER_PRODUCT_ACTIVE_ITEM");
-    } catch {
-      return skippedHighlight(candidate, "CANDIDATE_RESOLUTION_ERROR");
-    }
-  }
-
-  private async resolveProductCandidate(
-    candidate: MercadoLivreHighlightCandidate,
-  ): Promise<MercadoLivreHighlightResolutionResult> {
-    const diagnostics = emptyProductDiagnostics();
-    let product: MercadoLivreProduct | null;
-
-    try {
-      product = await this.connector.getProduct(candidate.id);
-    } catch (error) {
-      if (error instanceof MercadoLivreApiError && error.status === 404) {
-        return skippedHighlight(candidate, "PRODUCT_NOT_FOUND", diagnostics);
-      }
-
-      throw error;
-    }
-
-    if (!product) {
-      return skippedHighlight(candidate, "PRODUCT_NOT_FOUND", diagnostics);
-    }
-
-    countProductShape(product, diagnostics);
-
-    if (product.buyBoxWinnerItemId) {
-      diagnostics.productResolvedDirectly += 1;
-      return resolvedHighlight(
-        candidate,
-        product.buyBoxWinnerItemId,
-        "PRODUCT_DIRECT_BUY_BOX",
-        { resolvedProductId: product.id },
-        diagnostics,
-      );
-    }
-
-    if (product.childrenIds.length === 0) {
-      diagnostics.productLeafWithoutWinner += 1;
-      return skippedHighlight(candidate, "PRODUCT_LEAF_NO_BUY_BOX_WINNER", diagnostics);
-    }
-
-    const childResolution = await this.resolveProductChildren(product, diagnostics);
-
-    if (!childResolution.ok) {
-      if (childResolution.reason === "PRODUCT_PARENT_NO_RESOLVABLE_CHILD") {
-        diagnostics.productParentWithoutResolvableChild += 1;
-      }
-
-      return skippedHighlight(candidate, childResolution.reason, diagnostics);
-    }
-
-    diagnostics.productResolvedViaChild += 1;
-    return resolvedHighlight(
-      candidate,
-      childResolution.product.buyBoxWinnerItemId as string,
-      "PRODUCT_CHILD_BUY_BOX",
-      { resolvedProductId: childResolution.product.id },
-      diagnostics,
-    );
-  }
-
-  private async resolveProductChildren(
-    parent: MercadoLivreProduct,
-    diagnostics: MercadoLivreProductResolutionDiagnostics,
-  ): Promise<ProductChildResolution> {
-    const maxDepth = this.options.maxProductDepth ?? 4;
-    const maxProductsInspected = this.options.maxProductsInspected ?? 50;
-    const visited = new Set([parent.id]);
-    const queue = parent.childrenIds.map((id) => ({ id, depth: 1 }));
-    const candidates: ProductChildCandidate[] = [];
-    let inspected = 1;
-    let loadedChildren = 0;
-    let childNotFound = false;
-    let childError = false;
-    let depthLimited = false;
-
-    while (queue.length > 0) {
-      const current = queue.shift();
-
-      if (!current || visited.has(current.id)) {
-        continue;
-      }
-
-      if (inspected >= maxProductsInspected) {
-        return { ok: false, reason: "PRODUCT_TREE_SIZE_LIMIT" };
-      }
-
-      visited.add(current.id);
-      inspected += 1;
-
-      let product: MercadoLivreProduct | null;
-
-      try {
-        product = await this.connector.getProduct(current.id);
-      } catch (error) {
-        if (error instanceof MercadoLivreApiError && error.status === 404) {
-          childNotFound = true;
-          continue;
-        }
-
-        childError = true;
-        continue;
-      }
-
-      if (!product) {
-        childNotFound = true;
-        continue;
-      }
-
-      loadedChildren += 1;
-      countProductShape(product, diagnostics);
-
-      const terminal = product.childrenIds.length === 0;
-
-      if (product.buyBoxWinnerItemId) {
-        candidates.push({ product, terminal });
-      }
-
-      if (product.childrenIds.length > 0) {
-        if (current.depth >= maxDepth) {
-          depthLimited = true;
-          continue;
-        }
-
-        for (const childId of product.childrenIds) {
-          if (!visited.has(childId)) {
-            queue.push({ id: childId, depth: current.depth + 1 });
-          }
-        }
-      } else if (!product.buyBoxWinnerItemId) {
-        diagnostics.productLeafWithoutWinner += 1;
-      }
-    }
-
-    const chosen = this.chooseProductChild(candidates);
-
-    if (chosen) {
-      return { ok: true, product: chosen };
-    }
-
-    if (depthLimited) {
-      return { ok: false, reason: "PRODUCT_TREE_DEPTH_LIMIT" };
-    }
-
-    if (childError) {
-      return { ok: false, reason: "PRODUCT_CHILD_RESOLUTION_ERROR" };
-    }
-
-    if (childNotFound && loadedChildren === 0) {
-      return { ok: false, reason: "PRODUCT_CHILD_NOT_FOUND" };
-    }
-
-    return { ok: false, reason: "PRODUCT_PARENT_NO_RESOLVABLE_CHILD" };
-  }
-
-  private chooseProductChild(candidates: ProductChildCandidate[]) {
-    const [chosen] = [...candidates].sort((left, right) => {
-      const leftActive = left.product.status === "active";
-      const rightActive = right.product.status === "active";
-
-      if (leftActive !== rightActive) {
-        return leftActive ? -1 : 1;
-      }
-
-      if (left.terminal !== right.terminal) {
-        return left.terminal ? -1 : 1;
-      }
-
-      const soldQuantity = compareNullableNumberDesc(left.product.soldQuantity, right.product.soldQuantity);
-
-      if (soldQuantity !== 0) {
-        return soldQuantity;
-      }
-
-      const price = compareNullablePriceAsc(left.product.buyBoxWinnerPrice, right.product.buyBoxWinnerPrice);
-
-      if (price !== 0) {
-        return price;
-      }
-
-      return left.product.id.localeCompare(right.product.id);
-    });
-
-    return chosen?.product ?? null;
-  }
-}
-
 export class MercadoLivreConnector implements MarketplaceConnector {
   readonly marketplace = "MERCADO_LIVRE" as const;
   private readonly priceService: MercadoLivrePriceService;
@@ -1039,12 +932,15 @@ export class MercadoLivreConnector implements MarketplaceConnector {
       priceService?: MercadoLivrePriceService;
     },
   ) {
-    this.priceService = options.priceService ?? new MercadoLivrePriceService(options.client);
+    this.priceService =
+      options.priceService ?? new MercadoLivrePriceService(options.client);
   }
 
   async healthCheck() {
     try {
-      await this.options.client.request(`/sites/${this.options.siteId ?? "MLB"}`);
+      await this.options.client.request(
+        `/sites/${this.options.siteId ?? "MLB"}`,
+      );
       return true;
     } catch {
       return false;
@@ -1057,8 +953,22 @@ export class MercadoLivreConnector implements MarketplaceConnector {
   }
 
   async getItems(ids: string[]) {
+    const result = await this.getItemsWithDiagnostics(ids);
+    return result.candidates;
+  }
+
+  async getItemsWithDiagnostics(
+    ids: string[],
+  ): Promise<MercadoLivreItemsResult> {
+    const diagnostics: MercadoLivreItemFetchDiagnostics = {
+      itemsFetched: 0,
+      priceApiFetched: 0,
+      priceFallbackUsed: 0,
+      priceUnavailable: 0,
+    };
+
     if (ids.length === 0) {
-      return [];
+      return { candidates: [], diagnostics };
     }
 
     const chunks: string[][] = [];
@@ -1070,7 +980,9 @@ export class MercadoLivreConnector implements MarketplaceConnector {
     const candidates: MarketplaceOfferCandidate[] = [];
 
     for (const chunk of chunks) {
-      const body = await this.options.client.request(`/items?ids=${chunk.map(encodeURIComponent).join(",")}`);
+      const body = await this.options.client.request(
+        `/items?ids=${chunk.map(encodeURIComponent).join(",")}`,
+      );
       const rows = Array.isArray(body) ? body : [];
 
       for (const row of rows) {
@@ -1081,15 +993,24 @@ export class MercadoLivreConnector implements MarketplaceConnector {
           continue;
         }
 
-        const candidate = await this.normalizeItem(item);
+        diagnostics.itemsFetched += 1;
+        const normalized = await this.normalizeItem(item);
 
-        if (candidate) {
-          candidates.push(candidate);
+        if (normalized.priceSource === "PRICE_API") {
+          diagnostics.priceApiFetched += 1;
+        } else if (normalized.priceSource === "ITEM_FALLBACK") {
+          diagnostics.priceFallbackUsed += 1;
+        } else if (normalized.priceUnavailable) {
+          diagnostics.priceUnavailable += 1;
+        }
+
+        if (normalized.candidate) {
+          candidates.push(normalized.candidate);
         }
       }
     }
 
-    return candidates;
+    return { candidates, diagnostics };
   }
 
   async getPrice(itemId: string) {
@@ -1098,16 +1019,25 @@ export class MercadoLivreConnector implements MarketplaceConnector {
 
   async getSiteCategories() {
     const siteId = this.options.siteId ?? "MLB";
-    const body = await this.options.client.request(`/sites/${encodeURIComponent(siteId)}/categories`);
+    const body = await this.options.client.request(
+      `/sites/${encodeURIComponent(siteId)}/categories`,
+    );
     return asArray(body)
       .map(asRecord)
       .filter(isRecord)
-      .map((item) => ({ id: asString(item.id) ?? "", name: asString(item.name) ?? "" }))
+      .map((item) => ({
+        id: asString(item.id) ?? "",
+        name: asString(item.name) ?? "",
+      }))
       .filter((item) => item.id);
   }
 
   async getCategory(categoryId: string) {
-    const category = asRecord(await this.options.client.request(`/categories/${encodeURIComponent(categoryId)}`));
+    const category = asRecord(
+      await this.options.client.request(
+        `/categories/${encodeURIComponent(categoryId)}`,
+      ),
+    );
 
     if (!category) {
       return null;
@@ -1119,12 +1049,18 @@ export class MercadoLivreConnector implements MarketplaceConnector {
       pathFromRoot: asArray(category.path_from_root)
         .map(asRecord)
         .filter(isRecord)
-        .map((item) => ({ id: asString(item.id) ?? "", name: asString(item.name) ?? "" }))
+        .map((item) => ({
+          id: asString(item.id) ?? "",
+          name: asString(item.name) ?? "",
+        }))
         .filter((item) => item.id),
       children: asArray(category.children_categories)
         .map(asRecord)
         .filter(isRecord)
-        .map((item) => ({ id: asString(item.id) ?? "", name: asString(item.name) ?? "" }))
+        .map((item) => ({
+          id: asString(item.id) ?? "",
+          name: asString(item.name) ?? "",
+        }))
         .filter((item) => item.id),
     };
   }
@@ -1135,7 +1071,11 @@ export class MercadoLivreConnector implements MarketplaceConnector {
   }
 
   async getProduct(productId: string) {
-    const product = asRecord(await this.options.client.request(`/products/${encodeURIComponent(productId)}`));
+    const product = asRecord(
+      await this.options.client.request(
+        `/products/${encodeURIComponent(productId)}`,
+      ),
+    );
 
     if (!product) {
       return null;
@@ -1175,7 +1115,11 @@ export class MercadoLivreConnector implements MarketplaceConnector {
   }
 
   async getUserProduct(userProductId: string) {
-    const userProduct = asRecord(await this.options.client.request(`/user-products/${encodeURIComponent(userProductId)}`));
+    const userProduct = asRecord(
+      await this.options.client.request(
+        `/user-products/${encodeURIComponent(userProductId)}`,
+      ),
+    );
 
     if (!userProduct) {
       return null;
@@ -1185,7 +1129,9 @@ export class MercadoLivreConnector implements MarketplaceConnector {
 
     return {
       id: asString(userProduct.id) ?? userProductId,
-      userId: asStringId(userProduct.user_id ?? userProduct.seller_id ?? user?.id),
+      userId: asStringId(
+        userProduct.user_id ?? userProduct.seller_id ?? user?.id,
+      ),
     };
   }
 
@@ -1227,94 +1173,168 @@ export class MercadoLivreConnector implements MarketplaceConnector {
       .filter((item) => item.id);
   }
 
-  async discoverCandidates(categoryIds: string[], options: { maxCandidatesPerCategory?: number } = {}) {
-    const candidates = new Map<string, MercadoLivreResolvedHighlightCandidate>();
-    const resolver = new MercadoLivreHighlightResolver(this);
+  async probeCategorySearch({
+    siteId,
+    categoryId,
+    limit,
+  }: MercadoLivreCategorySearchProbeInput): Promise<MercadoLivreCategorySearchProbeResult> {
+    const safeLimit = Math.min(Math.max(Math.trunc(limit), 1), 20);
 
-    for (const categoryId of categoryIds) {
-      const bestSellers = await this.getBestSellers(categoryId);
+    try {
+      const body = asRecord(
+        await this.options.client.request(
+          `/sites/${encodeURIComponent(siteId)}/search?category=${encodeURIComponent(categoryId)}&limit=${safeLimit}`,
+        ),
+      );
 
-      for (const item of bestSellers.slice(0, options.maxCandidatesPerCategory ?? 20)) {
-        const result = await resolver.resolveCandidate(item);
-
-        if (!result.ok) {
-          continue;
-        }
-
-        const existing = candidates.get(result.candidate.resolvedItemId);
-
-        if (!existing || result.candidate.position < existing.position) {
-          candidates.set(result.candidate.resolvedItemId, result.candidate);
-        }
+      if (!body) {
+        return {
+          ok: false,
+          categoryId,
+          resultsFound: 0,
+          usableItemIds: [],
+          sample: [],
+          errorCode: "INVALID_RESPONSE",
+        };
       }
-    }
 
-    const items = await this.getItems([...candidates.keys()]);
+      const rows = asArray(body.results);
+      const paging = asRecord(body.paging);
+      const usableItems = rows
+        .map(asRecord)
+        .filter(isRecord)
+        .map((item) => {
+          const itemId = asStringId(item.id);
 
-    return items.map((item) => {
-      const source = candidates.get(item.externalProductId);
+          if (!itemId) {
+            return null;
+          }
 
-      if (!source) {
-        return item;
+          const result: MercadoLivreCategorySearchProbeSample = { itemId };
+          const title = asString(item.title);
+          const price = asNumber(item.price);
+          const permalink = asString(item.permalink);
+
+          if (title) result.title = title;
+          if (price !== null) result.price = price;
+          if (permalink) result.permalink = permalink;
+          return result;
+        })
+        .filter(
+          (item): item is MercadoLivreCategorySearchProbeSample =>
+            item !== null,
+        );
+      const sample = usableItems.slice(0, 5);
+
+      return {
+        ok: true,
+        httpStatus: 200,
+        categoryId,
+        resultsFound: asNumber(paging?.total) ?? rows.length,
+        usableItemIds: usableItems.map((item) => item.itemId),
+        sample,
+      };
+    } catch (error) {
+      if (error instanceof MercadoLivreApiError) {
+        return {
+          ok: false,
+          httpStatus: error.status,
+          categoryId,
+          resultsFound: 0,
+          usableItemIds: [],
+          sample: [],
+          errorCode: error.status === 429 ? "RATE_LIMITED" : "API_ERROR",
+        };
       }
 
       return {
-        ...item,
-        sourceHighlightId: source.sourceHighlightId,
-        sourceHighlightType: source.sourceHighlightType,
-        ...(source.resolvedProductId ? { resolvedProductId: source.resolvedProductId } : {}),
-        resolvedItemId: source.resolvedItemId,
-        resolutionStrategy: source.resolutionStrategy,
+        ok: false,
+        categoryId,
+        resultsFound: 0,
+        usableItemIds: [],
+        sample: [],
+        errorCode:
+          error instanceof MercadoLivreInvalidResponseError
+            ? "INVALID_RESPONSE"
+            : "NETWORK_OR_TIMEOUT",
       };
-    });
+    }
   }
 
-  private async normalizeItem(item: Record<string, unknown>): Promise<MarketplaceOfferCandidate | null> {
+  private async normalizeItem(item: Record<string, unknown>): Promise<{
+    candidate: MarketplaceOfferCandidate | null;
+    priceSource?: MercadoLivrePriceSource;
+    priceUnavailable: boolean;
+  }> {
     const id = asString(item.id);
     const title = asString(item.title);
     const productUrl = normalizeItemUrl(item);
     const category = asString(item.category_id);
 
     if (!id || !title || !productUrl) {
-      return null;
+      return { candidate: null, priceUnavailable: false };
     }
 
-    const price = await this.priceService.getPrice(id).catch(() => ({
-      currentPrice: asNumber(item.price),
-      originalPrice: null,
-    }));
+    let price: MercadoLivrePrice;
+    let priceSource: MercadoLivrePriceSource;
 
-    if (price.currentPrice === null || price.currentPrice <= 0) {
-      return null;
+    try {
+      const apiPrice = await this.priceService.getPrice(id);
+
+      if (apiPrice.currentPrice === null || apiPrice.currentPrice <= 0) {
+        throw new Error("Mercado Livre price API returned no usable price.");
+      }
+
+      price = apiPrice;
+      priceSource = "PRICE_API";
+    } catch {
+      const fallbackPrice = asNumber(item.price);
+
+      if (fallbackPrice === null || fallbackPrice <= 0) {
+        return { candidate: null, priceUnavailable: true };
+      }
+
+      price = { currentPrice: fallbackPrice, originalPrice: null };
+      priceSource = "ITEM_FALLBACK";
     }
 
     const shippingStatus = normalizeShipping(item);
+    const currentPrice = price.currentPrice;
+
+    if (currentPrice === null) {
+      return { candidate: null, priceUnavailable: true };
+    }
 
     return {
-      marketplace: "MERCADO_LIVRE",
-      externalProductId: id,
-      title,
-      description: null,
-      category,
-      imageUrl: asString(item.thumbnail),
-      productUrl,
-      affiliateUrl: null,
-      currentPrice: price.currentPrice,
-      originalPrice: price.originalPrice,
-      stockStatus: normalizeStock(item),
-      shippingStatus,
-      freeShipping: shippingStatus === "FREE",
-      rating: null,
-      salesCount: asNumber(item.sold_quantity),
-      sellerId: asStringId(item.seller_id),
-      officialStoreId: asStringId(item.official_store_id),
-      affiliateEligibility: this.eligibility.evaluate(item),
-      trackingStrategy: "DIRECT_AFFILIATE_LINK",
-      itemStatus: asString(item.status),
-      channels: asArray(item.channels)
-        .map(asString)
-        .filter((channel): channel is string => Boolean(channel)),
-      collectedAt: new Date(),
+      candidate: {
+        marketplace: "MERCADO_LIVRE",
+        externalProductId: id,
+        title,
+        description: null,
+        category,
+        imageUrl: asString(item.thumbnail),
+        productUrl,
+        affiliateUrl: null,
+        currentPrice,
+        originalPrice: price.originalPrice,
+        stockStatus: normalizeStock(item),
+        shippingStatus,
+        freeShipping: shippingStatus === "FREE",
+        rating: null,
+        salesCount: asNumber(item.sold_quantity),
+        sellerId: asStringId(item.seller_id),
+        officialStoreId: asStringId(item.official_store_id),
+        affiliateEligibility: this.eligibility.evaluate(item),
+        trackingStrategy: "DIRECT_AFFILIATE_LINK",
+        itemStatus: asString(item.status),
+        channels: asArray(item.channels)
+          .map(asString)
+          .filter((channel): channel is string => Boolean(channel)),
+        priceSource,
+        collectedAt: new Date(),
+      },
+      priceSource,
+      priceUnavailable: false,
     };
   }
 }
@@ -1323,7 +1343,9 @@ export async function createMercadoLivreConnector(fetchFn?: ApiFetch) {
   const token = await new MercadoLivreTokenService().getValidAccessToken();
   const config = getMercadoLivreConfig();
   return new MercadoLivreConnector({
-    client: new MercadoLivreApiClient(fetchFn ? { accessToken: token, fetchFn } : { accessToken: token }),
+    client: new MercadoLivreApiClient(
+      fetchFn ? { accessToken: token, fetchFn } : { accessToken: token },
+    ),
     siteId: config.siteId,
   });
 }

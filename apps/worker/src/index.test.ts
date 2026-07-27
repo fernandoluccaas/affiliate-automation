@@ -1,9 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Channel, Offer, Prisma } from "@affiliate/database";
-import { createPublicationIdempotently, resolvePublicationUrl, scheduleReadyOffers } from "./index";
+import {
+  createPublicationIdempotently,
+  resolvePublicationUrl,
+  scheduleReadyOffers,
+} from "./index";
 
 vi.mock("@affiliate/database", async () => {
-  const actual = await vi.importActual<typeof import("@affiliate/database")>("@affiliate/database");
+  const actual = await vi.importActual<typeof import("@affiliate/database")>(
+    "@affiliate/database",
+  );
   return {
     ...actual,
     prisma: {},
@@ -12,7 +18,8 @@ vi.mock("@affiliate/database", async () => {
 
 vi.mock("@affiliate/ai-copywriter", () => ({
   generateMessageForOffer: vi.fn().mockResolvedValue({
-    message: "\u{1F525} Produto teste\n\nPor R$ 345,99\n\n\u{1F6D2} Confira:\nhttps://example.com/go/slug\n\n#publi - link de afiliado",
+    message:
+      "\u{1F525} Produto teste\n\nPor R$ 345,99\n\n\u{1F6D2} Confira:\nhttps://example.com/go/slug\n\n#publi - link de afiliado",
     source: "DETERMINISTIC_FALLBACK",
     aiProvider: "DETERMINISTIC",
     aiValidationPassed: false,
@@ -52,7 +59,7 @@ describe("createPublicationIdempotently", () => {
   });
 
   it("imports Mercado Livre jobs with the shared ingestion package", async () => {
-    const jobs = await import("./mercado-livre");
+    const jobs = await import("@affiliate/marketplace-discovery");
 
     expect(typeof jobs.collectMercadoLivreCandidates).toBe("function");
     expect(typeof jobs.refreshMercadoLivreOffers).toBe("function");
@@ -185,7 +192,9 @@ describe("createPublicationIdempotently", () => {
 
   it("uses a stable channel and offer idempotency key", async () => {
     const upsert = vi.fn().mockResolvedValue({ id: "publication-1" });
-    const tx = { publication: { upsert } } as unknown as Prisma.TransactionClient;
+    const tx = {
+      publication: { upsert },
+    } as unknown as Prisma.TransactionClient;
     const offer = {
       id: "offer-1",
       title: "Oferta v1",
@@ -238,7 +247,9 @@ describe("createPublicationIdempotently", () => {
 
   it("uses different idempotency keys for different Offer versions", async () => {
     const upsert = vi.fn().mockResolvedValue({ id: "publication" });
-    const tx = { publication: { upsert } } as unknown as Prisma.TransactionClient;
+    const tx = {
+      publication: { upsert },
+    } as unknown as Prisma.TransactionClient;
     const channel = { id: "channel-1" } as Channel;
     const payload = {
       offerId: "offer-1",
@@ -265,14 +276,18 @@ describe("createPublicationIdempotently", () => {
 
     await createPublicationIdempotently(
       tx,
-      { ...baseOffer, id: "offer-v1", version: 1 } as unknown as Offer & { affiliateLinks: [] },
+      { ...baseOffer, id: "offer-v1", version: 1 } as unknown as Offer & {
+        affiliateLinks: [];
+      },
       channel,
       { ...payload, offerId: "offer-v1" },
       now,
     );
     await createPublicationIdempotently(
       tx,
-      { ...baseOffer, id: "offer-v2", version: 2 } as unknown as Offer & { affiliateLinks: [] },
+      { ...baseOffer, id: "offer-v2", version: 2 } as unknown as Offer & {
+        affiliateLinks: [];
+      },
       channel,
       { ...payload, offerId: "offer-v2" },
       now,
@@ -280,11 +295,15 @@ describe("createPublicationIdempotently", () => {
 
     expect(upsert).toHaveBeenNthCalledWith(
       1,
-      expect.objectContaining({ where: { idempotencyKey: "publication:channel-1:offer-v1" } }),
+      expect.objectContaining({
+        where: { idempotencyKey: "publication:channel-1:offer-v1" },
+      }),
     );
     expect(upsert).toHaveBeenNthCalledWith(
       2,
-      expect.objectContaining({ where: { idempotencyKey: "publication:channel-1:offer-v2" } }),
+      expect.objectContaining({
+        where: { idempotencyKey: "publication:channel-1:offer-v2" },
+      }),
     );
   });
 });

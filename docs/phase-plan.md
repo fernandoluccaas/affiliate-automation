@@ -101,6 +101,24 @@ Status: implemented.
 - Preserved Telegram, Ollama, deterministic fallback, channel filters, scoring, tracking and publication snapshots.
 - No Shopee connector, WhatsApp automation, scraping or browser automation was added.
 
+### Phase 3A.1 - Mercado Livre Discovery Consolidation
+
+Status: implemented.
+
+- Consolidated dashboard and worker discovery into `@affiliate/marketplace-discovery`.
+- Restricted `MercadoLivreConnector` to official API access, response parsing and source diagnostics.
+- Added structured `SUCCEEDED`, `PARTIAL`, `FAILED` and `SKIPPED` discovery results with one metrics contract.
+- Corrected zero-valued minimum discount and score policies and persisted `Offer.minimumScoreApplied`.
+- Preserved known Product metadata when later API responses omit enrichment.
+- Preserved case-sensitive affiliate URL path, query and fragment values in fingerprints.
+- Separated Price API success, item-price fallback and unavailable-price metrics.
+- Added discovery locking and refresh-token loser polling without expired-token reuse.
+- Kept transient API errors separate from OAuth reauthentication status.
+- Added central baseline affiliate URL validation and blocked explicitly ineligible Offers.
+- Added a manual category-search probe with no persistence and no automatic fallback.
+- Documented score versus completeness; no minimum-completeness policy was added.
+- Did not add Shopee, scraping, WhatsApp or automatic category-search fallback.
+
 ## Phase 4 - Publication Expansion
 
 - Add additional official publisher adapters when credentials and APIs are available.
