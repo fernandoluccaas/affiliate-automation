@@ -53,6 +53,20 @@ function lastRunMetrics(value: unknown) {
   return Object.entries(value as Record<string, unknown>).filter(([, item]) => typeof item === "number");
 }
 
+function lastRunObjectMetrics(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return [];
+  }
+
+  return Object.entries(value as Record<string, unknown>)
+    .filter(([, item]) => item && typeof item === "object" && !Array.isArray(item))
+    .map(([key, item]) => [
+      key,
+      Object.entries(item as Record<string, unknown>).filter(([, count]) => typeof count === "number"),
+    ] as const)
+    .filter(([, entries]) => entries.length > 0);
+}
+
 function single(value: string | string[] | undefined) {
   return Array.isArray(value) ? value[0] : value;
 }
@@ -83,6 +97,7 @@ export default async function MercadoLivreIntegrationPage({ searchParams }: Merc
   ]);
   const categoryIds = jsonStringArray(config?.categoryIds);
   const metrics = lastRunMetrics(config?.lastRunSummary);
+  const metricGroups = lastRunObjectMetrics(config?.lastRunSummary);
   const connector = account?.status === "CONNECTED" ? await createMercadoLivreConnector().catch(() => null) : null;
   const selectedCategory =
     connector && selectedCategoryId ? await categoryDetailsFor(selectedCategoryId, connector) : null;
@@ -227,14 +242,29 @@ export default async function MercadoLivreIntegrationPage({ searchParams }: Merc
                 description="Execute uma sincronizacao manual ou aguarde o worker coletar candidatos."
               />
             ) : (
-              <dl className="grid grid-cols-2 gap-3">
-                {metrics.map(([key, value]) => (
-                  <div key={key} className="rounded-md border bg-[var(--background)] p-3">
-                    <dt className="text-xs text-[var(--muted-foreground)]">{key}</dt>
-                    <dd className="text-lg font-semibold">{String(value)}</dd>
+              <div className="grid gap-3">
+                <dl className="grid grid-cols-2 gap-3">
+                  {metrics.map(([key, value]) => (
+                    <div key={key} className="rounded-md border bg-[var(--background)] p-3">
+                      <dt className="text-xs text-[var(--muted-foreground)]">{key}</dt>
+                      <dd className="text-lg font-semibold">{String(value)}</dd>
+                    </div>
+                  ))}
+                </dl>
+                {metricGroups.map(([group, entries]) => (
+                  <div key={group} className="rounded-md border bg-[var(--background)] p-3">
+                    <div className="text-xs font-medium text-[var(--muted-foreground)]">{group}</div>
+                    <dl className="mt-2 grid gap-1">
+                      {entries.map(([key, value]) => (
+                        <div key={key} className="flex items-center justify-between gap-3">
+                          <dt className="truncate text-xs">{key}</dt>
+                          <dd className="text-sm font-semibold">{String(value)}</dd>
+                        </div>
+                      ))}
+                    </dl>
                   </div>
                 ))}
-              </dl>
+              </div>
             )}
           </CardContent>
         </Card>
@@ -357,6 +387,13 @@ export default async function MercadoLivreIntegrationPage({ searchParams }: Merc
                 <Result label="Subcategorias" value={single(testResult.categoryChildrenCount) ?? "0"} />
                 <Result label="Highlights disponiveis" value={single(testResult.highlightsAvailable) === "true" ? "sim" : "nao"} />
                 <Result label="Candidatos encontrados" value={single(testResult.candidatesFound) ?? "0"} />
+                <Result label="ITEM" value={single(testResult.highlightItemCount) ?? "0"} />
+                <Result label="PRODUCT" value={single(testResult.highlightProductCount) ?? "0"} />
+                <Result label="USER_PRODUCT" value={single(testResult.highlightUserProductCount) ?? "0"} />
+                <Result label="Tipo desconhecido" value={single(testResult.highlightUnknownTypeCount) ?? "0"} />
+                <Result label="Resolvidos para item" value={single(testResult.resolvedItemCandidates) ?? "0"} />
+                <Result label="Nao resolvidos" value={single(testResult.unresolvedCandidates) ?? "0"} />
+                <Result label="Motivos de descarte" value={single(testResult.resolutionReasons) || "-"} />
                 <Result label="Motivo highlights" value={single(testResult.highlightsReason) ?? "-"} />
               </dl>
             ) : null}

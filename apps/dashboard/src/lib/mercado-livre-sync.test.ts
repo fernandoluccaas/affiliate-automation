@@ -18,6 +18,13 @@ function metrics() {
     categorySkipReasons: {} as Record<string, number>,
     candidatesFound: 0,
     uniqueCandidates: 0,
+    highlightItemCount: 0,
+    highlightProductCount: 0,
+    highlightUserProductCount: 0,
+    highlightUnknownTypeCount: 0,
+    resolvedItemCandidates: 0,
+    unresolvedCandidates: 0,
+    candidateResolutionSkipReasons: {} as Record<string, number>,
     itemsFetched: 0,
     pricesFetched: 0,
     newProducts: 0,
@@ -40,6 +47,9 @@ function connector(overrides: Partial<MarketplaceConnector>): MarketplaceConnect
     getCategory: vi.fn(),
     getCategoryChildren: vi.fn(),
     getBestSellers: vi.fn(),
+    getProduct: vi.fn(),
+    getUserProduct: vi.fn(),
+    getItemsByUserProduct: vi.fn(),
     discoverCandidates: vi.fn(),
     ...overrides,
   } as MarketplaceConnector;
@@ -134,7 +144,9 @@ describe("discoverCandidatesFromLeafCategories", () => {
         pathFromRoot: [{ id: "MLB123", name: "Celulares" }],
         children: [],
       }),
-      getBestSellers: vi.fn().mockResolvedValue([{ externalId: "MLB1", position: 1, type: "ITEM" }]),
+      getBestSellers: vi.fn().mockResolvedValue([
+        { id: "MLB1", position: 1, type: "ITEM", rawType: "ITEM", categoryId: "MLB123" },
+      ]),
       getItems,
     });
 
@@ -144,5 +156,90 @@ describe("discoverCandidatesFromLeafCategories", () => {
     expect(getItems).toHaveBeenCalledWith(["MLB1"]);
     expect(runMetrics.categoriesWithHighlights).toBe(1);
     expect(runMetrics.candidatesFound).toBe(1);
+    expect(runMetrics.uniqueCandidates).toBe(1);
+    expect(runMetrics.resolvedItemCandidates).toBe(1);
+    expect(runMetrics.unresolvedCandidates).toBe(0);
+  });
+
+  it("resolves mixed highlight types before fetching items", async () => {
+    const runMetrics = metrics();
+    const getItems = vi.fn().mockResolvedValue([
+      {
+        marketplace: "MERCADO_LIVRE",
+        externalProductId: "MLBUSERITEM",
+        title: "User product",
+        productUrl: "https://produto.example/MLBUSERITEM",
+        currentPrice: 100,
+      },
+      {
+        marketplace: "MERCADO_LIVRE",
+        externalProductId: "MLBPRODUCTITEM",
+        title: "Product",
+        productUrl: "https://produto.example/MLBPRODUCTITEM",
+        currentPrice: 120,
+      },
+      {
+        marketplace: "MERCADO_LIVRE",
+        externalProductId: "MLB1234567890",
+        title: "Item",
+        productUrl: "https://produto.example/MLB1234567890",
+        currentPrice: 130,
+      },
+    ]);
+    const marketplace = connector({
+      getCategory: vi.fn().mockResolvedValue({
+        id: "MLB123",
+        name: "Celulares",
+        pathFromRoot: [{ id: "MLB123", name: "Celulares" }],
+        children: [],
+      }),
+      getBestSellers: vi.fn().mockResolvedValue([
+        { id: "MLBU3013800008", position: 1, type: "USER_PRODUCT", rawType: "USER_PRODUCT", categoryId: "MLB123" },
+        { id: "MLB61695785", position: 2, type: "PRODUCT", rawType: "PRODUCT", categoryId: "MLB123" },
+        { id: "MLB1234567890", position: 3, type: "ITEM", rawType: "ITEM", categoryId: "MLB123" },
+      ]),
+      getUserProduct: vi.fn().mockResolvedValue({ id: "MLBU3013800008", userId: "321" }),
+      getItemsByUserProduct: vi.fn().mockResolvedValue(["MLBUSERITEM"]),
+      getProduct: vi.fn().mockResolvedValue({ id: "MLB61695785", buyBoxWinnerItemId: "MLBPRODUCTITEM" }),
+      getItems,
+    });
+
+    const candidates = await discoverCandidatesFromLeafCategories(marketplace, ["MLB123"], 5, runMetrics);
+
+    expect(candidates).toHaveLength(3);
+    expect(getItems).toHaveBeenLastCalledWith(["MLBUSERITEM", "MLBPRODUCTITEM", "MLB1234567890"]);
+    expect(runMetrics).toMatchObject({
+      candidatesFound: 3,
+      uniqueCandidates: 3,
+      highlightItemCount: 1,
+      highlightProductCount: 1,
+      highlightUserProductCount: 1,
+      resolvedItemCandidates: 3,
+      unresolvedCandidates: 0,
+    });
+  });
+
+  it("records unresolved product highlights without failing the category", async () => {
+    const runMetrics = metrics();
+    const marketplace = connector({
+      getCategory: vi.fn().mockResolvedValue({
+        id: "MLB123",
+        name: "Celulares",
+        pathFromRoot: [{ id: "MLB123", name: "Celulares" }],
+        children: [],
+      }),
+      getBestSellers: vi.fn().mockResolvedValue([
+        { id: "MLB61695785", position: 1, type: "PRODUCT", rawType: "PRODUCT", categoryId: "MLB123" },
+      ]),
+      getProduct: vi.fn().mockResolvedValue({ id: "MLB61695785", buyBoxWinnerItemId: null }),
+    });
+
+    const candidates = await discoverCandidatesFromLeafCategories(marketplace, ["MLB123"], 5, runMetrics);
+
+    expect(candidates).toEqual([]);
+    expect(runMetrics.categoriesWithHighlights).toBe(1);
+    expect(runMetrics.candidatesFound).toBe(1);
+    expect(runMetrics.uniqueCandidates).toBe(0);
+    expect(runMetrics.candidateResolutionSkipReasons).toEqual({ PRODUCT_NO_BUY_BOX_WINNER: 1 });
   });
 });

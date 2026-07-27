@@ -1,9 +1,13 @@
 import {
   MercadoLivreApiError,
+  MercadoLivreHighlightResolver,
   MercadoLivreInvalidResponseError,
   createMercadoLivreConnector,
   type MarketplaceConnector,
   type MarketplaceOfferCandidate,
+  type MercadoLivreHighlightCandidate,
+  type MercadoLivreHighlightSkipReason,
+  type MercadoLivreResolvedHighlightCandidate,
 } from "@affiliate/marketplace-connectors";
 import { prisma } from "@affiliate/database";
 import { ingestOffer } from "@affiliate/ingestion";
@@ -77,6 +81,13 @@ function baseRunMetrics() {
     categorySkipReasons: {} as Record<string, number>,
     candidatesFound: 0,
     uniqueCandidates: 0,
+    highlightItemCount: 0,
+    highlightProductCount: 0,
+    highlightUserProductCount: 0,
+    highlightUnknownTypeCount: 0,
+    resolvedItemCandidates: 0,
+    unresolvedCandidates: 0,
+    candidateResolutionSkipReasons: {} as Record<string, number>,
     itemsFetched: 0,
     pricesFetched: 0,
     newProducts: 0,
@@ -97,6 +108,23 @@ type CategorySkipReason =
 function recordCategorySkip(metrics: ReturnType<typeof baseRunMetrics>, reason: CategorySkipReason) {
   metrics.categoriesSkipped += 1;
   metrics.categorySkipReasons[reason] = (metrics.categorySkipReasons[reason] ?? 0) + 1;
+}
+
+function recordCandidateSkip(metrics: ReturnType<typeof baseRunMetrics>, reason: MercadoLivreHighlightSkipReason) {
+  metrics.unresolvedCandidates += 1;
+  metrics.candidateResolutionSkipReasons[reason] = (metrics.candidateResolutionSkipReasons[reason] ?? 0) + 1;
+}
+
+function countHighlight(metrics: ReturnType<typeof baseRunMetrics>, candidate: MercadoLivreHighlightCandidate) {
+  if (candidate.type === "ITEM") {
+    metrics.highlightItemCount += 1;
+  } else if (candidate.type === "PRODUCT") {
+    metrics.highlightProductCount += 1;
+  } else if (candidate.type === "USER_PRODUCT") {
+    metrics.highlightUserProductCount += 1;
+  } else {
+    metrics.highlightUnknownTypeCount += 1;
+  }
 }
 
 function discountPercentage(originalPrice: number | null | undefined, currentPrice: number) {
@@ -136,7 +164,8 @@ export async function discoverCandidatesFromLeafCategories(
   maxCandidatesPerCategory: number,
   metrics: ReturnType<typeof baseRunMetrics>,
 ) {
-  const itemIds = new Set<string>();
+  const resolvedCandidates = new Map<string, MercadoLivreResolvedHighlightCandidate>();
+  const resolver = new MercadoLivreHighlightResolver(connector);
 
   for (const categoryId of categoryIds) {
     metrics.categoriesProcessed += 1;
@@ -177,12 +206,43 @@ export async function discoverCandidatesFromLeafCategories(
     metrics.categoriesWithHighlights += 1;
 
     for (const item of highlights.slice(0, maxCandidatesPerCategory)) {
-      itemIds.add(item.externalId);
+      metrics.candidatesFound += 1;
+      countHighlight(metrics, item);
+
+      const result = await resolver.resolveCandidate(item);
+
+      if (!result.ok) {
+        recordCandidateSkip(metrics, result.reason);
+        continue;
+      }
+
+      metrics.resolvedItemCandidates += 1;
+
+      const existing = resolvedCandidates.get(result.candidate.resolvedItemId);
+
+      if (!existing || result.candidate.position < existing.position) {
+        resolvedCandidates.set(result.candidate.resolvedItemId, result.candidate);
+      }
     }
   }
 
-  metrics.candidatesFound = itemIds.size;
-  return connector.getItems([...itemIds]);
+  metrics.uniqueCandidates = resolvedCandidates.size;
+  const items = await connector.getItems([...resolvedCandidates.keys()]);
+
+  return items.map((item) => {
+    const source = resolvedCandidates.get(item.externalProductId);
+
+    if (!source) {
+      return item;
+    }
+
+    return {
+      ...item,
+      sourceHighlightId: source.sourceHighlightId,
+      sourceHighlightType: source.sourceHighlightType,
+      resolvedItemId: source.resolvedItemId,
+    };
+  });
 }
 
 export async function collectMercadoLivreCandidates(now = new Date(), options: MercadoLivreJobOptions = {}) {
@@ -224,7 +284,6 @@ export async function collectMercadoLivreCandidates(now = new Date(), options: M
       runMetrics,
     );
     const unique = new Map(candidates.map((candidate) => [candidate.externalProductId, candidate]));
-    runMetrics.uniqueCandidates = unique.size;
     runMetrics.itemsFetched = unique.size;
     runMetrics.pricesFetched = unique.size;
 

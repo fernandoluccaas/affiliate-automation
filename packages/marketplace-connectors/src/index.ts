@@ -32,6 +32,11 @@ export type MarketplaceOfferCandidate = {
   affiliateEligibility?: "ELIGIBLE" | "INELIGIBLE" | "UNKNOWN";
   affiliateLabel?: string | null;
   trackingStrategy?: "INTERNAL_REDIRECT" | "DIRECT_AFFILIATE_LINK";
+  itemStatus?: string | null;
+  channels?: string[];
+  sourceHighlightId?: string;
+  sourceHighlightType?: MercadoLivreHighlightCandidate["type"];
+  resolvedItemId?: string;
   collectedAt?: Date;
 };
 
@@ -44,7 +49,10 @@ export interface MarketplaceConnector {
   getSiteCategories(): Promise<MercadoLivreCategoryChild[]>;
   getCategory(categoryId: string): Promise<MercadoLivreCategory | null>;
   getCategoryChildren(categoryId: string): Promise<MercadoLivreCategoryChild[]>;
-  getBestSellers(categoryId: string): Promise<MercadoLivreBestSeller[]>;
+  getBestSellers(categoryId: string): Promise<MercadoLivreHighlightCandidate[]>;
+  getProduct(productId: string): Promise<MercadoLivreProduct | null>;
+  getUserProduct(userProductId: string): Promise<MercadoLivreUserProduct | null>;
+  getItemsByUserProduct(userId: string, userProductId: string): Promise<string[]>;
   discoverCandidates(categoryIds: string[], options?: { maxCandidatesPerCategory?: number }): Promise<MarketplaceOfferCandidate[]>;
 }
 
@@ -91,11 +99,58 @@ export type MercadoLivreCategory = {
   children: MercadoLivreCategoryChild[];
 };
 
-export type MercadoLivreBestSeller = {
-  externalId: string;
-  position: number | null;
-  type: string | null;
+export type MercadoLivreHighlightType = "ITEM" | "PRODUCT" | "USER_PRODUCT";
+
+export type MercadoLivreHighlightCandidate = {
+  id: string;
+  position: number;
+  type: MercadoLivreHighlightType | "UNKNOWN";
+  rawType: string | null;
+  categoryId: string;
 };
+
+export type MercadoLivreBestSeller = MercadoLivreHighlightCandidate;
+
+export type MercadoLivreProduct = {
+  id: string;
+  buyBoxWinnerItemId: string | null;
+};
+
+export type MercadoLivreUserProduct = {
+  id: string;
+  userId: string | null;
+};
+
+export type MercadoLivreHighlightSkipReason =
+  | "UNSUPPORTED_HIGHLIGHT_TYPE"
+  | "PRODUCT_NOT_FOUND"
+  | "PRODUCT_NO_BUY_BOX_WINNER"
+  | "USER_PRODUCT_NOT_FOUND"
+  | "USER_PRODUCT_NO_USER"
+  | "USER_PRODUCT_NO_ACTIVE_ITEM"
+  | "CANDIDATE_RESOLUTION_ERROR";
+
+export type MercadoLivreResolvedHighlightCandidate = {
+  sourceHighlightId: string;
+  sourceHighlightType: MercadoLivreHighlightCandidate["type"];
+  resolvedItemId: string;
+  position: number;
+  categoryId: string;
+};
+
+export type MercadoLivreHighlightResolutionResult =
+  | { ok: true; candidate: MercadoLivreResolvedHighlightCandidate }
+  | { ok: false; reason: MercadoLivreHighlightSkipReason; candidate: MercadoLivreHighlightCandidate };
+
+function normalizeHighlightType(value: unknown): MercadoLivreHighlightCandidate["type"] {
+  const type = asString(value);
+
+  if (type === "ITEM" || type === "PRODUCT" || type === "USER_PRODUCT") {
+    return type;
+  }
+
+  return "UNKNOWN";
+}
 
 export type ApiFetch = (
   input: string | URL,
@@ -568,6 +623,127 @@ function normalizeItemUrl(item: Record<string, unknown>) {
   return asString(item.permalink) ?? "";
 }
 
+function resolvedHighlight(
+  candidate: MercadoLivreHighlightCandidate,
+  resolvedItemId: string,
+): MercadoLivreHighlightResolutionResult {
+  return {
+    ok: true,
+    candidate: {
+      sourceHighlightId: candidate.id,
+      sourceHighlightType: candidate.type,
+      resolvedItemId,
+      position: candidate.position,
+      categoryId: candidate.categoryId,
+    },
+  };
+}
+
+function skippedHighlight(
+  candidate: MercadoLivreHighlightCandidate,
+  reason: MercadoLivreHighlightSkipReason,
+): MercadoLivreHighlightResolutionResult {
+  return { ok: false, candidate, reason };
+}
+
+function marketplaceChannels(candidate: MarketplaceOfferCandidate) {
+  return (candidate.channels ?? []).map((channel) => channel.toLowerCase());
+}
+
+export class MercadoLivreHighlightResolver {
+  constructor(private readonly connector: MarketplaceConnector) {}
+
+  async resolveCandidate(candidate: MercadoLivreHighlightCandidate): Promise<MercadoLivreHighlightResolutionResult> {
+    try {
+      if (candidate.type === "UNKNOWN") {
+        return skippedHighlight(candidate, "UNSUPPORTED_HIGHLIGHT_TYPE");
+      }
+
+      if (candidate.type === "ITEM") {
+        return resolvedHighlight(candidate, candidate.id);
+      }
+
+      if (candidate.type === "PRODUCT") {
+        let product: MercadoLivreProduct | null;
+
+        try {
+          product = await this.connector.getProduct(candidate.id);
+        } catch (error) {
+          if (error instanceof MercadoLivreApiError && error.status === 404) {
+            return skippedHighlight(candidate, "PRODUCT_NOT_FOUND");
+          }
+
+          throw error;
+        }
+
+        if (!product) {
+          return skippedHighlight(candidate, "PRODUCT_NOT_FOUND");
+        }
+
+        if (!product.buyBoxWinnerItemId) {
+          return skippedHighlight(candidate, "PRODUCT_NO_BUY_BOX_WINNER");
+        }
+
+        return resolvedHighlight(candidate, product.buyBoxWinnerItemId);
+      }
+
+      let userProduct: MercadoLivreUserProduct | null;
+
+      try {
+        userProduct = await this.connector.getUserProduct(candidate.id);
+      } catch (error) {
+        if (error instanceof MercadoLivreApiError && error.status === 404) {
+          return skippedHighlight(candidate, "USER_PRODUCT_NOT_FOUND");
+        }
+
+        throw error;
+      }
+
+      if (!userProduct) {
+        return skippedHighlight(candidate, "USER_PRODUCT_NOT_FOUND");
+      }
+
+      if (!userProduct.userId) {
+        return skippedHighlight(candidate, "USER_PRODUCT_NO_USER");
+      }
+
+      const itemIds = await this.connector.getItemsByUserProduct(userProduct.userId, userProduct.id);
+
+      if (itemIds.length === 0) {
+        return skippedHighlight(candidate, "USER_PRODUCT_NO_ACTIVE_ITEM");
+      }
+
+      const candidates = await this.connector.getItems(itemIds);
+      const order = new Map(itemIds.map((itemId, index) => [itemId, index]));
+      const [chosen] = candidates
+        .filter((item) => item.currentPrice > 0)
+        .filter((item) => !item.itemStatus || item.itemStatus === "active")
+        .filter((item) => {
+          const channels = marketplaceChannels(item);
+          return channels.length === 0 || channels.includes("marketplace");
+        })
+        .sort((left, right) => {
+          const leftOrder = order.get(left.externalProductId) ?? Number.MAX_SAFE_INTEGER;
+          const rightOrder = order.get(right.externalProductId) ?? Number.MAX_SAFE_INTEGER;
+
+          if (leftOrder !== rightOrder) {
+            return leftOrder - rightOrder;
+          }
+
+          return left.externalProductId.localeCompare(right.externalProductId);
+        });
+
+      if (!chosen) {
+        return skippedHighlight(candidate, "USER_PRODUCT_NO_ACTIVE_ITEM");
+      }
+
+      return resolvedHighlight(candidate, chosen.externalProductId);
+    } catch {
+      return skippedHighlight(candidate, "CANDIDATE_RESOLUTION_ERROR");
+    }
+  }
+}
+
 export class MercadoLivreConnector implements MarketplaceConnector {
   readonly marketplace = "MERCADO_LIVRE" as const;
   private readonly priceService: MercadoLivrePriceService;
@@ -675,6 +851,52 @@ export class MercadoLivreConnector implements MarketplaceConnector {
     return category?.children ?? [];
   }
 
+  async getProduct(productId: string) {
+    const product = asRecord(await this.options.client.request(`/products/${encodeURIComponent(productId)}`));
+
+    if (!product) {
+      return null;
+    }
+
+    const buyBoxWinner = asRecord(product.buy_box_winner);
+
+    return {
+      id: asString(product.id) ?? productId,
+      buyBoxWinnerItemId: asStringId(buyBoxWinner?.item_id),
+    };
+  }
+
+  async getUserProduct(userProductId: string) {
+    const userProduct = asRecord(await this.options.client.request(`/user-products/${encodeURIComponent(userProductId)}`));
+
+    if (!userProduct) {
+      return null;
+    }
+
+    const user = asRecord(userProduct.user);
+
+    return {
+      id: asString(userProduct.id) ?? userProductId,
+      userId: asStringId(userProduct.user_id ?? userProduct.seller_id ?? user?.id),
+    };
+  }
+
+  async getItemsByUserProduct(userId: string, userProductId: string) {
+    const body = asRecord(
+      await this.options.client.request(
+        `/users/${encodeURIComponent(userId)}/items/search?user_product_id=${encodeURIComponent(userProductId)}`,
+      ),
+    );
+    const results = asArray(body?.results);
+
+    return results
+      .map((item) => {
+        const record = asRecord(item);
+        return asStringId(record?.id ?? record?.item_id ?? item);
+      })
+      .filter((item): item is string => Boolean(item));
+  }
+
   async getBestSellers(categoryId: string) {
     const siteId = this.options.siteId ?? "MLB";
     const body = asRecord(
@@ -688,25 +910,53 @@ export class MercadoLivreConnector implements MarketplaceConnector {
       .map(asRecord)
       .filter(isRecord)
       .map((item, index) => ({
-        externalId: asString(item.id ?? item.item_id) ?? "",
+        id: asString(item.id ?? item.item_id) ?? "",
         position: asNumber(item.position) ?? index + 1,
-        type: asString(item.type),
+        type: normalizeHighlightType(item.type),
+        rawType: asString(item.type),
+        categoryId,
       }))
-      .filter((item) => item.externalId);
+      .filter((item) => item.id);
   }
 
   async discoverCandidates(categoryIds: string[], options: { maxCandidatesPerCategory?: number } = {}) {
-    const ids = new Set<string>();
+    const candidates = new Map<string, MercadoLivreResolvedHighlightCandidate>();
+    const resolver = new MercadoLivreHighlightResolver(this);
 
     for (const categoryId of categoryIds) {
       const bestSellers = await this.getBestSellers(categoryId);
 
       for (const item of bestSellers.slice(0, options.maxCandidatesPerCategory ?? 20)) {
-        ids.add(item.externalId);
+        const result = await resolver.resolveCandidate(item);
+
+        if (!result.ok) {
+          continue;
+        }
+
+        const existing = candidates.get(result.candidate.resolvedItemId);
+
+        if (!existing || result.candidate.position < existing.position) {
+          candidates.set(result.candidate.resolvedItemId, result.candidate);
+        }
       }
     }
 
-    return this.getItems([...ids]);
+    const items = await this.getItems([...candidates.keys()]);
+
+    return items.map((item) => {
+      const source = candidates.get(item.externalProductId);
+
+      if (!source) {
+        return item;
+      }
+
+      return {
+        ...item,
+        sourceHighlightId: source.sourceHighlightId,
+        sourceHighlightType: source.sourceHighlightType,
+        resolvedItemId: source.resolvedItemId,
+      };
+    });
   }
 
   private async normalizeItem(item: Record<string, unknown>): Promise<MarketplaceOfferCandidate | null> {
@@ -750,6 +1000,10 @@ export class MercadoLivreConnector implements MarketplaceConnector {
       officialStoreId: asStringId(item.official_store_id),
       affiliateEligibility: this.eligibility.evaluate(item),
       trackingStrategy: "DIRECT_AFFILIATE_LINK",
+      itemStatus: asString(item.status),
+      channels: asArray(item.channels)
+        .map(asString)
+        .filter((channel): channel is string => Boolean(channel)),
       collectedAt: new Date(),
     };
   }

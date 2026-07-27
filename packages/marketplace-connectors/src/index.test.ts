@@ -3,6 +3,7 @@ import {
   MercadoLivreApiError,
   MercadoLivreApiClient,
   MercadoLivreConnector,
+  MercadoLivreHighlightResolver,
   MercadoLivreOAuthClient,
   MercadoLivrePriceService,
   buildMercadoLivreAuthorizationUrl,
@@ -212,8 +213,36 @@ describe("MercadoLivreConnector", () => {
     });
 
     await expect(connector.getBestSellers("MLB1055")).resolves.toEqual([
-      { externalId: "MLB1", position: 1, type: "ITEM" },
-      { externalId: "MLB2", position: 2, type: null },
+      { id: "MLB1", position: 1, type: "ITEM", rawType: "ITEM", categoryId: "MLB1055" },
+      { id: "MLB2", position: 2, type: "UNKNOWN", rawType: null, categoryId: "MLB1055" },
+    ]);
+  });
+
+  it("preserves mixed highlight candidate types without treating them as item ids", async () => {
+    const fetchFn = vi.fn(async () =>
+      jsonResponse({
+        content: [
+          { id: "MLBU3013800008", position: 1, type: "USER_PRODUCT" },
+          { id: "MLB61695785", position: 2, type: "PRODUCT" },
+          { id: "MLB1234567890", position: 3, type: "ITEM" },
+        ],
+      }),
+    );
+    const connector = new MercadoLivreConnector({
+      client: new MercadoLivreApiClient({ accessToken: "token", fetchFn }),
+      siteId: "MLB",
+    });
+
+    await expect(connector.getBestSellers("MLB123")).resolves.toEqual([
+      {
+        id: "MLBU3013800008",
+        position: 1,
+        type: "USER_PRODUCT",
+        rawType: "USER_PRODUCT",
+        categoryId: "MLB123",
+      },
+      { id: "MLB61695785", position: 2, type: "PRODUCT", rawType: "PRODUCT", categoryId: "MLB123" },
+      { id: "MLB1234567890", position: 3, type: "ITEM", rawType: "ITEM", categoryId: "MLB123" },
     ]);
   });
 
@@ -289,10 +318,10 @@ describe("MercadoLivreConnector", () => {
     });
     vi.spyOn(connector, "getBestSellers")
       .mockResolvedValueOnce([
-        { externalId: "MLB1", position: 1, type: "ITEM" },
-        { externalId: "MLB2", position: 2, type: "ITEM" },
+        { id: "MLB1", position: 1, type: "ITEM", rawType: "ITEM", categoryId: "MLB1055" },
+        { id: "MLB2", position: 2, type: "ITEM", rawType: "ITEM", categoryId: "MLB1055" },
       ])
-      .mockResolvedValueOnce([{ externalId: "MLB1", position: 1, type: "ITEM" }]);
+      .mockResolvedValueOnce([{ id: "MLB1", position: 1, type: "ITEM", rawType: "ITEM", categoryId: "MLB1648" }]);
     vi.spyOn(connector, "getItems").mockResolvedValue([
       {
         marketplace: "MERCADO_LIVRE",
@@ -314,5 +343,107 @@ describe("MercadoLivreConnector", () => {
 
     expect(candidates).toHaveLength(2);
     expect(connector.getItems).toHaveBeenCalledWith(["MLB1", "MLB2"]);
+  });
+
+  it("resolves PRODUCT highlights through buy_box_winner.item_id", async () => {
+    const marketplace = {
+      getProduct: vi.fn().mockResolvedValue({ id: "MLB61695785", buyBoxWinnerItemId: "MLBITEM1" }),
+    } as unknown as MercadoLivreConnector;
+    const resolver = new MercadoLivreHighlightResolver(marketplace);
+
+    await expect(
+      resolver.resolveCandidate({
+        id: "MLB61695785",
+        position: 2,
+        type: "PRODUCT",
+        rawType: "PRODUCT",
+        categoryId: "MLB123",
+      }),
+    ).resolves.toEqual({
+      ok: true,
+      candidate: {
+        sourceHighlightId: "MLB61695785",
+        sourceHighlightType: "PRODUCT",
+        resolvedItemId: "MLBITEM1",
+        position: 2,
+        categoryId: "MLB123",
+      },
+    });
+  });
+
+  it("skips PRODUCT highlights without buy box winner", async () => {
+    const marketplace = {
+      getProduct: vi.fn().mockResolvedValue({ id: "MLB61695785", buyBoxWinnerItemId: null }),
+    } as unknown as MercadoLivreConnector;
+    const resolver = new MercadoLivreHighlightResolver(marketplace);
+
+    await expect(
+      resolver.resolveCandidate({
+        id: "MLB61695785",
+        position: 2,
+        type: "PRODUCT",
+        rawType: "PRODUCT",
+        categoryId: "MLB123",
+      }),
+    ).resolves.toMatchObject({ ok: false, reason: "PRODUCT_NO_BUY_BOX_WINNER" });
+  });
+
+  it("resolves USER_PRODUCT highlights to an active marketplace item", async () => {
+    const marketplace = {
+      getUserProduct: vi.fn().mockResolvedValue({ id: "MLBU1", userId: "123" }),
+      getItemsByUserProduct: vi.fn().mockResolvedValue(["MLB2", "MLB1"]),
+      getItems: vi.fn().mockResolvedValue([
+        {
+          marketplace: "MERCADO_LIVRE",
+          externalProductId: "MLB2",
+          title: "Paused",
+          productUrl: "https://produto.example/MLB2",
+          currentPrice: 100,
+          itemStatus: "paused",
+          channels: ["marketplace"],
+        },
+        {
+          marketplace: "MERCADO_LIVRE",
+          externalProductId: "MLB1",
+          title: "Active",
+          productUrl: "https://produto.example/MLB1",
+          currentPrice: 110,
+          itemStatus: "active",
+          channels: ["marketplace"],
+        },
+      ]),
+    } as unknown as MercadoLivreConnector;
+    const resolver = new MercadoLivreHighlightResolver(marketplace);
+
+    await expect(
+      resolver.resolveCandidate({
+        id: "MLBU1",
+        position: 1,
+        type: "USER_PRODUCT",
+        rawType: "USER_PRODUCT",
+        categoryId: "MLB123",
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      candidate: { sourceHighlightId: "MLBU1", sourceHighlightType: "USER_PRODUCT", resolvedItemId: "MLB1" },
+    });
+  });
+
+  it("skips USER_PRODUCT highlights without active items", async () => {
+    const marketplace = {
+      getUserProduct: vi.fn().mockResolvedValue({ id: "MLBU1", userId: "123" }),
+      getItemsByUserProduct: vi.fn().mockResolvedValue([]),
+    } as unknown as MercadoLivreConnector;
+    const resolver = new MercadoLivreHighlightResolver(marketplace);
+
+    await expect(
+      resolver.resolveCandidate({
+        id: "MLBU1",
+        position: 1,
+        type: "USER_PRODUCT",
+        rawType: "USER_PRODUCT",
+        categoryId: "MLB123",
+      }),
+    ).resolves.toMatchObject({ ok: false, reason: "USER_PRODUCT_NO_ACTIVE_ITEM" });
   });
 });

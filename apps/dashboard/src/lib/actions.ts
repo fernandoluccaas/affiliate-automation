@@ -4,10 +4,12 @@ import { Prisma, prisma } from "@affiliate/database";
 import { MessageGenerationService, OllamaAiProvider, OpenAiProvider } from "@affiliate/ai-copywriter";
 import {
   MercadoLivreApiError,
+  MercadoLivreHighlightResolver,
   createMercadoLivreConnector,
   getMercadoLivreConfig,
   type MarketplaceConnector,
   type MercadoLivreCategory,
+  type MercadoLivreHighlightCandidate,
 } from "@affiliate/marketplace-connectors";
 import { formatOfferFormError, ingestOffer, offerFormSchema, type OfferFormInput } from "@affiliate/ingestion";
 import bcrypt from "bcryptjs";
@@ -280,6 +282,25 @@ function categoryTestQuery(params: Record<string, string | number | boolean>) {
   }
 
   return query.toString();
+}
+
+function highlightTypeCounts(highlights: MercadoLivreHighlightCandidate[]) {
+  return highlights.reduce(
+    (counts, candidate) => {
+      if (candidate.type === "ITEM") {
+        counts.item += 1;
+      } else if (candidate.type === "PRODUCT") {
+        counts.product += 1;
+      } else if (candidate.type === "USER_PRODUCT") {
+        counts.userProduct += 1;
+      } else {
+        counts.unknown += 1;
+      }
+
+      return counts;
+    },
+    { item: 0, product: 0, userProduct: 0, unknown: 0 },
+  );
 }
 
 async function validateMercadoLivreDiscoveryCategory(
@@ -589,12 +610,42 @@ export async function testMercadoLivreCategoryAction(formData: FormData) {
   let highlightsAvailable = false;
   let candidatesFound = 0;
   let highlightsReason = "";
+  let highlightItemCount = 0;
+  let highlightProductCount = 0;
+  let highlightUserProductCount = 0;
+  let highlightUnknownTypeCount = 0;
+  let resolvedItemCandidates = 0;
+  let unresolvedCandidates = 0;
+  let resolutionReasons = "";
 
   try {
     const highlights = await connector.getBestSellers(validation.category.id);
+    const counts = highlightTypeCounts(highlights);
+    const resolver = new MercadoLivreHighlightResolver(connector);
+    const reasons: Record<string, number> = {};
+
     highlightsAvailable = highlights.length > 0;
     candidatesFound = highlights.length;
+    highlightItemCount = counts.item;
+    highlightProductCount = counts.product;
+    highlightUserProductCount = counts.userProduct;
+    highlightUnknownTypeCount = counts.unknown;
     highlightsReason = highlightsAvailable ? "OK" : "NO_HIGHLIGHTS_FOR_CATEGORY";
+
+    for (const highlight of highlights) {
+      const result = await resolver.resolveCandidate(highlight);
+
+      if (result.ok) {
+        resolvedItemCandidates += 1;
+      } else {
+        unresolvedCandidates += 1;
+        reasons[result.reason] = (reasons[result.reason] ?? 0) + 1;
+      }
+    }
+
+    resolutionReasons = Object.entries(reasons)
+      .map(([reason, count]) => `${reason}:${count}`)
+      .join(", ");
   } catch (error) {
     highlightsReason =
       error instanceof MercadoLivreApiError && error.status === 404
@@ -613,6 +664,13 @@ export async function testMercadoLivreCategoryAction(formData: FormData) {
       highlightsAvailable,
       candidatesFound,
       highlightsReason,
+      highlightItemCount,
+      highlightProductCount,
+      highlightUserProductCount,
+      highlightUnknownTypeCount,
+      resolvedItemCandidates,
+      unresolvedCandidates,
+      resolutionReasons,
     })}`,
   );
 }
