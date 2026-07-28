@@ -49,3 +49,31 @@ npm run test:integration:mercadolivre-affiliate
 O teste valida a sessão, lista tags, gera um link e confirma o host HTTPS
 permitido. Ele não imprime cookie, CSRF ou cabeçalhos de autenticação. Na
 ausência de qualquer variável obrigatória, o caso é marcado como ignorado.
+
+## Configuração no dashboard
+
+Abra `/integracoes/mercado-livre`. A seção **Sessão de afiliado Mercado
+Livre** é separada da conexão OAuth:
+
+1. informe um link de afiliado de referência;
+2. cole o cabeçalho `Cookie` completo obtido manualmente na sua própria sessão;
+3. clique em **Salvar e testar**;
+4. confira o status e a tag selecionada.
+
+O campo do cookie sempre volta vazio depois do envio. A indicação **Cookie
+configurado** confirma apenas a existência de um valor criptografado no
+servidor. Deixar o campo vazio preserva o cookie existente; preencher e salvar
+faz uma substituição explícita. **Limpar sessão** remove cookie, CSRF e tags sem
+desconectar o OAuth.
+
+Depois da primeira validação, todas as tags retornadas pela conta ficam
+disponíveis para seleção. A interface recebe somente a lista normalizada, o
+status, datas de validação/atualização e o último erro sanitizado.
+
+Os estados possíveis são:
+
+- `NOT_CONFIGURED`: nenhum cookie foi salvo;
+- `VALIDATING`: uma validação está em andamento;
+- `CONNECTED`: cookie válido e tag selecionada;
+- `EXPIRED`: login/401/403 no Portal de Afiliados;
+- `ERROR`: falha não relacionada à autenticação, com mensagem sanitizada.

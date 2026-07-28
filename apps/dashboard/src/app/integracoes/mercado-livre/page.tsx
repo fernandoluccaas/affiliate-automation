@@ -3,6 +3,7 @@ import Link from "next/link";
 import { prisma } from "@affiliate/database";
 import {
   createMercadoLivreConnector,
+  parseMercadoLivreAffiliateTags,
   type MercadoLivreCategory,
 } from "@affiliate/marketplace-connectors";
 import { AdminShell } from "@/components/admin-shell";
@@ -11,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import {
   addMercadoLivreCategoryAction,
@@ -20,6 +22,13 @@ import {
   testMercadoLivreCategoryAction,
 } from "@/lib/actions";
 import { formatDateTime } from "@/lib/format";
+import {
+  clearMercadoLivreAffiliateSessionAction,
+  generatePendingMercadoLivreAffiliateLinksAction,
+  saveMercadoLivreAffiliateSessionAction,
+  selectMercadoLivreAffiliateTagAction,
+  testMercadoLivreAffiliateSessionAction,
+} from "@/lib/mercadolivre-affiliate-actions";
 
 export const dynamic = "force-dynamic";
 
@@ -55,7 +64,38 @@ function messageText(message?: string | string[]) {
     return "Sincronizacao manual falhou. Veja logs e alertas.";
   if (value === "category-search-tested")
     return "Probe de busca da categoria concluido.";
+  if (value === "affiliate-session-saved")
+    return "Sessão de afiliado salva e validada.";
+  if (value === "affiliate-session-tested")
+    return "Conexão com o Portal de Afiliados validada.";
+  if (value === "affiliate-session-cleared")
+    return "Sessão de afiliado removida.";
+  if (value === "affiliate-tag-selected") return "Tag de afiliado atualizada.";
+  if (value === "affiliate-links-generated")
+    return "Geração dos links pendentes concluída.";
+  if (value === "affiliate-links-partial")
+    return "Alguns links foram gerados; os demais continuam pendentes.";
+  if (value === "affiliate-links-none")
+    return "Não há ofertas pendentes para gerar links.";
+  if (value === "affiliate-links-unavailable")
+    return "A geração em lote de links pendentes será habilitada na próxima fase.";
+  if (value === "affiliate-not-authorized")
+    return "Seu perfil não tem permissão para alterar esta integração.";
+  if (value === "affiliate-session-invalid")
+    return "Revise o cookie, o link de referência e a tag informados.";
+  if (value === "affiliate-session-expired")
+    return "O cookie do Portal de Afiliados expirou. Substitua-o para continuar.";
+  if (value === "affiliate-session-error")
+    return "Não foi possível validar a sessão de afiliado.";
   return null;
+}
+
+function affiliateSessionStatusLabel(status?: string | null) {
+  if (status === "VALIDATING") return "Validando";
+  if (status === "CONNECTED") return "Conectado";
+  if (status === "EXPIRED") return "Cookie expirado";
+  if (status === "ERROR") return "Erro";
+  return "Não configurado";
 }
 
 function jsonStringArray(value: unknown) {
@@ -178,9 +218,7 @@ function CategorySearchAttempt({
     );
   }
 
-  const authenticationMode = single(
-    result[`${prefix}AuthenticationMode`],
-  );
+  const authenticationMode = single(result[`${prefix}AuthenticationMode`]);
   const sample = probeSample(result[`${prefix}Sample`]);
 
   return (
@@ -229,19 +267,14 @@ function CategorySearchAttempt({
           label="Mensagem Mercado Livre"
           value={single(result[`${prefix}ErrorMessage`]) || "-"}
         />
-        <Result
-          label="Cause"
-          value={probeCause(result[`${prefix}Cause`])}
-        />
+        <Result label="Cause" value={probeCause(result[`${prefix}Cause`])} />
         <Result
           label="blocked_by"
           value={single(result[`${prefix}BlockedBy`]) || "-"}
         />
         <Result
           label="Classificacao do 403"
-          value={
-            single(result[`${prefix}ForbiddenClassification`]) || "-"
-          }
+          value={single(result[`${prefix}ForbiddenClassification`]) || "-"}
         />
       </dl>
       {sample.length > 0 ? (
@@ -250,10 +283,7 @@ function CategorySearchAttempt({
             Amostra
           </div>
           {sample.map((item) => (
-            <div
-              key={item.itemId}
-              className="rounded-md border bg-white p-2"
-            >
+            <div key={item.itemId} className="rounded-md border bg-white p-2">
               <div className="text-xs font-medium">{item.itemId}</div>
               {item.title ? (
                 <div className="text-xs text-[var(--muted-foreground)]">
@@ -298,13 +328,50 @@ export default async function MercadoLivreIntegrationPage({
   const selectedCategoryId = single(params?.categoryId);
   const [account, config] = await Promise.all([
     prisma.marketplaceAccount.findFirst({
-      where: { marketplace: "MERCADO_LIVRE" },
+      where: { marketplace: "MERCADO_LIVRE", enabled: true },
       orderBy: { updatedAt: "desc" },
+      select: {
+        status: true,
+        siteId: true,
+        mercadoLivreAffiliateSession: {
+          select: {
+            affiliateTag: true,
+            availableTags: true,
+            status: true,
+            lastValidatedAt: true,
+            lastCookieUpdateAt: true,
+            lastError: true,
+          },
+        },
+      },
     }),
     prisma.mercadoLivreDiscoveryConfig.findFirst({
       orderBy: { updatedAt: "desc" },
+      select: {
+        enabled: true,
+        siteId: true,
+        categoryIds: true,
+        bestSellersEnabled: true,
+        minimumPrice: true,
+        maximumPrice: true,
+        minimumDiscountPercentage: true,
+        minimumScore: true,
+        maxCandidatesPerCategory: true,
+        refreshIntervalMinutes: true,
+        lastRunAt: true,
+        lastRunSummary: true,
+      },
     }),
   ]);
+  const affiliateSession = account?.mercadoLivreAffiliateSession ?? null;
+  const affiliateTags = parseMercadoLivreAffiliateTags(
+    affiliateSession?.availableTags,
+  );
+  const affiliateSessionConfigured = Boolean(
+    affiliateSession &&
+    (affiliateSession.status !== "NOT_CONFIGURED" ||
+      affiliateSession.lastCookieUpdateAt),
+  );
   const categoryIds = jsonStringArray(config?.categoryIds);
   const metrics = lastRunMetrics(config?.lastRunSummary);
   const metricGroups = lastRunObjectMetrics(config?.lastRunSummary);
@@ -373,6 +440,193 @@ export default async function MercadoLivreIntegrationPage({
           {message}
         </div>
       ) : null}
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Sessão de afiliado Mercado Livre</CardTitle>
+          <div className="grid gap-2 text-sm text-[var(--muted-foreground)] md:grid-cols-2">
+            <p className="rounded-md border bg-[var(--background)] p-3">
+              <span className="font-medium text-[var(--foreground)]">
+                OAuth:
+              </span>{" "}
+              categorias, ranking e dados dos produtos.
+            </p>
+            <p className="rounded-md border bg-[var(--background)] p-3">
+              <span className="font-medium text-[var(--foreground)]">
+                Cookie:
+              </span>{" "}
+              Portal de Afiliados e geração dos links meli.la.
+            </p>
+          </div>
+        </CardHeader>
+        <CardContent className="grid gap-6">
+          <dl className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <SessionResult
+              label="Status da sessão"
+              value={affiliateSessionStatusLabel(affiliateSession?.status)}
+            />
+            <SessionResult
+              label="Cookie"
+              value={
+                affiliateSessionConfigured
+                  ? "Cookie configurado"
+                  : "Não configurado"
+              }
+            />
+            <SessionResult
+              label="Tag selecionada"
+              value={affiliateSession?.affiliateTag ?? "-"}
+            />
+            <SessionResult
+              label="Quantidade de tags encontradas"
+              value={String(affiliateTags.length)}
+            />
+            <SessionResult
+              label="Última validação"
+              value={
+                affiliateSession?.lastValidatedAt
+                  ? formatDateTime(affiliateSession.lastValidatedAt)
+                  : "-"
+              }
+            />
+            <SessionResult
+              label="Última atualização do cookie"
+              value={
+                affiliateSession?.lastCookieUpdateAt
+                  ? formatDateTime(affiliateSession.lastCookieUpdateAt)
+                  : "-"
+              }
+            />
+            <SessionResult
+              label="Status OAuth separado"
+              value={account?.status ?? "DISCONNECTED"}
+            />
+            <SessionResult
+              label="Último erro"
+              value={affiliateSession?.lastError ?? "-"}
+            />
+          </dl>
+
+          {!account ? (
+            <div className="rounded-md border bg-[var(--background)] p-3 text-sm">
+              Conecte o OAuth do Mercado Livre antes de configurar a sessão de
+              afiliado.
+            </div>
+          ) : null}
+
+          <form
+            action={saveMercadoLivreAffiliateSessionAction}
+            className="grid gap-4"
+          >
+            <div className="grid gap-4 lg:grid-cols-2">
+              <Field label="Link de afiliado de referência">
+                <Input
+                  name="sampleAffiliateLink"
+                  type="url"
+                  defaultValue=""
+                  placeholder="https://meli.la/..."
+                  autoComplete="off"
+                />
+                <p className="text-xs text-[var(--muted-foreground)]">
+                  Usado apenas para validar o fluxo da sua conta. O sistema não
+                  fabrica links a partir desta referência.
+                </p>
+              </Field>
+
+              <Field label="Tag de afiliado">
+                <Select
+                  name="affiliateTag"
+                  defaultValue={affiliateSession?.affiliateTag ?? ""}
+                >
+                  <option value="">Selecionar automaticamente</option>
+                  {affiliateSession?.affiliateTag &&
+                  !affiliateTags.some(
+                    (tag) => tag.value === affiliateSession.affiliateTag,
+                  ) ? (
+                    <option value={affiliateSession.affiliateTag}>
+                      {affiliateSession.affiliateTag}
+                    </option>
+                  ) : null}
+                  {affiliateTags.map((tag) => (
+                    <option key={tag.value} value={tag.value}>
+                      {tag.label}
+                      {tag.isDefault ? " (padrão)" : ""}
+                    </option>
+                  ))}
+                </Select>
+                <p className="text-xs text-[var(--muted-foreground)]">
+                  Depois da primeira validação, todas as tags encontradas ficam
+                  disponíveis aqui.
+                </p>
+              </Field>
+            </div>
+
+            <Field label="Cookie completo do Mercado Livre">
+              <Textarea
+                name="cookie"
+                defaultValue=""
+                placeholder={
+                  affiliateSessionConfigured
+                    ? "Cookie configurado. Cole aqui somente para substituir."
+                    : "cookie1=valor1; cookie2=valor2"
+                }
+                autoComplete="off"
+                spellCheck={false}
+                rows={5}
+              />
+              <p className="text-xs text-[var(--muted-foreground)]">
+                O valor salvo nunca é exibido. Deixe vazio para preservar o
+                cookie atual; cole um novo valor para substituí-lo.
+              </p>
+            </Field>
+
+            <div className="flex flex-wrap gap-2">
+              <Button type="submit" disabled={!account}>
+                Salvar e testar
+              </Button>
+              <Button
+                type="submit"
+                variant="outline"
+                formAction={selectMercadoLivreAffiliateTagAction}
+                disabled={!account || affiliateTags.length === 0}
+              >
+                Atualizar tag
+              </Button>
+            </div>
+          </form>
+
+          <div className="flex flex-wrap gap-2 border-t pt-4">
+            <form action={testMercadoLivreAffiliateSessionAction}>
+              <Button
+                type="submit"
+                variant="outline"
+                disabled={!affiliateSessionConfigured}
+              >
+                Testar conexão
+              </Button>
+            </form>
+            <form action={clearMercadoLivreAffiliateSessionAction}>
+              <Button
+                type="submit"
+                variant="outline"
+                disabled={!affiliateSession}
+              >
+                Limpar sessão
+              </Button>
+            </form>
+            <form action={generatePendingMercadoLivreAffiliateLinksAction}>
+              <input name="limit" type="hidden" value="50" />
+              <Button
+                type="submit"
+                variant="outline"
+                disabled={affiliateSession?.status !== "CONNECTED"}
+              >
+                Gerar links pendentes
+              </Button>
+            </form>
+          </div>
+        </CardContent>
+      </Card>
 
       <div className="grid gap-4 lg:grid-cols-[1.5fr_1fr]">
         <Card>
@@ -685,29 +939,6 @@ export default async function MercadoLivreIntegrationPage({
               </Button>
             </form>
 
-            <form
-              action={probeMercadoLivreCategorySearchAction}
-              className="grid gap-3"
-            >
-              <input
-                name="categoryId"
-                type="hidden"
-                value={selectedCategory?.id ?? selectedCategoryId ?? ""}
-              />
-              <Button
-                type="submit"
-                variant="outline"
-                disabled={
-                  !connector ||
-                  !selectedCategory ||
-                  selectedCategory.children.length > 0
-                }
-              >
-                <Search aria-hidden="true" size={16} />
-                Testar busca de itens da categoria
-              </Button>
-            </form>
-
             {testResult ? (
               <dl className="grid gap-2 rounded-md border bg-[var(--background)] p-3">
                 <Result
@@ -806,62 +1037,6 @@ export default async function MercadoLivreIntegrationPage({
               </dl>
             ) : null}
 
-            {categorySearchResult ? (
-              <div className="grid gap-3 rounded-md border bg-[var(--background)] p-3">
-                <dl className="grid gap-2">
-                  <Result
-                    label="Categoria"
-                    value={
-                      single(categorySearchResult.probeCategoryName) ?? "-"
-                    }
-                  />
-                  <Result
-                    label="ID"
-                    value={single(categorySearchResult.categoryId) ?? "-"}
-                  />
-                  <Result
-                    label="Caminho"
-                    value={
-                      single(categorySearchResult.probeCategoryPath) ?? "-"
-                    }
-                  />
-                  <Result
-                    label="Endpoint logico"
-                    value={`${single(categorySearchResult.probeMethod) ?? "GET"} ${single(categorySearchResult.probeEndpoint) ?? "-"}`}
-                  />
-                  <Result
-                    label="Parametro category"
-                    value={
-                      single(categorySearchResult.probeCategoryParameter) ?? "-"
-                    }
-                  />
-                  <Result
-                    label="Parametro limit"
-                    value={
-                      single(categorySearchResult.probeLimitParameter) ?? "-"
-                    }
-                  />
-                  <Result
-                    label="Diagnostico"
-                    value={
-                      single(categorySearchResult.probeDiagnosis) ||
-                      "SEM_CLASSIFICACAO_403"
-                    }
-                  />
-                </dl>
-                <CategorySearchAttempt
-                  label="Tentativa autenticada"
-                  prefix="probeAuthenticated"
-                  result={categorySearchResult}
-                />
-                <CategorySearchAttempt
-                  label="Tentativa publica"
-                  prefix="probePublic"
-                  result={categorySearchResult}
-                />
-              </div>
-            ) : null}
-
             <div className="grid gap-2">
               <div className="font-medium">Categorias configuradas</div>
               {configuredCategories.length === 0 ? (
@@ -891,6 +1066,102 @@ export default async function MercadoLivreIntegrationPage({
                 </div>
               )}
             </div>
+
+            <details
+              className="rounded-md border bg-[var(--background)] p-3"
+              open={Boolean(categorySearchResult)}
+            >
+              <summary className="cursor-pointer font-medium">
+                Diagnóstico avançado: busca comum por categoria
+              </summary>
+              <div className="mt-3 grid gap-3">
+                <p className="text-xs text-[var(--muted-foreground)]">
+                  Este probe não faz parte da importação normal. O fluxo
+                  principal usa o ranking oficial de highlights em categorias
+                  folha.
+                </p>
+                <form
+                  action={probeMercadoLivreCategorySearchAction}
+                  className="grid gap-3"
+                >
+                  <input
+                    name="categoryId"
+                    type="hidden"
+                    value={selectedCategory?.id ?? selectedCategoryId ?? ""}
+                  />
+                  <Button
+                    type="submit"
+                    variant="outline"
+                    disabled={
+                      !connector ||
+                      !selectedCategory ||
+                      selectedCategory.children.length > 0
+                    }
+                  >
+                    <Search aria-hidden="true" size={16} />
+                    Executar probe avançado
+                  </Button>
+                </form>
+
+                {categorySearchResult ? (
+                  <div className="grid gap-3 rounded-md border bg-white p-3">
+                    <dl className="grid gap-2">
+                      <Result
+                        label="Categoria"
+                        value={
+                          single(categorySearchResult.probeCategoryName) ?? "-"
+                        }
+                      />
+                      <Result
+                        label="ID"
+                        value={single(categorySearchResult.categoryId) ?? "-"}
+                      />
+                      <Result
+                        label="Caminho"
+                        value={
+                          single(categorySearchResult.probeCategoryPath) ?? "-"
+                        }
+                      />
+                      <Result
+                        label="Endpoint logico"
+                        value={`${single(categorySearchResult.probeMethod) ?? "GET"} ${single(categorySearchResult.probeEndpoint) ?? "-"}`}
+                      />
+                      <Result
+                        label="Parametro category"
+                        value={
+                          single(categorySearchResult.probeCategoryParameter) ??
+                          "-"
+                        }
+                      />
+                      <Result
+                        label="Parametro limit"
+                        value={
+                          single(categorySearchResult.probeLimitParameter) ??
+                          "-"
+                        }
+                      />
+                      <Result
+                        label="Diagnostico"
+                        value={
+                          single(categorySearchResult.probeDiagnosis) ||
+                          "SEM_CLASSIFICACAO_403"
+                        }
+                      />
+                    </dl>
+                    <CategorySearchAttempt
+                      label="Tentativa autenticada"
+                      prefix="probeAuthenticated"
+                      result={categorySearchResult}
+                    />
+                    <CategorySearchAttempt
+                      label="Tentativa publica"
+                      prefix="probePublic"
+                      result={categorySearchResult}
+                    />
+                  </div>
+                ) : null}
+              </div>
+            </details>
           </CardContent>
         </Card>
       </div>
@@ -918,6 +1189,15 @@ function Result({ label, value }: { label: string; value: string }) {
     <div className="grid gap-1">
       <dt className="text-xs text-[var(--muted-foreground)]">{label}</dt>
       <dd>{value}</dd>
+    </div>
+  );
+}
+
+function SessionResult({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="grid gap-1 rounded-md border bg-[var(--background)] p-3">
+      <dt className="text-xs text-[var(--muted-foreground)]">{label}</dt>
+      <dd className="break-words text-sm font-medium">{value}</dd>
     </div>
   );
 }
