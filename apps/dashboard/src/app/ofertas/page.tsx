@@ -62,9 +62,16 @@ export default async function OffersPage({ searchParams }: OffersPageProps) {
     ...(offerStatuses.includes(status as (typeof offerStatuses)[number])
       ? { status: status as (typeof offerStatuses)[number] }
       : {}),
-    ...(category ? { category: { contains: category, mode: "insensitive" as const } } : {}),
-    ...(["ELIGIBLE", "INELIGIBLE", "UNKNOWN"].includes(affiliateEligibility ?? "")
-      ? { affiliateEligibility: affiliateEligibility as "ELIGIBLE" | "INELIGIBLE" | "UNKNOWN" }
+    ...(category
+      ? { category: { contains: category, mode: "insensitive" as const } }
+      : {}),
+    ...(["ELIGIBLE", "INELIGIBLE", "UNKNOWN"].includes(
+      affiliateEligibility ?? "",
+    )
+      ? {
+          affiliateEligibility: affiliateEligibility as
+            "ELIGIBLE" | "INELIGIBLE" | "UNKNOWN",
+        }
       : {}),
     ...(affiliateLinkMissing === "true" ? { affiliateUrl: null } : {}),
   };
@@ -81,7 +88,13 @@ export default async function OffersPage({ searchParams }: OffersPageProps) {
         externalProductId: true,
         version: true,
         title: true,
+        productUrl: true,
         category: true,
+        sourceCategoryId: true,
+        bestSellerPosition: true,
+        sourceHighlightId: true,
+        sourceHighlightType: true,
+        resolutionStrategy: true,
         originalPrice: true,
         currentPrice: true,
         discountPercentage: true,
@@ -121,7 +134,11 @@ export default async function OffersPage({ searchParams }: OffersPageProps) {
       }
     >
       <form className="grid gap-3 rounded-md border bg-white p-4 md:grid-cols-[1fr_1fr_1fr_1fr_1fr_auto]">
-        <Select name="marketplace" defaultValue={marketplace ?? ""} aria-label="Marketplace">
+        <Select
+          name="marketplace"
+          defaultValue={marketplace ?? ""}
+          aria-label="Marketplace"
+        >
           <option value="">Todos marketplaces</option>
           {marketplaces.map((item) => (
             <option key={item} value={item}>
@@ -173,7 +190,7 @@ export default async function OffersPage({ searchParams }: OffersPageProps) {
         />
       ) : (
         <div className="overflow-x-auto rounded-md border bg-white">
-          <table className="w-full min-w-[1180px] border-collapse text-left text-sm">
+          <table className="w-full min-w-[1380px] border-collapse text-left text-sm">
             <thead className="border-b bg-[var(--muted)] text-xs uppercase text-[var(--muted-foreground)]">
               <tr>
                 <th className="px-4 py-3 font-semibold">Titulo</th>
@@ -181,6 +198,7 @@ export default async function OffersPage({ searchParams }: OffersPageProps) {
                 <th className="px-4 py-3 font-semibold">ID externo</th>
                 <th className="px-4 py-3 font-semibold">Versao</th>
                 <th className="px-4 py-3 font-semibold">Categoria</th>
+                <th className="px-4 py-3 font-semibold">Origem ranking</th>
                 <th className="px-4 py-3 font-semibold">Precos</th>
                 <th className="px-4 py-3 font-semibold">Desconto</th>
                 <th className="px-4 py-3 font-semibold">Score</th>
@@ -196,6 +214,14 @@ export default async function OffersPage({ searchParams }: OffersPageProps) {
                 <tr key={offer.id} className="border-b last:border-0">
                   <td className="max-w-[260px] px-4 py-3">
                     <div className="font-medium">{offer.title}</div>
+                    <a
+                      className="mt-1 inline-block text-xs text-[var(--primary)] underline-offset-2 hover:underline"
+                      href={offer.productUrl}
+                      rel="noreferrer"
+                      target="_blank"
+                    >
+                      abrir produto
+                    </a>
                     {offer.statusReason ? (
                       <div className="mt-1 text-xs text-[var(--muted-foreground)]">
                         {offer.statusReason}
@@ -206,35 +232,77 @@ export default async function OffersPage({ searchParams }: OffersPageProps) {
                   <td className="px-4 py-3">{offer.externalProductId}</td>
                   <td className="px-4 py-3">v{offer.version}</td>
                   <td className="px-4 py-3">{offer.category ?? "-"}</td>
+                  <td className="max-w-[240px] px-4 py-3">
+                    <div>
+                      {offer.bestSellerPosition === null
+                        ? "Sem posição"
+                        : `#${offer.bestSellerPosition} mais vendido`}
+                    </div>
+                    <div className="text-xs text-[var(--muted-foreground)]">
+                      categoria: {offer.sourceCategoryId ?? "-"}
+                    </div>
+                    <div className="text-xs text-[var(--muted-foreground)]">
+                      {offer.sourceHighlightType ?? "-"} ·{" "}
+                      {offer.resolutionStrategy ?? "-"}
+                    </div>
+                    {offer.sourceHighlightId ? (
+                      <div className="break-all text-xs text-[var(--muted-foreground)]">
+                        origem: {offer.sourceHighlightId}
+                      </div>
+                    ) : null}
+                  </td>
                   <td className="px-4 py-3">
                     <div>{formatCurrency(offer.currentPrice)}</div>
                     <div className="text-xs text-[var(--muted-foreground)]">
-                      {offer.originalPrice ? `De ${formatCurrency(offer.originalPrice)}` : "Preco original indisponivel"}
+                      {offer.originalPrice
+                        ? `De ${formatCurrency(offer.originalPrice)}`
+                        : "Preco original indisponivel"}
                     </div>
                   </td>
                   <td className="px-4 py-3">
-                    {offer.discountPercentage === null ? "-" : `${formatPercentage(offer.discountPercentage)}%`}
+                    {offer.discountPercentage === null
+                      ? "-"
+                      : `${formatPercentage(offer.discountPercentage)}%`}
                   </td>
                   <td className="px-4 py-3">
                     {offer.score ?? "-"}
                     {offer.scoreCompletenessPercentage !== null ? (
                       <div className="text-xs text-[var(--muted-foreground)]">
-                        {formatPercentage(offer.scoreCompletenessPercentage)}% completude
+                        {formatPercentage(offer.scoreCompletenessPercentage)}%
+                        completude
                       </div>
                     ) : null}
                   </td>
                   <td className="px-4 py-3">
                     {offer.affiliateEligibility}
                     <div className="text-xs text-[var(--muted-foreground)]">
-                      {offer.affiliateUrl ? "com link" : "sem link"} · {offer.trackingStrategy}
+                      {offer.affiliateUrl ? (
+                        <a
+                          className="text-[var(--primary)] underline-offset-2 hover:underline"
+                          href={offer.affiliateUrl}
+                          rel="noreferrer"
+                          target="_blank"
+                        >
+                          abrir link afiliado
+                        </a>
+                      ) : (
+                        "sem link afiliado"
+                      )}{" "}
+                      · {offer.trackingStrategy}
                     </div>
                   </td>
                   <td className="px-4 py-3">
-                    {stockStatuses.includes(offer.stockStatus) ? offer.stockStatus : "-"}
-                    <div className="text-xs text-[var(--muted-foreground)]">{offer.shippingStatus}</div>
+                    {stockStatuses.includes(offer.stockStatus)
+                      ? offer.stockStatus
+                      : "-"}
+                    <div className="text-xs text-[var(--muted-foreground)]">
+                      {offer.shippingStatus}
+                    </div>
                   </td>
                   <td className="px-4 py-3">{offer.couponCode ?? "-"}</td>
-                  <td className="px-4 py-3">{formatDateTime(offer.collectedAt)}</td>
+                  <td className="px-4 py-3">
+                    {formatDateTime(offer.collectedAt)}
+                  </td>
                   <td className="px-4 py-3">
                     <span className="rounded-md border bg-[var(--background)] px-2 py-1 text-xs font-medium">
                       {offer.status}

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   calculateValidatedDiscount,
+  sanitizeOperationalErrorMessage,
   validateMarketplaceAffiliateUrl,
   validateOfferFacts,
 } from "./index";
@@ -90,14 +91,32 @@ describe("calculateValidatedDiscount", () => {
   });
 });
 
+describe("sanitizeOperationalErrorMessage", () => {
+  it("preserves diagnostics while redacting credential-shaped values", () => {
+    const sanitized = sanitizeOperationalErrorMessage(
+      "HTTP 403 stage LINK_GENERATION\nCookie: session-id=mock-cookie; csrf=mock-csrf\nAuthorization: Bearer mock-token",
+    );
+
+    expect(sanitized).toContain("HTTP 403");
+    expect(sanitized).toContain("LINK_GENERATION");
+    expect(sanitized).not.toContain("mock-cookie");
+    expect(sanitized).not.toContain("mock-csrf");
+    expect(sanitized).not.toContain("mock-token");
+  });
+});
+
 describe("validateMarketplaceAffiliateUrl", () => {
-  it("accepts a valid HTTPS affiliate URL", () => {
-    expect(
-      validateMarketplaceAffiliateUrl(
-        "MERCADO_LIVRE",
-        "https://mercadolivre.com.br/affiliate/AbC123",
-      ),
-    ).toMatchObject({ ok: true });
+  it.each([
+    "https://meli.la/AbC123",
+    "https://www.meli.la/AbC123",
+    "https://mercadolivre.com.br/affiliate/AbC123",
+    "https://www.mercadolivre.com.br/affiliate/AbC123",
+    "https://mercadolibre.com/affiliate/AbC123",
+    "https://www.mercadolibre.com/affiliate/AbC123",
+  ])("accepts allowed Mercado Livre affiliate URL %s", (url) => {
+    expect(validateMarketplaceAffiliateUrl("MERCADO_LIVRE", url)).toMatchObject(
+      { ok: true },
+    );
   });
 
   it.each([
@@ -109,5 +128,30 @@ describe("validateMarketplaceAffiliateUrl", () => {
     expect(validateMarketplaceAffiliateUrl("MERCADO_LIVRE", url).ok).toBe(
       false,
     );
+  });
+
+  it.each([
+    "https://evilmercadolivre.com.br/affiliate",
+    "https://mercadolivre.com.br.evil.example/affiliate",
+    "https://evilmercadolibre.com/affiliate",
+    "https://mercadolibre.com.evil.example/affiliate",
+    "https://meli.la.evil.example/affiliate",
+    "https://example.com/affiliate",
+  ])("rejects non-allowlisted Mercado Livre host %s", (url) => {
+    expect(validateMarketplaceAffiliateUrl("MERCADO_LIVRE", url)).toMatchObject(
+      {
+        ok: false,
+        code: "HOST_NOT_ALLOWED",
+      },
+    );
+  });
+
+  it("preserves generic safe HTTPS validation for other marketplaces", () => {
+    expect(
+      validateMarketplaceAffiliateUrl(
+        "SHOPEE",
+        "https://affiliate.example/link",
+      ),
+    ).toMatchObject({ ok: true });
   });
 });

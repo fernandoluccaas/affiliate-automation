@@ -40,6 +40,7 @@ describe("redis abstraction", () => {
 
     expect(lock.acquired).toBe(true);
     expect(lock.mode).toBe("unavailable");
+    await expect(lock.extend(1000)).resolves.toBe(true);
     await expect(lock.release()).resolves.toBeUndefined();
 
     restoreEnv("UPSTASH_REDIS_REST_URL", previousUpstashUrl);

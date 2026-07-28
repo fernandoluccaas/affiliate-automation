@@ -221,6 +221,7 @@ function responseError(
   response: Response,
   stage: MercadoLivreAffiliateApiErrorStage,
   requestUrl: string,
+  attempts = 1,
 ) {
   const loginRedirect = isMercadoLivreAffiliateLoginRedirect(
     response,
@@ -237,6 +238,7 @@ function responseError(
       stage,
       status: response.status,
       code: loginRedirect ? "LOGIN_REDIRECT" : `HTTP_${response.status}`,
+      attempts,
       retryable: isTransientStatus(response.status),
       sessionExpired: authenticationFailure,
     },
@@ -365,6 +367,7 @@ export async function requestMercadoLivreAffiliateWithRetry(
         {
           stage,
           code: "NETWORK_OR_TIMEOUT",
+          attempts: attempt,
           retryable: true,
           sessionExpired: false,
         },
@@ -376,7 +379,7 @@ export async function requestMercadoLivreAffiliateWithRetry(
       continue;
     }
 
-    return response;
+    return { response, attempts: attempt };
   }
 
   throw new MercadoLivreAffiliateApiError(
@@ -415,7 +418,7 @@ export class MercadoLivreAffiliateSessionService {
     const cookie = normalizeMercadoLivreCookie(input.cookie);
     const csrfToken =
       extractMercadoLivreCsrfToken(cookie) ?? input.csrfToken ?? null;
-    const response = await requestMercadoLivreAffiliateWithRetry(
+    const { response, attempts } = await requestMercadoLivreAffiliateWithRetry(
       this.runtime,
       this.runtime.referer,
       {
@@ -427,7 +430,12 @@ export class MercadoLivreAffiliateSessionService {
     const updated = updatedSessionValues(cookie, csrfToken, response);
 
     if (!response.ok) {
-      throw responseError(response, "SESSION_WARMUP", this.runtime.referer);
+      throw responseError(
+        response,
+        "SESSION_WARMUP",
+        this.runtime.referer,
+        attempts,
+      );
     }
 
     return updated;
@@ -475,7 +483,7 @@ export class MercadoLivreAffiliateSessionService {
 
   private async fetchTags(session: WarmMercadoLivreAffiliateSessionResult) {
     const url = `${this.runtime.baseUrl}/tags`;
-    const response = await requestMercadoLivreAffiliateWithRetry(
+    const { response, attempts } = await requestMercadoLivreAffiliateWithRetry(
       this.runtime,
       url,
       {
@@ -486,7 +494,7 @@ export class MercadoLivreAffiliateSessionService {
     );
 
     if (!response.ok) {
-      throw responseError(response, "TAGS", url);
+      throw responseError(response, "TAGS", url, attempts);
     }
 
     const updated = updatedSessionValues(

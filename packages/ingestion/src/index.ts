@@ -6,7 +6,7 @@ import {
   validateOfferFacts,
   type ValidationFailureCode,
 } from "@affiliate/validation";
-import { prisma, type OfferStatus, type Prisma } from "@affiliate/database";
+import { prisma, Prisma, type OfferStatus } from "@affiliate/database";
 import {
   offerFormSchema as ingestionOfferFormSchema,
   type OfferFormValues,
@@ -16,6 +16,7 @@ export {
   formatOfferFormError,
   offerFormSchema,
   parseDecimalInput,
+  type AffiliateFailureMetadata,
   type OfferFormInput,
   type OfferFormValues,
 } from "./offer-form-schema";
@@ -204,6 +205,37 @@ function trackingStrategyForOffer(input: OfferFormValues) {
   );
 }
 
+function discoveryMetadataUpdate(input: OfferFormValues) {
+  return {
+    ...(input.sourceCategoryId !== undefined
+      ? { sourceCategoryId: input.sourceCategoryId }
+      : {}),
+    ...(input.bestSellerPosition !== undefined
+      ? { bestSellerPosition: input.bestSellerPosition }
+      : {}),
+    ...(input.sourceHighlightId !== undefined
+      ? { sourceHighlightId: input.sourceHighlightId }
+      : {}),
+    ...(input.sourceHighlightType !== undefined
+      ? { sourceHighlightType: input.sourceHighlightType }
+      : {}),
+    ...(input.resolutionStrategy !== undefined
+      ? { resolutionStrategy: input.resolutionStrategy }
+      : {}),
+  };
+}
+
+function affiliateFailureUpdate(input: OfferFormValues) {
+  if (input.affiliateFailure === undefined) {
+    return {};
+  }
+
+  return {
+    affiliateFailure:
+      input.affiliateFailure === null ? Prisma.DbNull : input.affiliateFailure,
+  };
+}
+
 export async function ingestOffer(
   rawInput: unknown,
   options: IngestOfferOptions = {},
@@ -343,7 +375,17 @@ export async function ingestOfferInTransaction(
   if (offer) {
     offerIsImmutable = await isHistoricalOffer(tx, offer.id, offer.status);
 
-    if (!offerIsImmutable) {
+    if (offerIsImmutable) {
+      const discoveryMetadata = discoveryMetadataUpdate(input);
+
+      if (Object.keys(discoveryMetadata).length > 0) {
+        offerUpdated = true;
+        offer = await tx.offer.update({
+          where: { id: offer.id },
+          data: discoveryMetadata,
+        });
+      }
+    } else {
       offerUpdated = true;
       offer = await tx.offer.update({
         where: { id: offer.id },
@@ -370,6 +412,8 @@ export async function ingestOfferInTransaction(
           ...(input.officialStoreId !== undefined
             ? { officialStoreId: input.officialStoreId }
             : {}),
+          ...discoveryMetadataUpdate(input),
+          ...affiliateFailureUpdate(input),
           trackingStrategy,
           minimumScoreApplied: options.minScore,
           freeShipping,
@@ -404,8 +448,18 @@ export async function ingestOfferInTransaction(
         affiliateUrl: input.affiliateUrl ?? null,
         affiliateLabel: input.affiliateLabel ?? null,
         affiliateEligibility: input.affiliateEligibility,
+        affiliateFailure:
+          input.affiliateFailure === undefined ||
+          input.affiliateFailure === null
+            ? Prisma.DbNull
+            : input.affiliateFailure,
         sellerId: input.sellerId ?? null,
         officialStoreId: input.officialStoreId ?? null,
+        sourceCategoryId: input.sourceCategoryId ?? null,
+        bestSellerPosition: input.bestSellerPosition ?? null,
+        sourceHighlightId: input.sourceHighlightId ?? null,
+        sourceHighlightType: input.sourceHighlightType ?? null,
+        resolutionStrategy: input.resolutionStrategy ?? null,
         trackingStrategy,
         minimumScoreApplied: options.minScore,
         originalPrice: input.originalPrice ?? null,

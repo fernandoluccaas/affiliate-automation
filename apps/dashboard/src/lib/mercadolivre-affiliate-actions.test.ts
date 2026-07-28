@@ -9,6 +9,7 @@ const saveAffiliateSessionMock = vi.fn();
 const testAffiliateSessionMock = vi.fn();
 const clearAffiliateSessionMock = vi.fn();
 const selectAffiliateTagMock = vi.fn();
+const generatePendingAffiliateLinksMock = vi.fn();
 
 vi.mock("server-only", () => ({}));
 
@@ -29,6 +30,10 @@ vi.mock("./mercadolivre-affiliate-session", () => ({
   testMercadoLivreAffiliateSession: testAffiliateSessionMock,
   clearMercadoLivreAffiliateSession: clearAffiliateSessionMock,
   selectMercadoLivreAffiliateTag: selectAffiliateTagMock,
+}));
+
+vi.mock("@affiliate/marketplace-discovery", () => ({
+  generatePendingMercadoLivreAffiliateLinks: generatePendingAffiliateLinksMock,
 }));
 
 function saveForm(overrides: Record<string, string> = {}) {
@@ -63,6 +68,7 @@ beforeEach(() => {
   testAffiliateSessionMock.mockReset();
   clearAffiliateSessionMock.mockReset();
   selectAffiliateTagMock.mockReset();
+  generatePendingAffiliateLinksMock.mockReset();
 
   requireSessionMock.mockResolvedValue({
     id: "operator-1",
@@ -89,6 +95,17 @@ beforeEach(() => {
     code: "TAG_SELECTED",
     status: "CONNECTED",
     affiliateTag: "tag-primary",
+  });
+  generatePendingAffiliateLinksMock.mockResolvedValue({
+    ok: true,
+    status: "SUCCEEDED",
+    selected: 25,
+    processed: 25,
+    linksGenerated: 25,
+    updated: 25,
+    ineligible: 0,
+    pending: 0,
+    failed: 0,
   });
 });
 
@@ -285,19 +302,88 @@ describe("Mercado Livre affiliate server actions", () => {
       expect(testAffiliateSessionMock).not.toHaveBeenCalled();
       expect(clearAffiliateSessionMock).not.toHaveBeenCalled();
       expect(selectAffiliateTagMock).not.toHaveBeenCalled();
+      expect(generatePendingAffiliateLinksMock).not.toHaveBeenCalled();
       expect(revalidatePathMock).not.toHaveBeenCalled();
     },
   );
 
-  it("uses the bounded placeholder redirect for a valid pending request", async () => {
+  it("runs bounded pending enrichment and reports success", async () => {
     const { generatePendingMercadoLivreAffiliateLinksAction } =
       await import("./mercadolivre-affiliate-actions");
 
     await expect(
       generatePendingMercadoLivreAffiliateLinksAction(limitForm("25")),
     ).rejects.toThrow(
-      "REDIRECT:/integracoes/mercado-livre?message=affiliate-links-unavailable",
+      "REDIRECT:/integracoes/mercado-livre?message=affiliate-links-generated",
     );
+    expect(generatePendingAffiliateLinksMock).toHaveBeenCalledWith({
+      limit: 25,
+      offerIds: [],
+      dryRun: false,
+    });
     expect(revalidatePathMock).toHaveBeenCalledTimes(4);
   });
+
+  it.each([
+    [
+      {
+        ok: true,
+        status: "SUCCEEDED",
+        selected: 0,
+        processed: 0,
+        linksGenerated: 0,
+        updated: 0,
+        ineligible: 0,
+        pending: 0,
+        failed: 0,
+      },
+      "affiliate-links-none",
+    ],
+    [
+      {
+        ok: true,
+        status: "PARTIAL",
+        selected: 4,
+        processed: 4,
+        linksGenerated: 2,
+        updated: 2,
+        ineligible: 1,
+        pending: 1,
+        failed: 0,
+      },
+      "affiliate-links-partial",
+    ],
+    [
+      {
+        ok: false,
+        status: "FAILED",
+        selected: 4,
+        processed: 0,
+        linksGenerated: 0,
+        updated: 0,
+        ineligible: 0,
+        pending: 4,
+        failed: 1,
+        errorCode: "AFFILIATE_ENRICHMENT_FAILED",
+        errorMessage: "internal detail",
+      },
+      "affiliate-session-error",
+    ],
+  ])(
+    "maps pending enrichment outcomes to fixed message %s",
+    async (result, message) => {
+      const { generatePendingMercadoLivreAffiliateLinksAction } =
+        await import("./mercadolivre-affiliate-actions");
+      generatePendingAffiliateLinksMock.mockResolvedValueOnce(result);
+
+      await expect(
+        generatePendingMercadoLivreAffiliateLinksAction(limitForm("4")),
+      ).rejects.toThrow(
+        `REDIRECT:/integracoes/mercado-livre?message=${message}`,
+      );
+      expect(redirectMock.mock.calls.at(-1)?.[0]).not.toContain(
+        "internal detail",
+      );
+    },
+  );
 });

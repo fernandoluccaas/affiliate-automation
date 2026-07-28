@@ -15,6 +15,7 @@ export type LockHandle = {
   token: string;
   acquired: boolean;
   mode: RedisMode;
+  extend(ttlMs: number): Promise<boolean>;
   release(): Promise<void>;
 };
 
@@ -97,7 +98,11 @@ async function redisUrlCommand(urlValue: string, args: Array<string | number>) {
 }
 
 function redisOk(reply: string) {
-  return reply.startsWith("+OK") || reply.startsWith("+PONG") || reply.startsWith(":1");
+  return (
+    reply.startsWith("+OK") ||
+    reply.startsWith("+PONG") ||
+    reply.startsWith(":1")
+  );
 }
 
 export async function getRedisHealth(): Promise<RedisHealth> {
@@ -117,7 +122,11 @@ export async function getRedisHealth(): Promise<RedisHealth> {
     const reply = await redisUrlCommand(config.url, ["PING"]);
     return redisOk(reply)
       ? { mode: "redis-url", status: "ok" }
-      : { mode: "redis-url", status: "error", message: "Unexpected Redis ping reply." };
+      : {
+          mode: "redis-url",
+          status: "error",
+          message: "Unexpected Redis ping reply.",
+        };
   } catch (error) {
     return {
       mode: config.mode,
@@ -127,7 +136,10 @@ export async function getRedisHealth(): Promise<RedisHealth> {
   }
 }
 
-export async function acquireLock(key: string, ttlMs: number): Promise<LockHandle> {
+export async function acquireLock(
+  key: string,
+  ttlMs: number,
+): Promise<LockHandle> {
   const config = getRedisConfig();
   const token = randomUUID();
 
@@ -137,6 +149,7 @@ export async function acquireLock(key: string, ttlMs: number): Promise<LockHandl
       token,
       acquired: true,
       mode: "unavailable",
+      extend: async () => true,
       release: async () => undefined,
     };
   }
@@ -150,6 +163,15 @@ export async function acquireLock(key: string, ttlMs: number): Promise<LockHandl
       token,
       acquired: result === "OK",
       mode: "upstash",
+      extend: async (nextTtlMs) => {
+        const extended = await redis.eval(
+          "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('pexpire', KEYS[1], ARGV[2]) else return 0 end",
+          [key],
+          [token, nextTtlMs],
+        );
+
+        return Number(extended) === 1;
+      },
       release: async () => {
         const current = await redis.get<string>(key);
 
@@ -160,13 +182,32 @@ export async function acquireLock(key: string, ttlMs: number): Promise<LockHandl
     };
   }
 
-  const result = await redisUrlCommand(config.url, ["SET", key, token, "NX", "PX", ttlMs]);
+  const result = await redisUrlCommand(config.url, [
+    "SET",
+    key,
+    token,
+    "NX",
+    "PX",
+    ttlMs,
+  ]);
 
   return {
     key,
     token,
     acquired: result.startsWith("+OK"),
     mode: "redis-url",
+    extend: async (nextTtlMs) => {
+      const reply = await redisUrlCommand(config.url, [
+        "EVAL",
+        "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('pexpire', KEYS[1], ARGV[2]) else return 0 end",
+        1,
+        key,
+        token,
+        nextTtlMs,
+      ]);
+
+      return reply.startsWith(":1");
+    },
     release: async () => {
       await redisUrlCommand(config.url, [
         "EVAL",

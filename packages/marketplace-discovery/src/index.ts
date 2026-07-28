@@ -1,9 +1,18 @@
 import { prisma, type MarketplaceAccount } from "@affiliate/database";
 import { ingestOffer, type IngestOfferResult } from "@affiliate/ingestion";
 import {
+  MercadoLivreAffiliateApiError,
+  MercadoLivreAffiliateLinkService,
   MercadoLivreApiError,
   MercadoLivreInvalidResponseError,
   createMercadoLivreConnector,
+  decryptSecret,
+  encryptSecret,
+  normalizeMercadoLivreCookie,
+  parseMercadoLivreCookie,
+  sanitizeMercadoLivreAffiliateError,
+  type CreateMercadoLivreAffiliateLinkInput,
+  type CreateMercadoLivreAffiliateLinkResult,
   type MarketplaceConnector,
   type MarketplaceOfferCandidate,
   type MercadoLivreHighlightCandidate,
@@ -15,11 +24,15 @@ import {
   type MercadoLivreResolvedHighlightCandidate,
   type MercadoLivreUserProduct,
 } from "@affiliate/marketplace-connectors";
-import { acquireLock } from "@affiliate/redis";
+import { acquireLock, type LockHandle } from "@affiliate/redis";
 
 export type { MercadoLivreProductResolutionDiagnostics } from "@affiliate/marketplace-connectors";
 
 const DISCOVERY_LOCK_TTL_MS = 10 * 60 * 1000;
+const AFFILIATE_BATCH_CONCURRENCY = 4;
+const MAX_PENDING_AFFILIATE_LINKS_PER_RUN = 100;
+const AFFILIATE_OPERATION_LOCK_PREFIX =
+  "mercado-livre:affiliate-link-operations";
 
 export type MercadoLivreCategorySkipReason =
   | "NO_HIGHLIGHTS_FOR_CATEGORY"
@@ -54,7 +67,16 @@ export type MercadoLivreDiscoveryMetrics = {
   newProducts: number;
   newOfferVersions: number;
   existingOffers: number;
+  updatedOffers: number;
+  readyToPublish: number;
   readyForAffiliateLink: number;
+  affiliateLinkAttempts: number;
+  affiliateLinksGenerated: number;
+  affiliateLinksReused: number;
+  affiliateIneligible: number;
+  affiliatePending: number;
+  affiliateSkippedAfterSessionExpired: number;
+  ingestionFailed: number;
   rejected: number;
   errors: number;
   candidateResolutionSkipReasons: Record<string, number>;
@@ -63,6 +85,7 @@ export type MercadoLivreDiscoveryMetrics = {
 export type MercadoLivreDiscoveryResult = {
   ok: boolean;
   runId?: string;
+  importJobId?: string;
   status: "SUCCEEDED" | "PARTIAL" | "FAILED" | "SKIPPED";
   metrics: MercadoLivreDiscoveryMetrics;
   errorCode?: string;
@@ -76,9 +99,172 @@ export type MercadoLivreDiscoveryOptions = {
 type DiscoveryDependencies = {
   database: typeof prisma;
   createConnector: () => Promise<MarketplaceConnector>;
+  affiliateLinkService: Pick<MercadoLivreAffiliateLinkService, "create">;
+  affiliateConcurrency: number;
+  decryptCredential: typeof decryptSecret;
+  encryptCredential: typeof encryptSecret;
   ingest: typeof ingestOffer;
   lock: typeof acquireLock;
 };
+
+export type MercadoLivreDiscoveredCandidate = MarketplaceOfferCandidate & {
+  sourceCategoryId?: string;
+  bestSellerPosition?: number;
+  affiliateFailure?: MercadoLivreAffiliateFailure | null;
+};
+
+export type MercadoLivreAffiliateFailure = {
+  stage: "SESSION_WARMUP" | "TAGS" | "LINK_GENERATION" | "RESPONSE_PARSING";
+  status?: number;
+  code?: string;
+  message: string;
+  retryable: boolean;
+  sessionExpired: boolean;
+  productIneligible: boolean;
+  attempts: number;
+};
+
+type AffiliateLinkCreator = (
+  input: CreateMercadoLivreAffiliateLinkInput,
+) => Promise<CreateMercadoLivreAffiliateLinkResult>;
+
+type AffiliateSessionCredentials =
+  | {
+      ready: true;
+      affiliateTag: string;
+      cookie: string;
+      csrfToken: string | null;
+      cookieChanged: boolean;
+      csrfTokenChanged: boolean;
+      expectedUpdatedAt: Date;
+    }
+  | {
+      ready: false;
+      failure: MercadoLivreAffiliateFailure;
+    };
+
+type AffiliateEnrichmentResult = {
+  candidate: MercadoLivreDiscoveredCandidate;
+  affiliateUrl: string | null;
+  affiliateEligibility: "ELIGIBLE" | "INELIGIBLE" | "UNKNOWN";
+  affiliateLabel: string | null;
+  affiliateFailure: MercadoLivreAffiliateFailure | null;
+  linkAttempted: boolean;
+  linkGenerated: boolean;
+  linkReused: boolean;
+};
+
+type CandidateResolutionObserver = {
+  onResult?: (
+    result: MercadoLivreHighlightResolutionResult,
+  ) => Promise<void> | void;
+};
+
+export type GeneratePendingMercadoLivreAffiliateLinksInput = {
+  limit?: number;
+  offerIds?: string[];
+  dryRun?: boolean;
+};
+
+export type GeneratePendingMercadoLivreAffiliateLinksResult = {
+  ok: boolean;
+  status: "SUCCEEDED" | "PARTIAL" | "FAILED" | "DRY_RUN";
+  importJobId?: string;
+  selected: number;
+  processed: number;
+  linksGenerated: number;
+  updated: number;
+  ineligible: number;
+  pending: number;
+  failed: number;
+  errorCode?: string;
+  errorMessage?: string;
+};
+
+function affiliateBatchConcurrency(value: string | number | undefined) {
+  const parsed = Number(value ?? AFFILIATE_BATCH_CONCURRENCY);
+
+  if (!Number.isFinite(parsed)) {
+    return AFFILIATE_BATCH_CONCURRENCY;
+  }
+
+  return Math.min(AFFILIATE_BATCH_CONCURRENCY, Math.max(1, Math.floor(parsed)));
+}
+
+function discoveryDependencies(
+  dependencies: Partial<DiscoveryDependencies> = {},
+): DiscoveryDependencies {
+  return {
+    database: dependencies.database ?? prisma,
+    createConnector:
+      dependencies.createConnector ?? createMercadoLivreConnector,
+    affiliateLinkService:
+      dependencies.affiliateLinkService ??
+      new MercadoLivreAffiliateLinkService(),
+    affiliateConcurrency: affiliateBatchConcurrency(
+      dependencies.affiliateConcurrency ??
+        process.env.MERCADOLIVRE_AFFILIATE_MAX_CONCURRENCY,
+    ),
+    decryptCredential: dependencies.decryptCredential ?? decryptSecret,
+    encryptCredential: dependencies.encryptCredential ?? encryptSecret,
+    ingest: dependencies.ingest ?? ingestOffer,
+    lock: dependencies.lock ?? acquireLock,
+  };
+}
+
+function affiliateOperationLockKey(marketplaceAccountId: string) {
+  return `${AFFILIATE_OPERATION_LOCK_PREFIX}:${marketplaceAccountId}`;
+}
+
+function startLockHeartbeat(lock: LockHandle, ttlMs: number) {
+  if (lock.mode === "unavailable") {
+    return () => undefined;
+  }
+
+  const interval = setInterval(
+    () => {
+      void lock.extend(ttlMs).catch(() => false);
+    },
+    Math.max(1_000, Math.floor(ttlMs / 3)),
+  );
+  interval.unref();
+
+  return () => clearInterval(interval);
+}
+
+function mergeAffiliateCookieSnapshots(
+  currentCookie: string,
+  cookieAtRequestStart: string,
+  refreshedCookie: string,
+) {
+  const current = parseMercadoLivreCookie(
+    normalizeMercadoLivreCookie(currentCookie),
+  );
+  const before = parseMercadoLivreCookie(
+    normalizeMercadoLivreCookie(cookieAtRequestStart),
+  );
+  const refreshed = parseMercadoLivreCookie(
+    normalizeMercadoLivreCookie(refreshedCookie),
+  );
+
+  for (const [name, value] of refreshed) {
+    if (before.get(name) !== value) {
+      current.set(name, value);
+    }
+  }
+
+  for (const name of before.keys()) {
+    if (!refreshed.has(name)) {
+      current.delete(name);
+    }
+  }
+
+  return normalizeMercadoLivreCookie(
+    [...current.entries()]
+      .map(([name, value]) => `${name}=${value}`)
+      .join("; "),
+  );
+}
 
 export function createMercadoLivreDiscoveryMetrics(): MercadoLivreDiscoveryMetrics {
   return {
@@ -108,7 +294,16 @@ export function createMercadoLivreDiscoveryMetrics(): MercadoLivreDiscoveryMetri
     newProducts: 0,
     newOfferVersions: 0,
     existingOffers: 0,
+    updatedOffers: 0,
+    readyToPublish: 0,
     readyForAffiliateLink: 0,
+    affiliateLinkAttempts: 0,
+    affiliateLinksGenerated: 0,
+    affiliateLinksReused: 0,
+    affiliateIneligible: 0,
+    affiliatePending: 0,
+    affiliateSkippedAfterSessionExpired: 0,
+    ingestionFailed: 0,
     rejected: 0,
     errors: 0,
     candidateResolutionSkipReasons: {},
@@ -121,7 +316,7 @@ function jsonStringArray(value: unknown) {
     : [];
 }
 
-function candidateInput(candidate: MarketplaceOfferCandidate) {
+function candidateInput(candidate: MercadoLivreDiscoveredCandidate) {
   return {
     marketplace: candidate.marketplace,
     externalProductId: candidate.externalProductId,
@@ -133,6 +328,12 @@ function candidateInput(candidate: MarketplaceOfferCandidate) {
     affiliateUrl: candidate.affiliateUrl ?? undefined,
     affiliateLabel: candidate.affiliateLabel ?? undefined,
     affiliateEligibility: candidate.affiliateEligibility ?? "UNKNOWN",
+    affiliateFailure: candidate.affiliateFailure,
+    sourceCategoryId: candidate.sourceCategoryId ?? undefined,
+    bestSellerPosition: candidate.bestSellerPosition ?? undefined,
+    sourceHighlightId: candidate.sourceHighlightId ?? undefined,
+    sourceHighlightType: candidate.sourceHighlightType ?? undefined,
+    resolutionStrategy: candidate.resolutionStrategy ?? undefined,
     sellerId: candidate.sellerId ?? undefined,
     officialStoreId: candidate.officialStoreId ?? undefined,
     trackingStrategy: candidate.trackingStrategy ?? "DIRECT_AFFILIATE_LINK",
@@ -146,6 +347,422 @@ function candidateInput(candidate: MarketplaceOfferCandidate) {
     shippingStatus: candidate.shippingStatus ?? "UNKNOWN",
     stockStatus: candidate.stockStatus ?? "UNKNOWN",
   };
+}
+
+function fixedAffiliateFailure(
+  code: string,
+  message: string,
+  options: Partial<
+    Pick<
+      MercadoLivreAffiliateFailure,
+      "retryable" | "sessionExpired" | "productIneligible" | "attempts"
+    >
+  > = {},
+): MercadoLivreAffiliateFailure {
+  return {
+    stage: "LINK_GENERATION",
+    code,
+    message,
+    retryable: options.retryable ?? false,
+    sessionExpired: options.sessionExpired ?? false,
+    productIneligible: options.productIneligible ?? false,
+    attempts: options.attempts ?? 0,
+  };
+}
+
+export function classifyMercadoLivreAffiliateError(
+  error: unknown,
+  secrets: readonly string[] = [],
+  attempts = 1,
+): MercadoLivreAffiliateFailure {
+  if (error instanceof MercadoLivreAffiliateApiError) {
+    const effectiveAttempts = error.attempts ?? attempts;
+    const code =
+      error.code === undefined
+        ? undefined
+        : sanitizeMercadoLivreAffiliateError(String(error.code), secrets).slice(
+            0,
+            100,
+          );
+
+    return {
+      stage: error.stage,
+      ...(error.status !== undefined ? { status: error.status } : {}),
+      ...(code ? { code } : {}),
+      message: sanitizeMercadoLivreAffiliateError(error, secrets),
+      retryable: error.retryable,
+      sessionExpired: error.sessionExpired,
+      productIneligible: error.productIneligible,
+      attempts: effectiveAttempts,
+    };
+  }
+
+  return {
+    stage: "LINK_GENERATION",
+    code: "UNKNOWN_AFFILIATE_ERROR",
+    message: "Mercado Livre affiliate link generation failed.",
+    retryable: true,
+    sessionExpired: false,
+    productIneligible: false,
+    attempts,
+  };
+}
+
+async function mapWithConcurrency<T, R>(
+  values: readonly T[],
+  concurrency: number,
+  mapper: (value: T, index: number) => Promise<R>,
+) {
+  if (values.length === 0) {
+    return [] as R[];
+  }
+
+  const results = new Array<R>(values.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(
+    values.length,
+    Math.max(1, Math.floor(concurrency)),
+  );
+
+  async function worker() {
+    while (true) {
+      const index = nextIndex;
+      nextIndex += 1;
+
+      if (index >= values.length) {
+        return;
+      }
+
+      results[index] = await mapper(values[index] as T, index);
+    }
+  }
+
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return results;
+}
+
+async function loadAffiliateSessionCredentials(
+  dependencies: DiscoveryDependencies,
+  marketplaceAccountId: string,
+  now: Date,
+  metrics: MercadoLivreDiscoveryMetrics,
+): Promise<AffiliateSessionCredentials> {
+  const session =
+    await dependencies.database.mercadoLivreAffiliateSession.findUnique({
+      where: { marketplaceAccountId },
+      select: {
+        status: true,
+        affiliateTag: true,
+        cookieEncrypted: true,
+        csrfTokenEncrypted: true,
+        updatedAt: true,
+      },
+    });
+
+  if (!session) {
+    return {
+      ready: false,
+      failure: fixedAffiliateFailure(
+        "AFFILIATE_SESSION_NOT_CONFIGURED",
+        "Mercado Livre affiliate session is not configured.",
+      ),
+    };
+  }
+
+  if (session.status === "EXPIRED") {
+    return {
+      ready: false,
+      failure: fixedAffiliateFailure(
+        "AFFILIATE_SESSION_EXPIRED",
+        "Mercado Livre affiliate session is expired.",
+        { sessionExpired: true },
+      ),
+    };
+  }
+
+  if (session.status !== "CONNECTED" || !session.cookieEncrypted) {
+    return {
+      ready: false,
+      failure: fixedAffiliateFailure(
+        "AFFILIATE_SESSION_UNAVAILABLE",
+        "Mercado Livre affiliate session is not ready.",
+      ),
+    };
+  }
+
+  const affiliateTag = session.affiliateTag?.trim();
+
+  if (!affiliateTag) {
+    return {
+      ready: false,
+      failure: fixedAffiliateFailure(
+        "AFFILIATE_TAG_REQUIRED",
+        "Mercado Livre affiliate tag is not configured.",
+      ),
+    };
+  }
+
+  try {
+    return {
+      ready: true,
+      affiliateTag,
+      cookie: dependencies.decryptCredential(session.cookieEncrypted),
+      csrfToken: session.csrfTokenEncrypted
+        ? dependencies.decryptCredential(session.csrfTokenEncrypted)
+        : null,
+      cookieChanged: false,
+      csrfTokenChanged: false,
+      expectedUpdatedAt: session.updatedAt,
+    };
+  } catch {
+    const message = "Stored Mercado Livre affiliate credential is invalid.";
+
+    try {
+      await dependencies.database.mercadoLivreAffiliateSession.updateMany({
+        where: {
+          marketplaceAccountId,
+          updatedAt: session.updatedAt,
+        },
+        data: {
+          status: "ERROR",
+          lastErrorAt: now,
+          lastError: message,
+        },
+      });
+    } catch {
+      metrics.errors += 1;
+    }
+
+    return {
+      ready: false,
+      failure: fixedAffiliateFailure("AFFILIATE_CREDENTIAL_INVALID", message),
+    };
+  }
+}
+
+function pendingAfterExpiredFailure() {
+  return fixedAffiliateFailure(
+    "AFFILIATE_SESSION_EXPIRED_IN_BATCH",
+    "Affiliate link generation was skipped because the session expired during this batch.",
+    { sessionExpired: true },
+  );
+}
+
+async function persistAffiliateSessionAfterBatch(
+  dependencies: DiscoveryDependencies,
+  marketplaceAccountId: string,
+  session: AffiliateSessionCredentials,
+  results: readonly AffiliateEnrichmentResult[],
+  now: Date,
+  metrics: MercadoLivreDiscoveryMetrics,
+) {
+  if (!session.ready) {
+    return;
+  }
+
+  const attempted = results.some((result) => result.linkAttempted);
+
+  if (!attempted) {
+    return;
+  }
+
+  const expiredFailure = results.find(
+    (result) =>
+      result.linkAttempted && result.affiliateFailure?.sessionExpired === true,
+  )?.affiliateFailure;
+
+  try {
+    await dependencies.database.mercadoLivreAffiliateSession.updateMany({
+      where: {
+        marketplaceAccountId,
+        updatedAt: session.expectedUpdatedAt,
+      },
+      data: {
+        ...(session.cookieChanged
+          ? {
+              cookieEncrypted: dependencies.encryptCredential(session.cookie),
+              lastCookieUpdateAt: now,
+            }
+          : {}),
+        ...(session.csrfTokenChanged
+          ? {
+              csrfTokenEncrypted: session.csrfToken
+                ? dependencies.encryptCredential(session.csrfToken)
+                : null,
+            }
+          : {}),
+        status: expiredFailure ? "EXPIRED" : "CONNECTED",
+        lastValidatedAt: now,
+        lastErrorAt: expiredFailure ? now : null,
+        lastError: expiredFailure?.message ?? null,
+      },
+    });
+  } catch {
+    metrics.errors += 1;
+  }
+}
+
+async function enrichCandidatesWithAffiliateLinks(
+  candidates: readonly MercadoLivreDiscoveredCandidate[],
+  dependencies: DiscoveryDependencies,
+  marketplaceAccountId: string,
+  existingAffiliateLinks: ReadonlyMap<
+    string,
+    { affiliateUrl: string; affiliateLabel: string | null }
+  >,
+  metrics: MercadoLivreDiscoveryMetrics,
+  now: Date,
+) {
+  const session = await loadAffiliateSessionCredentials(
+    dependencies,
+    marketplaceAccountId,
+    now,
+    metrics,
+  );
+  let stopNewLinkAttempts = false;
+  const createLink: AffiliateLinkCreator = (input) =>
+    dependencies.affiliateLinkService.create(input);
+
+  const results = await mapWithConcurrency(
+    candidates,
+    dependencies.affiliateConcurrency,
+    async (candidate): Promise<AffiliateEnrichmentResult> => {
+      const existing = existingAffiliateLinks.get(candidate.externalProductId);
+
+      if (existing) {
+        metrics.affiliateLinksReused += 1;
+        return {
+          candidate,
+          affiliateUrl: existing.affiliateUrl,
+          affiliateEligibility: "ELIGIBLE",
+          affiliateLabel: existing.affiliateLabel,
+          affiliateFailure: null,
+          linkAttempted: false,
+          linkGenerated: false,
+          linkReused: true,
+        };
+      }
+
+      if (!session.ready) {
+        metrics.affiliatePending += 1;
+        metrics.errors += 1;
+        return {
+          candidate,
+          affiliateUrl: null,
+          affiliateEligibility: "UNKNOWN",
+          affiliateLabel: null,
+          affiliateFailure: session.failure,
+          linkAttempted: false,
+          linkGenerated: false,
+          linkReused: false,
+        };
+      }
+
+      if (stopNewLinkAttempts) {
+        metrics.affiliatePending += 1;
+        metrics.affiliateSkippedAfterSessionExpired += 1;
+        metrics.errors += 1;
+        return {
+          candidate,
+          affiliateUrl: null,
+          affiliateEligibility: "UNKNOWN",
+          affiliateLabel: session.affiliateTag,
+          affiliateFailure: pendingAfterExpiredFailure(),
+          linkAttempted: false,
+          linkGenerated: false,
+          linkReused: false,
+        };
+      }
+
+      metrics.affiliateLinkAttempts += 1;
+      const cookieAtStart = session.cookie;
+      const csrfTokenAtStart = session.csrfToken;
+
+      try {
+        const result = await createLink({
+          productUrl: candidate.productUrl,
+          affiliateTag: session.affiliateTag,
+          cookie: cookieAtStart,
+          csrfToken: csrfTokenAtStart,
+        });
+
+        if (result.refreshedCookie) {
+          session.cookie = mergeAffiliateCookieSnapshots(
+            session.cookie,
+            cookieAtStart,
+            result.refreshedCookie,
+          );
+          session.cookieChanged = true;
+        }
+
+        if ("refreshedCsrfToken" in result) {
+          session.csrfToken = result.refreshedCsrfToken ?? null;
+          session.csrfTokenChanged = true;
+        }
+
+        metrics.affiliateLinksGenerated += 1;
+        return {
+          candidate,
+          affiliateUrl: result.affiliateUrl,
+          affiliateEligibility: "ELIGIBLE",
+          affiliateLabel: session.affiliateTag,
+          affiliateFailure: null,
+          linkAttempted: true,
+          linkGenerated: true,
+          linkReused: false,
+        };
+      } catch (error) {
+        const failure = classifyMercadoLivreAffiliateError(
+          error,
+          [cookieAtStart, csrfTokenAtStart ?? ""],
+          error instanceof MercadoLivreAffiliateApiError ? error.attempts : 1,
+        );
+
+        metrics.errors += 1;
+
+        if (failure.productIneligible) {
+          metrics.affiliateIneligible += 1;
+          return {
+            candidate,
+            affiliateUrl: null,
+            affiliateEligibility: "INELIGIBLE",
+            affiliateLabel: session.affiliateTag,
+            affiliateFailure: failure,
+            linkAttempted: true,
+            linkGenerated: false,
+            linkReused: false,
+          };
+        }
+
+        if (failure.sessionExpired) {
+          stopNewLinkAttempts = true;
+        }
+
+        metrics.affiliatePending += 1;
+        return {
+          candidate,
+          affiliateUrl: null,
+          affiliateEligibility: "UNKNOWN",
+          affiliateLabel: session.affiliateTag,
+          affiliateFailure: failure,
+          linkAttempted: true,
+          linkGenerated: false,
+          linkReused: false,
+        };
+      }
+    },
+  );
+
+  await persistAffiliateSessionAfterBatch(
+    dependencies,
+    marketplaceAccountId,
+    session,
+    results,
+    now,
+    metrics,
+  );
+
+  return results;
 }
 
 export function calculateCandidateDiscount(
@@ -597,7 +1214,8 @@ export async function discoverCandidatesFromLeafCategories(
   categoryIds: string[],
   maxCandidatesPerCategory: number,
   metrics: MercadoLivreDiscoveryMetrics,
-) {
+  observer: CandidateResolutionObserver = {},
+): Promise<MercadoLivreDiscoveredCandidate[]> {
   const resolvedCandidates = new Map<
     string,
     MercadoLivreResolvedHighlightCandidate
@@ -654,6 +1272,7 @@ export async function discoverCandidatesFromLeafCategories(
       countHighlight(metrics, item);
       const result = await resolver.resolveCandidate(item);
       recordProductDiagnostics(metrics, result.diagnostics);
+      await observer.onResult?.(result);
 
       if (!result.ok) {
         recordCandidateSkip(metrics, result.reason);
@@ -690,6 +1309,8 @@ export async function discoverCandidatesFromLeafCategories(
       ...item,
       sourceHighlightId: source.sourceHighlightId,
       sourceHighlightType: source.sourceHighlightType,
+      sourceCategoryId: source.categoryId,
+      bestSellerPosition: source.position,
       ...(source.resolvedProductId
         ? { resolvedProductId: source.resolvedProductId }
         : {}),
@@ -708,9 +1329,7 @@ function alertCodeForMercadoLivreError(error: unknown) {
 }
 
 function sanitizedError(error: unknown) {
-  const message =
-    error instanceof Error ? error.message : "Mercado Livre discovery failed.";
-  return message.replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]").slice(0, 500);
+  return sanitizeMercadoLivreAffiliateError(error).slice(0, 500);
 }
 
 function skippedResult(
@@ -734,25 +1353,273 @@ function recordIngestMetrics(
   if (result.productCreated) metrics.newProducts += 1;
   if (result.offerCreated) metrics.newOfferVersions += 1;
   if (result.offerReused) metrics.existingOffers += 1;
+  if (
+    !result.productCreated &&
+    (result.offerCreated || result.offerReused || result.offerUpdated)
+  ) {
+    metrics.updatedOffers += 1;
+  }
 
-  if (result.status === "READY_FOR_AFFILIATE_LINK") {
+  if (result.status === "READY_TO_PUBLISH") {
+    metrics.readyToPublish += 1;
+  } else if (result.status === "READY_FOR_AFFILIATE_LINK") {
     metrics.readyForAffiliateLink += 1;
   } else if (result.status.startsWith("REJECTED")) {
     metrics.rejected += 1;
   }
 }
 
+function candidatePassesDiscoveryPolicies(
+  candidate: MercadoLivreDiscoveredCandidate,
+  config: {
+    minimumPrice: unknown;
+    maximumPrice: unknown;
+    minimumDiscountPercentage:
+      number | string | { toString(): string } | null | undefined;
+  },
+) {
+  const minimumPrice = Number(config.minimumPrice ?? 0);
+  const maximumPrice = Number(config.maximumPrice ?? 0);
+
+  if (minimumPrice > 0 && candidate.currentPrice < minimumPrice) {
+    return false;
+  }
+
+  if (maximumPrice > 0 && candidate.currentPrice > maximumPrice) {
+    return false;
+  }
+
+  const discount = calculateCandidateDiscount(
+    candidate.originalPrice,
+    candidate.currentPrice,
+  );
+
+  return passesMinimumDiscount(config.minimumDiscountPercentage, discount);
+}
+
+async function existingAffiliateLinksForCandidates(
+  database: typeof prisma,
+  candidates: readonly MercadoLivreDiscoveredCandidate[],
+) {
+  if (candidates.length === 0) {
+    return new Map<
+      string,
+      { affiliateUrl: string; affiliateLabel: string | null }
+    >();
+  }
+
+  const offers = await database.offer.findMany({
+    where: {
+      marketplace: "MERCADO_LIVRE",
+      externalProductId: {
+        in: candidates.map((candidate) => candidate.externalProductId),
+      },
+      affiliateUrl: { not: null },
+      affiliateEligibility: { not: "INELIGIBLE" },
+    },
+    orderBy: { collectedAt: "desc" },
+    distinct: ["externalProductId"],
+    select: {
+      externalProductId: true,
+      affiliateUrl: true,
+      affiliateLabel: true,
+    },
+  });
+  const links = new Map<
+    string,
+    { affiliateUrl: string; affiliateLabel: string | null }
+  >();
+
+  for (const offer of offers) {
+    if (offer.affiliateUrl && !links.has(offer.externalProductId)) {
+      links.set(offer.externalProductId, {
+        affiliateUrl: offer.affiliateUrl,
+        affiliateLabel: offer.affiliateLabel,
+      });
+    }
+  }
+
+  return links;
+}
+
+async function retireReplacedPendingOfferVersions(
+  database: typeof prisma,
+  result: IngestOfferResult,
+) {
+  if (!result.ok || !result.offerId || !result.productId) {
+    return;
+  }
+
+  await database.offer.updateMany({
+    where: {
+      productId: result.productId,
+      id: { not: result.offerId },
+      status: "READY_FOR_AFFILIATE_LINK",
+      affiliateUrl: null,
+    },
+    data: {
+      status: "REJECTED_DUPLICATE",
+      statusReason:
+        "Substituida por versao validada com link oficial de afiliado.",
+    },
+  });
+}
+
+function itemSourceData(candidate: MercadoLivreDiscoveredCandidate) {
+  return {
+    sourceId: candidate.sourceHighlightId ?? candidate.externalProductId,
+    sourceType: candidate.sourceHighlightType ?? "ITEM",
+    bestSellerPosition: candidate.bestSellerPosition,
+    externalItemId: candidate.externalProductId,
+  };
+}
+
+async function persistIngestionResultItem(
+  database: typeof prisma,
+  importJobId: string,
+  enrichment: AffiliateEnrichmentResult,
+  result: IngestOfferResult,
+  metrics: MercadoLivreDiscoveryMetrics,
+) {
+  const source = itemSourceData(enrichment.candidate);
+  const failure = enrichment.affiliateFailure;
+  let stage: "AFFILIATE_LINK" | "INGESTION" = "INGESTION";
+  let status: "SUCCEEDED" | "PENDING_AFFILIATE_LINK" | "INELIGIBLE" | "FAILED" =
+    "SUCCEEDED";
+  let errorCode: string | undefined;
+  let errorMessage: string | undefined;
+
+  if (failure?.productIneligible) {
+    stage = "AFFILIATE_LINK";
+    status = "INELIGIBLE";
+    errorCode = failure.code ?? "PRODUCT_INELIGIBLE";
+    errorMessage = failure.message;
+  } else if (failure) {
+    stage = "AFFILIATE_LINK";
+    status = "PENDING_AFFILIATE_LINK";
+    errorCode = failure.code ?? "AFFILIATE_LINK_PENDING";
+    errorMessage = failure.message;
+  } else if (result.status.startsWith("REJECTED")) {
+    status = "FAILED";
+    errorCode = result.status;
+    errorMessage = result.statusReason;
+    metrics.ingestionFailed += 1;
+    metrics.errors += 1;
+  }
+
+  await database.importJobItem.create({
+    data: {
+      importJobId,
+      sourceId: source.sourceId,
+      sourceType: source.sourceType,
+      ...(source.bestSellerPosition !== undefined
+        ? { position: source.bestSellerPosition }
+        : {}),
+      externalItemId: source.externalItemId,
+      ...(result.offerId ? { offerId: result.offerId } : {}),
+      stage,
+      status,
+      attempts: failure?.attempts ?? (enrichment.linkAttempted ? 1 : 0),
+      ...(errorCode ? { errorCode } : {}),
+      ...(errorMessage ? { errorMessage } : {}),
+      metadata: {
+        resolutionStrategy: enrichment.candidate.resolutionStrategy ?? null,
+        linkGenerated: enrichment.linkGenerated,
+        linkReused: enrichment.linkReused,
+        ingestionStatus: result.status,
+      },
+    },
+  });
+}
+
+async function ingestAffiliateEnrichments(
+  enrichments: readonly AffiliateEnrichmentResult[],
+  dependencies: DiscoveryDependencies,
+  importJobId: string,
+  minimumScore:
+    number | ((candidate: MercadoLivreDiscoveredCandidate) => number),
+  now: Date,
+  metrics: MercadoLivreDiscoveryMetrics,
+) {
+  await mapWithConcurrency(
+    enrichments,
+    dependencies.affiliateConcurrency,
+    async (enrichment) => {
+      const candidate: MercadoLivreDiscoveredCandidate = {
+        ...enrichment.candidate,
+        affiliateUrl: enrichment.affiliateUrl,
+        affiliateLabel: enrichment.affiliateLabel,
+        affiliateEligibility: enrichment.affiliateEligibility,
+        affiliateFailure: enrichment.affiliateFailure,
+      };
+      const candidateMinimumScore =
+        typeof minimumScore === "function"
+          ? minimumScore(enrichment.candidate)
+          : minimumScore;
+
+      try {
+        const result = await dependencies.ingest(candidateInput(candidate), {
+          now,
+          minScore: candidateMinimumScore,
+        });
+        recordIngestMetrics(metrics, result);
+        await retireReplacedPendingOfferVersions(dependencies.database, result);
+        await persistIngestionResultItem(
+          dependencies.database,
+          importJobId,
+          enrichment,
+          result,
+          metrics,
+        );
+      } catch {
+        metrics.errors += 1;
+        metrics.ingestionFailed += 1;
+        const source = itemSourceData(enrichment.candidate);
+
+        await dependencies.database.importJobItem.create({
+          data: {
+            importJobId,
+            sourceId: source.sourceId,
+            sourceType: source.sourceType,
+            ...(source.bestSellerPosition !== undefined
+              ? { position: source.bestSellerPosition }
+              : {}),
+            externalItemId: source.externalItemId,
+            stage: "INGESTION",
+            status: "FAILED",
+            attempts: 1,
+            errorCode: "INGESTION_FAILED",
+            errorMessage: "Mercado Livre offer ingestion failed.",
+            metadata: {
+              resolutionStrategy:
+                enrichment.candidate.resolutionStrategy ?? null,
+            },
+          },
+        });
+      }
+    },
+  );
+}
+
+function importJobTotals(metrics: MercadoLivreDiscoveryMetrics) {
+  return {
+    totalFound: metrics.candidatesFound,
+    totalResolved: metrics.uniqueCandidates,
+    totalLinksGenerated: metrics.affiliateLinksGenerated,
+    totalReadyToPublish: metrics.readyToPublish,
+    totalPendingAffiliateLink: metrics.readyForAffiliateLink,
+    totalIneligible: metrics.affiliateIneligible,
+    totalCreated: metrics.newProducts,
+    totalUpdated: metrics.updatedOffers,
+    totalFailed: metrics.unresolvedCandidates + metrics.ingestionFailed,
+  };
+}
+
 export class MercadoLivreDiscoveryService {
   private readonly dependencies: DiscoveryDependencies;
 
   constructor(dependencies: Partial<DiscoveryDependencies> = {}) {
-    this.dependencies = {
-      database: dependencies.database ?? prisma,
-      createConnector:
-        dependencies.createConnector ?? createMercadoLivreConnector,
-      ingest: dependencies.ingest ?? ingestOffer,
-      lock: dependencies.lock ?? acquireLock,
-    };
+    this.dependencies = discoveryDependencies(dependencies);
   }
 
   async run(
@@ -808,15 +1675,17 @@ export class MercadoLivreDiscoveryService {
     }
 
     const lock = await this.dependencies.lock(
-      `mercado-livre:discovery:${account.id}`,
+      affiliateOperationLockKey(account.id),
       DISCOVERY_LOCK_TTL_MS,
     );
 
     if (!lock.acquired) {
       return skippedResult(metrics, "DISCOVERY_ALREADY_RUNNING");
     }
+    const stopLockHeartbeat = startLockHeartbeat(lock, DISCOVERY_LOCK_TTL_MS);
 
     let runId: string | undefined;
+    let importJobId: string | undefined;
 
     try {
       const run = await this.dependencies.database.automationRun.create({
@@ -830,50 +1699,90 @@ export class MercadoLivreDiscoveryService {
         },
       });
       runId = run.id;
+      const categoryIds = jsonStringArray(config.categoryIds);
+      const importJob = await this.dependencies.database.importJob.create({
+        data: {
+          marketplaceAccountId: account.id,
+          marketplace: "MERCADO_LIVRE",
+          categoryId:
+            categoryIds.length === 1 ? (categoryIds[0] ?? null) : null,
+          status: "RUNNING",
+          source: "MERCADO_LIVRE_HIGHLIGHTS",
+          startedAt: now,
+          summary: metrics,
+        },
+      });
+      importJobId = importJob.id;
       const connector = await this.dependencies.createConnector();
       const candidates = await discoverCandidatesFromLeafCategories(
         connector,
-        jsonStringArray(config.categoryIds),
+        categoryIds,
         Math.min(config.maxCandidatesPerCategory, 20),
         metrics,
+        {
+          onResult: async (result) => {
+            if (result.ok) {
+              return;
+            }
+
+            await this.dependencies.database.importJobItem.create({
+              data: {
+                importJobId: importJob.id,
+                sourceId: result.candidate.id,
+                sourceType: result.candidate.type,
+                position: result.candidate.position,
+                stage: "RESOLUTION",
+                status: "FAILED",
+                attempts: 1,
+                errorCode: result.reason,
+                errorMessage: `Mercado Livre highlight could not be resolved: ${result.reason}.`,
+                metadata: result.diagnostics ?? {},
+              },
+            });
+          },
+        },
       );
       const uniqueCandidates = new Map(
         candidates.map((candidate) => [candidate.externalProductId, candidate]),
       );
-
-      for (const candidate of uniqueCandidates.values()) {
-        const minimumPrice = Number(config.minimumPrice ?? 0);
-        const maximumPrice = Number(config.maximumPrice ?? 0);
-
-        if (minimumPrice > 0 && candidate.currentPrice < minimumPrice) continue;
-        if (maximumPrice > 0 && candidate.currentPrice > maximumPrice) continue;
-
-        const discount = calculateCandidateDiscount(
-          candidate.originalPrice,
-          candidate.currentPrice,
-        );
-
-        if (!passesMinimumDiscount(config.minimumDiscountPercentage, discount))
-          continue;
-
-        try {
-          const result = await this.dependencies.ingest(
-            candidateInput(candidate),
-            {
+      const selectedCandidates = [...uniqueCandidates.values()].filter(
+        (candidate) => candidatePassesDiscoveryPolicies(candidate, config),
+      );
+      const existingAffiliateLinks = await existingAffiliateLinksForCandidates(
+        this.dependencies.database,
+        selectedCandidates,
+      );
+      const enrichments =
+        selectedCandidates.length === 0
+          ? []
+          : await enrichCandidatesWithAffiliateLinks(
+              selectedCandidates,
+              this.dependencies,
+              account.id,
+              existingAffiliateLinks,
+              metrics,
               now,
-              minScore: config.minimumScore,
-            },
-          );
-          recordIngestMetrics(metrics, result);
-        } catch {
-          metrics.errors += 1;
-        }
-      }
+            );
 
-      const status = metrics.errors > 0 ? "PARTIAL" : "SUCCEEDED";
+      await ingestAffiliateEnrichments(
+        enrichments,
+        this.dependencies,
+        importJob.id,
+        config.minimumScore,
+        now,
+        metrics,
+      );
+
+      const hasPartialFailures =
+        metrics.errors > 0 ||
+        metrics.unresolvedCandidates > 0 ||
+        metrics.affiliateIneligible > 0 ||
+        metrics.affiliatePending > 0;
+      const status = hasPartialFailures ? "PARTIAL" : "SUCCEEDED";
+      const issueCount = metrics.errors + metrics.unresolvedCandidates;
       const lastError =
         status === "PARTIAL"
-          ? `Discovery completed with ${metrics.errors} operational error(s).`
+          ? `Discovery completed with ${issueCount} item or operational issue(s).`
           : null;
 
       await this.dependencies.database.$transaction([
@@ -893,9 +1802,25 @@ export class MercadoLivreDiscoveryService {
           where: { id: run.id },
           data: { status: "SUCCEEDED", finishedAt: new Date(), metrics },
         }),
+        this.dependencies.database.importJob.update({
+          where: { id: importJob.id },
+          data: {
+            status: hasPartialFailures ? "SUCCEEDED_WITH_ERRORS" : "SUCCEEDED",
+            ...importJobTotals(metrics),
+            finishedAt: new Date(),
+            errorMessage: lastError,
+            summary: metrics,
+          },
+        }),
       ]);
 
-      return { ok: true, runId: run.id, status, metrics };
+      return {
+        ok: true,
+        runId: run.id,
+        importJobId: importJob.id,
+        status,
+        metrics,
+      };
     } catch (error) {
       metrics.errors += 1;
       const errorMessage = sanitizedError(error);
@@ -927,17 +1852,33 @@ export class MercadoLivreDiscoveryService {
               }),
             ]
           : []),
+        ...(importJobId
+          ? [
+              this.dependencies.database.importJob.update({
+                where: { id: importJobId },
+                data: {
+                  status: "FAILED",
+                  ...importJobTotals(metrics),
+                  finishedAt: new Date(),
+                  summary: metrics,
+                  errorMessage,
+                },
+              }),
+            ]
+          : []),
       ]);
 
       return {
         ok: false,
         ...(runId ? { runId } : {}),
+        ...(importJobId ? { importJobId } : {}),
         status: "FAILED",
         metrics,
         errorCode,
         errorMessage,
       };
     } finally {
+      stopLockHeartbeat();
       await lock.release();
     }
   }
@@ -948,6 +1889,401 @@ export async function collectMercadoLivreCandidates(
   options: MercadoLivreDiscoveryOptions = {},
 ) {
   return new MercadoLivreDiscoveryService().run(now, options);
+}
+
+function normalizedPendingLimit(value: number | undefined) {
+  if (value === undefined) {
+    return 25;
+  }
+
+  if (!Number.isFinite(value) || value < 1) {
+    return null;
+  }
+
+  return Math.min(MAX_PENDING_AFFILIATE_LINKS_PER_RUN, Math.floor(value));
+}
+
+function normalizedOfferIds(values: readonly string[] | undefined) {
+  if (!values) {
+    return [];
+  }
+
+  return [
+    ...new Set(
+      values
+        .map((value) => value.trim())
+        .filter(Boolean)
+        .slice(0, MAX_PENDING_AFFILIATE_LINKS_PER_RUN),
+    ),
+  ];
+}
+
+function highlightTypeFromStoredValue(
+  value: string | null,
+): MarketplaceOfferCandidate["sourceHighlightType"] | undefined {
+  return value === "ITEM" ||
+    value === "PRODUCT" ||
+    value === "USER_PRODUCT" ||
+    value === "UNKNOWN"
+    ? value
+    : undefined;
+}
+
+function resolutionStrategyFromStoredValue(
+  value: string | null,
+): MercadoLivreResolutionStrategy | undefined {
+  return value === "ITEM_DIRECT" ||
+    value === "PRODUCT_DIRECT_BUY_BOX" ||
+    value === "PRODUCT_CHILD_BUY_BOX" ||
+    value === "USER_PRODUCT_ACTIVE_ITEM"
+    ? value
+    : undefined;
+}
+
+export async function generatePendingMercadoLivreAffiliateLinks(
+  input: GeneratePendingMercadoLivreAffiliateLinksInput = {},
+  dependencyOverrides: Partial<DiscoveryDependencies> = {},
+): Promise<GeneratePendingMercadoLivreAffiliateLinksResult> {
+  const limit = normalizedPendingLimit(input.limit);
+
+  if (limit === null) {
+    return {
+      ok: false,
+      status: "FAILED",
+      selected: 0,
+      processed: 0,
+      linksGenerated: 0,
+      updated: 0,
+      ineligible: 0,
+      pending: 0,
+      failed: 0,
+      errorCode: "INVALID_LIMIT",
+      errorMessage: "Pending affiliate link limit must be a positive number.",
+    };
+  }
+
+  const dependencies = discoveryDependencies(dependencyOverrides);
+  const account = await dependencies.database.marketplaceAccount.findFirst({
+    where: {
+      marketplace: "MERCADO_LIVRE",
+      enabled: true,
+    },
+    orderBy: { updatedAt: "desc" },
+    select: { id: true },
+  });
+
+  if (!account) {
+    return {
+      ok: false,
+      status: "FAILED",
+      selected: 0,
+      processed: 0,
+      linksGenerated: 0,
+      updated: 0,
+      ineligible: 0,
+      pending: 0,
+      failed: 0,
+      errorCode: "MELI_ACCOUNT_NOT_FOUND",
+      errorMessage: "Mercado Livre account is not configured.",
+    };
+  }
+
+  const offerIds = normalizedOfferIds(input.offerIds);
+  const pendingOffers = await dependencies.database.offer.findMany({
+    where: {
+      marketplace: "MERCADO_LIVRE",
+      status: "READY_FOR_AFFILIATE_LINK",
+      affiliateUrl: null,
+      ...(offerIds.length > 0 ? { id: { in: offerIds } } : {}),
+    },
+    orderBy: { collectedAt: "desc" },
+    distinct: ["externalProductId"],
+    take: limit,
+    select: {
+      id: true,
+      productId: true,
+      externalProductId: true,
+      title: true,
+      description: true,
+      category: true,
+      imageUrl: true,
+      productUrl: true,
+      affiliateLabel: true,
+      sellerId: true,
+      officialStoreId: true,
+      sourceCategoryId: true,
+      bestSellerPosition: true,
+      sourceHighlightId: true,
+      sourceHighlightType: true,
+      resolutionStrategy: true,
+      trackingStrategy: true,
+      originalPrice: true,
+      currentPrice: true,
+      couponCode: true,
+      couponExpiration: true,
+      commissionPercentage: true,
+      rating: true,
+      salesCount: true,
+      shippingStatus: true,
+      stockStatus: true,
+      minimumScoreApplied: true,
+    },
+  });
+  const currentOfferChecks = await mapWithConcurrency(
+    pendingOffers,
+    dependencies.affiliateConcurrency,
+    async (offer) => {
+      if (!offer.productId) {
+        return offer;
+      }
+
+      const current = await dependencies.database.offer.findFirst({
+        where: { productId: offer.productId },
+        orderBy: { version: "desc" },
+        select: { id: true },
+      });
+
+      if (current?.id === offer.id) {
+        return offer;
+      }
+
+      if (!input.dryRun) {
+        await dependencies.database.offer.updateMany({
+          where: {
+            id: offer.id,
+            status: "READY_FOR_AFFILIATE_LINK",
+            affiliateUrl: null,
+          },
+          data: {
+            status: "REJECTED_DUPLICATE",
+            statusReason:
+              "Substituida por uma versao mais recente desta oferta.",
+          },
+        });
+      }
+
+      return null;
+    },
+  );
+  const offers = currentOfferChecks.filter(
+    (offer): offer is NonNullable<typeof offer> => offer !== null,
+  );
+
+  if (input.dryRun) {
+    return {
+      ok: true,
+      status: "DRY_RUN",
+      selected: offers.length,
+      processed: 0,
+      linksGenerated: 0,
+      updated: 0,
+      ineligible: 0,
+      pending: offers.length,
+      failed: 0,
+    };
+  }
+
+  if (offers.length === 0) {
+    return {
+      ok: true,
+      status: "SUCCEEDED",
+      selected: 0,
+      processed: 0,
+      linksGenerated: 0,
+      updated: 0,
+      ineligible: 0,
+      pending: 0,
+      failed: 0,
+    };
+  }
+
+  const lock = await dependencies.lock(
+    affiliateOperationLockKey(account.id),
+    DISCOVERY_LOCK_TTL_MS,
+  );
+
+  if (!lock.acquired) {
+    return {
+      ok: false,
+      status: "FAILED",
+      selected: offers.length,
+      processed: 0,
+      linksGenerated: 0,
+      updated: 0,
+      ineligible: 0,
+      pending: offers.length,
+      failed: 0,
+      errorCode: "AFFILIATE_ENRICHMENT_ALREADY_RUNNING",
+      errorMessage: "Pending affiliate link enrichment is already running.",
+    };
+  }
+  const stopLockHeartbeat = startLockHeartbeat(lock, DISCOVERY_LOCK_TTL_MS);
+
+  const now = new Date();
+  const metrics = createMercadoLivreDiscoveryMetrics();
+  metrics.candidatesFound = offers.length;
+  metrics.resolvedItemCandidates = offers.length;
+  metrics.uniqueCandidates = offers.length;
+  let importJobId: string | undefined;
+
+  try {
+    const importJob = await dependencies.database.importJob.create({
+      data: {
+        marketplaceAccountId: account.id,
+        marketplace: "MERCADO_LIVRE",
+        status: "RUNNING",
+        source: "MERCADO_LIVRE_PENDING_AFFILIATE_LINKS",
+        totalFound: offers.length,
+        totalResolved: offers.length,
+        startedAt: now,
+        summary: metrics,
+      },
+    });
+    importJobId = importJob.id;
+    const minimumScores = new Map<string, number>();
+    const candidates: MercadoLivreDiscoveredCandidate[] = offers.map(
+      (offer) => {
+        minimumScores.set(offer.externalProductId, offer.minimumScoreApplied);
+        const sourceHighlightType = highlightTypeFromStoredValue(
+          offer.sourceHighlightType,
+        );
+        const resolutionStrategy = resolutionStrategyFromStoredValue(
+          offer.resolutionStrategy,
+        );
+
+        return {
+          marketplace: "MERCADO_LIVRE",
+          externalProductId: offer.externalProductId,
+          title: offer.title,
+          description: offer.description,
+          category: offer.category,
+          imageUrl: offer.imageUrl,
+          productUrl: offer.productUrl,
+          affiliateUrl: null,
+          affiliateLabel: offer.affiliateLabel,
+          affiliateEligibility: "UNKNOWN",
+          affiliateFailure: null,
+          sellerId: offer.sellerId,
+          officialStoreId: offer.officialStoreId,
+          ...(offer.sourceCategoryId
+            ? { sourceCategoryId: offer.sourceCategoryId }
+            : {}),
+          ...(offer.bestSellerPosition !== null
+            ? { bestSellerPosition: offer.bestSellerPosition }
+            : {}),
+          ...(offer.sourceHighlightId
+            ? { sourceHighlightId: offer.sourceHighlightId }
+            : {}),
+          ...(sourceHighlightType ? { sourceHighlightType } : {}),
+          ...(resolutionStrategy ? { resolutionStrategy } : {}),
+          trackingStrategy: offer.trackingStrategy,
+          originalPrice: offer.originalPrice
+            ? Number(offer.originalPrice)
+            : null,
+          currentPrice: Number(offer.currentPrice),
+          couponCode: offer.couponCode,
+          couponExpiration: offer.couponExpiration,
+          commissionPercentage: offer.commissionPercentage
+            ? Number(offer.commissionPercentage)
+            : null,
+          rating: offer.rating ? Number(offer.rating) : null,
+          salesCount: offer.salesCount,
+          shippingStatus: offer.shippingStatus,
+          stockStatus: offer.stockStatus,
+        };
+      },
+    );
+    const existingAffiliateLinks = await existingAffiliateLinksForCandidates(
+      dependencies.database,
+      candidates,
+    );
+    const enrichments = await enrichCandidatesWithAffiliateLinks(
+      candidates,
+      dependencies,
+      account.id,
+      existingAffiliateLinks,
+      metrics,
+      now,
+    );
+
+    await ingestAffiliateEnrichments(
+      enrichments,
+      dependencies,
+      importJob.id,
+      (candidate) => minimumScores.get(candidate.externalProductId) ?? 0,
+      now,
+      metrics,
+    );
+
+    const hasFailures =
+      metrics.errors > 0 ||
+      metrics.affiliateIneligible > 0 ||
+      metrics.affiliatePending > 0;
+    const status = hasFailures ? "PARTIAL" : "SUCCEEDED";
+    const errorMessage = hasFailures
+      ? `Affiliate enrichment completed with ${metrics.errors} item error(s).`
+      : null;
+
+    await dependencies.database.importJob.update({
+      where: { id: importJob.id },
+      data: {
+        status: hasFailures ? "SUCCEEDED_WITH_ERRORS" : "SUCCEEDED",
+        ...importJobTotals(metrics),
+        finishedAt: new Date(),
+        errorMessage,
+        summary: metrics,
+      },
+    });
+
+    return {
+      ok: true,
+      status,
+      importJobId: importJob.id,
+      selected: offers.length,
+      processed: offers.length,
+      linksGenerated: metrics.affiliateLinksGenerated,
+      updated: metrics.updatedOffers,
+      ineligible: metrics.affiliateIneligible,
+      pending: metrics.readyForAffiliateLink,
+      failed: metrics.ingestionFailed,
+    };
+  } catch (error) {
+    const errorMessage = sanitizedError(error);
+
+    if (importJobId) {
+      await dependencies.database.importJob.update({
+        where: { id: importJobId },
+        data: {
+          status: "FAILED",
+          ...importJobTotals(metrics),
+          finishedAt: new Date(),
+          errorMessage,
+          summary: metrics,
+        },
+      });
+    }
+
+    return {
+      ok: false,
+      status: "FAILED",
+      ...(importJobId ? { importJobId } : {}),
+      selected: offers.length,
+      processed:
+        metrics.readyToPublish +
+        metrics.readyForAffiliateLink +
+        metrics.rejected,
+      linksGenerated: metrics.affiliateLinksGenerated,
+      updated: metrics.updatedOffers,
+      ineligible: metrics.affiliateIneligible,
+      pending: metrics.readyForAffiliateLink,
+      failed: metrics.ingestionFailed + 1,
+      errorCode: "AFFILIATE_ENRICHMENT_FAILED",
+      errorMessage,
+    };
+  } finally {
+    stopLockHeartbeat();
+    await lock.release();
+  }
 }
 
 export type MercadoLivreJobMetrics = {

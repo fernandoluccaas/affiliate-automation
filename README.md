@@ -107,7 +107,7 @@ configuration and the opt-in real integration test.
 
 Use `/integracoes` to connect or reconnect through OAuth 2.0. Tokens are encrypted in `MarketplaceAccount`, refresh tokens are treated as rotating credentials, and Redis locks prevent concurrent refresh.
 
-Use `/integracoes/mercado-livre` to enable discovery, choose official category IDs, set price/discount/score filters and run manual sync. Dashboard and worker call the same `MercadoLivreDiscoveryService`; the connector is limited to official HTTP access/parsing and `ingestOffer` owns Product/Offer persistence. A distributed lock at `mercado-livre:discovery:{accountId}` prevents manual and worker runs from overlapping.
+Use `/integracoes/mercado-livre` to enable discovery, choose official category IDs, set price/discount/score filters and run manual sync. Dashboard and worker call the same `MercadoLivreDiscoveryService`; the connector is limited to official HTTP access/parsing and `ingestOffer` owns Product/Offer persistence. Discovery and pending-link enrichment share the renewable distributed lock `mercado-livre:affiliate-link-operations:{accountId}`. Session updates also use the loaded `updatedAt` value as an optimistic concurrency guard, so a batch cannot overwrite a cookie that the user replaced while it was running.
 
 Discovery uses official categories, highlights/best sellers, catalog product resolution, multiget item details and the official item prices endpoint. Highlight `PRODUCT` entries may be catalog parents; the resolver follows bounded `children_ids` to a child with `buy_box_winner.item_id` before deduplicating by final item ID. Missing original price, shipping certainty, image, rating, sales count or commission stays `null`/`UNKNOWN`. A configured minimum discount of zero means no discount requirement, and a minimum score of zero is passed explicitly to ingestion and stored on the Offer version for later affiliate-link enrichment.
 
@@ -115,9 +115,22 @@ The integration screen also provides an experimental manual category-search prob
 
 The probe returns at most five diagnostic samples and never calls `ingestOffer` or creates Product, Offer or Publication rows. A probe 403 does not change a connected account's status. Category search is not an automatic discovery source or fallback in Phase 3A.1 because its real behavior depends on the permissions and policies Mercado Livre makes available to the application. When `bestSellersEnabled=false`, normal discovery returns `DISCOVERY_SOURCE_DISABLED`.
 
-Mercado Livre affiliate links are not generated automatically. Valid offers without an official affiliate URL become `READY_FOR_AFFILIATE_LINK`; fill the link in `/ofertas/affiliate-links`. Mercado Livre publications use `DIRECT_AFFILIATE_LINK`, so the worker sends the official affiliate URL directly instead of `/go/[slug]`.
+For a configured Affiliate Portal session, discovery generates the official
+affiliate URL after highlight resolution and before `ingestOffer`, with at most
+four products in flight. Product-level failures do not abort the batch:
+ineligible products are rejected deterministically, transient failures remain
+`READY_FOR_AFFILIATE_LINK`, and an expired cookie stops new link attempts while
+the resolved products are still persisted. Existing pending offers can be
+enriched in bounded batches; `/ofertas/affiliate-links` remains the manual
+fallback. Mercado Livre publications use `DIRECT_AFFILIATE_LINK`, so the worker
+sends the official affiliate URL directly instead of `/go/[slug]`.
 
-Affiliate URLs are validated centrally: HTTPS is required and localhost, private IPs and non-web schemes are rejected. A marketplace-specific host allowlist remains pending until real links from the Mercado Livre affiliate portal have been observed.
+Every import persists ranking origin on `Offer` and real counters plus
+per-product diagnostics in `ImportJob`/`ImportJobItem`. Ranking-only changes do
+not alter the offer fingerprint. Affiliate URLs are validated centrally:
+HTTPS is required, local/private hosts are rejected, and Mercado Livre accepts
+only `meli.la`, `mercadolivre.com.br`, `mercadolibre.com`, and legitimate
+subdomains of those domains.
 
 ## Tracking
 

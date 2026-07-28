@@ -111,7 +111,25 @@ enum ImportJobStatus {
   QUEUED
   RUNNING
   SUCCEEDED
+  SUCCEEDED_WITH_ERRORS
   FAILED
+}
+
+enum ImportJobItemStage {
+  DISCOVERY
+  RESOLUTION
+  AFFILIATE_LINK
+  INGESTION
+}
+
+enum ImportJobItemStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  PENDING_AFFILIATE_LINK
+  INELIGIBLE
+  FAILED
+  SKIPPED
 }
 
 enum AutomationRunStatus {
@@ -252,8 +270,14 @@ model Offer {
   affiliateUrl                String?
   affiliateLabel              String?
   affiliateEligibility        AffiliateEligibility @default(UNKNOWN)
+  affiliateFailure            Json?
   sellerId                    String?
   officialStoreId             String?
+  sourceCategoryId            String?
+  bestSellerPosition          Int?
+  sourceHighlightId           String?
+  sourceHighlightType         String?
+  resolutionStrategy          String?
   trackingStrategy            TrackingStrategy     @default(INTERNAL_REDIRECT)
   originalPrice               Decimal?             @db.Decimal(12, 2)
   currentPrice                Decimal              @db.Decimal(12, 2)
@@ -286,6 +310,7 @@ model Offer {
   clicks         Click[]
   conversions    Conversion[]
   commissions    Commission[]
+  importJobItems ImportJobItem[]
 
   @@unique([productId, version])
   @@unique([productId, offerFingerprint])
@@ -293,6 +318,7 @@ model Offer {
   @@index([marketplace, category])
   @@index([marketplace, externalProductId])
   @@index([marketplace, affiliateEligibility])
+  @@index([marketplace, sourceCategoryId, bestSellerPosition])
   @@index([trackingStrategy])
   @@index([scheduledAt])
   @@index([publishedAt])
@@ -369,39 +395,44 @@ model OfferScore {
 }
 
 model Publication {
-  id                         String            @id @default(cuid())
-  offerId                    String
-  channelId                  String
-  status                     PublicationStatus @default(SCHEDULED)
-  idempotencyKey             String            @unique
-  scheduledAt                DateTime
-  publishedAt                DateTime?
-  externalId                 String?
-  messagePayload             Json?
-  messageSource              MessageSource     @default(DETERMINISTIC_FALLBACK)
-  aiProvider                 AiProviderName    @default(DETERMINISTIC)
-  aiModel                    String?
-  aiGenerationDurationMs     Int?
-  aiValidationPassed         Boolean?
-  aiValidationReasons        Json?
-  generatedAt                DateTime?
-  offerTitleSnapshot         String
-  productExternalIdSnapshot  String
-  marketplaceSnapshot        Marketplace
-  categorySnapshot           String?
-  originalPriceSnapshot      Decimal?          @db.Decimal(12, 2)
-  currentPriceSnapshot       Decimal           @db.Decimal(12, 2)
-  discountPercentageSnapshot Decimal?          @db.Decimal(5, 2)
-  couponCodeSnapshot         String?
-  couponExpirationSnapshot   DateTime?
-  freeShippingSnapshot       Boolean
-  shippingStatusSnapshot     ShippingStatus    @default(UNKNOWN)
-  affiliateUrlSnapshot       String?
-  trackingUrlSnapshot        String
-  offerVersionSnapshot       Int
-  errorMessage               String?
-  createdAt                  DateTime          @default(now())
-  updatedAt                  DateTime          @updatedAt
+  id                          String            @id @default(cuid())
+  offerId                     String
+  channelId                   String
+  status                      PublicationStatus @default(SCHEDULED)
+  idempotencyKey              String            @unique
+  scheduledAt                 DateTime
+  publishedAt                 DateTime?
+  externalId                  String?
+  messagePayload              Json?
+  messageSource               MessageSource     @default(DETERMINISTIC_FALLBACK)
+  aiProvider                  AiProviderName    @default(DETERMINISTIC)
+  aiModel                     String?
+  aiGenerationDurationMs      Int?
+  aiValidationPassed          Boolean?
+  aiValidationReasons         Json?
+  generatedAt                 DateTime?
+  offerTitleSnapshot          String
+  productExternalIdSnapshot   String
+  marketplaceSnapshot         Marketplace
+  categorySnapshot            String?
+  originalPriceSnapshot       Decimal?          @db.Decimal(12, 2)
+  currentPriceSnapshot        Decimal           @db.Decimal(12, 2)
+  discountPercentageSnapshot  Decimal?          @db.Decimal(5, 2)
+  couponCodeSnapshot          String?
+  couponExpirationSnapshot    DateTime?
+  freeShippingSnapshot        Boolean
+  shippingStatusSnapshot      ShippingStatus    @default(UNKNOWN)
+  affiliateUrlSnapshot        String?
+  trackingUrlSnapshot         String
+  offerVersionSnapshot        Int
+  sourceCategoryIdSnapshot    String?
+  bestSellerPositionSnapshot  Int?
+  sourceHighlightIdSnapshot   String?
+  sourceHighlightTypeSnapshot String?
+  resolutionStrategySnapshot  String?
+  errorMessage                String?
+  createdAt                   DateTime          @default(now())
+  updatedAt                   DateTime          @updatedAt
 
   offer       Offer                @relation(fields: [offerId], references: [id], onDelete: Cascade)
   channel     Channel              @relation(fields: [channelId], references: [id], onDelete: Cascade)
@@ -489,21 +520,62 @@ model Commission {
 }
 
 model ImportJob {
-  id                   String          @id @default(cuid())
-  marketplaceAccountId String?
-  marketplace          Marketplace
-  status               ImportJobStatus @default(QUEUED)
-  source               String
-  startedAt            DateTime?
-  finishedAt           DateTime?
-  errorMessage         String?
-  rawSummary           Json?
-  createdAt            DateTime        @default(now())
-  updatedAt            DateTime        @updatedAt
+  id                        String          @id @default(cuid())
+  marketplaceAccountId      String?
+  marketplace               Marketplace
+  categoryId                String?
+  status                    ImportJobStatus @default(QUEUED)
+  source                    String
+  totalFound                Int             @default(0)
+  totalResolved             Int             @default(0)
+  totalLinksGenerated       Int             @default(0)
+  totalReadyToPublish       Int             @default(0)
+  totalPendingAffiliateLink Int             @default(0)
+  totalIneligible           Int             @default(0)
+  totalCreated              Int             @default(0)
+  totalUpdated              Int             @default(0)
+  totalFailed               Int             @default(0)
+  startedAt                 DateTime?
+  finishedAt                DateTime?
+  errorMessage              String?         @db.Text
+  summary                   Json?           @map("rawSummary")
+  createdAt                 DateTime        @default(now())
+  updatedAt                 DateTime        @updatedAt
 
   marketplaceAccount MarketplaceAccount? @relation(fields: [marketplaceAccountId], references: [id], onDelete: SetNull)
+  items              ImportJobItem[]
 
   @@index([marketplace, status])
+  @@index([marketplace, createdAt])
+  @@index([marketplace, categoryId, createdAt])
+  @@index([marketplaceAccountId, createdAt])
+}
+
+model ImportJobItem {
+  id             String              @id @default(cuid())
+  importJobId    String
+  sourceId       String?
+  sourceType     String?
+  position       Int?
+  externalItemId String?
+  offerId        String?
+  stage          ImportJobItemStage
+  status         ImportJobItemStatus @default(PENDING)
+  attempts       Int                 @default(0)
+  errorCode      String?
+  errorMessage   String?             @db.Text
+  metadata       Json?
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+
+  importJob ImportJob @relation(fields: [importJobId], references: [id], onDelete: Cascade)
+  offer     Offer?    @relation(fields: [offerId], references: [id], onDelete: SetNull)
+
+  @@index([importJobId])
+  @@index([importJobId, status])
+  @@index([importJobId, stage])
+  @@index([offerId])
+  @@index([externalItemId])
 }
 
 model AutomationRun {

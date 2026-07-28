@@ -99,6 +99,7 @@ describe("MercadoLivreAffiliateApiError", () => {
       name: "MercadoLivreAffiliateApiError",
       stage: "SESSION_WARMUP",
       status: 403,
+      attempts: 1,
       sessionExpired: true,
     });
     expect(JSON.stringify(serialized)).not.toContain("synthetic-value");

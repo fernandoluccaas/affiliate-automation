@@ -4,6 +4,7 @@ import { prisma } from "@affiliate/database";
 import {
   createMercadoLivreConnector,
   parseMercadoLivreAffiliateTags,
+  sanitizeMercadoLivreAffiliateErrorMessage,
   type MercadoLivreCategory,
 } from "@affiliate/marketplace-connectors";
 import { AdminShell } from "@/components/admin-shell";
@@ -53,15 +54,16 @@ function messageText(message?: string | string[]) {
     return "Esta categoria possui subcategorias. Selecione uma categoria mais especifica para usar o ranking de mais vendidos.";
   }
   if (value === "category-tested") return "Teste de categoria concluido.";
-  if (value === "sync-ok") return "Sincronizacao manual concluida.";
+  if (value === "sync-ok")
+    return "Importação dos mais vendidos concluída. Consulte as métricas reais da última execução.";
   if (value === "sync-partial")
-    return "Sincronizacao concluida parcialmente. Consulte as metricas e alertas.";
+    return "Importação concluída parcialmente. Consulte as métricas e alertas.";
   if (value === "sync-already-running")
     return "Ja existe uma sincronizacao Mercado Livre em andamento.";
   if (value === "sync-source-disabled")
     return "Discovery por highlights esta desabilitado.";
   if (value === "sync-failed")
-    return "Sincronizacao manual falhou. Veja logs e alertas.";
+    return "A importação falhou. Veja os alertas antes de tentar novamente.";
   if (value === "category-search-tested")
     return "Probe de busca da categoria concluido.";
   if (value === "affiliate-session-saved")
@@ -77,8 +79,6 @@ function messageText(message?: string | string[]) {
     return "Alguns links foram gerados; os demais continuam pendentes.";
   if (value === "affiliate-links-none")
     return "Não há ofertas pendentes para gerar links.";
-  if (value === "affiliate-links-unavailable")
-    return "A geração em lote de links pendentes será habilitada na próxima fase.";
   if (value === "affiliate-not-authorized")
     return "Seu perfil não tem permissão para alterar esta integração.";
   if (value === "affiliate-session-invalid")
@@ -133,6 +133,21 @@ function lastRunObjectMetrics(value: unknown) {
         ] as const,
     )
     .filter(([, entries]) => entries.length > 0);
+}
+
+function importJobStatusLabel(status: string) {
+  if (status === "QUEUED") return "Na fila";
+  if (status === "RUNNING") return "Em execução";
+  if (status === "SUCCEEDED") return "Concluída";
+  if (status === "SUCCEEDED_WITH_ERRORS") return "Concluída com erros";
+  if (status === "FAILED") return "Falhou";
+  return status;
+}
+
+function sanitizedImportError(value: string | null) {
+  if (!value) return "-";
+
+  return sanitizeMercadoLivreAffiliateErrorMessage(value);
 }
 
 function single(value: string | string[] | undefined) {
@@ -326,7 +341,7 @@ export default async function MercadoLivreIntegrationPage({
   const params = await searchParams;
   const message = messageText(params?.message);
   const selectedCategoryId = single(params?.categoryId);
-  const [account, config] = await Promise.all([
+  const [account, config, latestImportJob] = await Promise.all([
     prisma.marketplaceAccount.findFirst({
       where: { marketplace: "MERCADO_LIVRE", enabled: true },
       orderBy: { updatedAt: "desc" },
@@ -362,6 +377,42 @@ export default async function MercadoLivreIntegrationPage({
         lastRunSummary: true,
       },
     }),
+    prisma.importJob.findFirst({
+      where: { marketplace: "MERCADO_LIVRE" },
+      orderBy: { createdAt: "desc" },
+      select: {
+        categoryId: true,
+        status: true,
+        totalFound: true,
+        totalResolved: true,
+        totalLinksGenerated: true,
+        totalReadyToPublish: true,
+        totalPendingAffiliateLink: true,
+        totalIneligible: true,
+        totalCreated: true,
+        totalUpdated: true,
+        totalFailed: true,
+        startedAt: true,
+        finishedAt: true,
+        errorMessage: true,
+        createdAt: true,
+        items: {
+          where: { status: { not: "SUCCEEDED" } },
+          orderBy: { createdAt: "desc" },
+          take: 20,
+          select: {
+            position: true,
+            sourceId: true,
+            sourceType: true,
+            stage: true,
+            status: true,
+            errorCode: true,
+            errorMessage: true,
+            attempts: true,
+          },
+        },
+      },
+    }),
   ]);
   const affiliateSession = account?.mercadoLivreAffiliateSession ?? null;
   const affiliateTags = parseMercadoLivreAffiliateTags(
@@ -375,6 +426,19 @@ export default async function MercadoLivreIntegrationPage({
   const categoryIds = jsonStringArray(config?.categoryIds);
   const metrics = lastRunMetrics(config?.lastRunSummary);
   const metricGroups = lastRunObjectMetrics(config?.lastRunSummary);
+  const importJobMetrics = latestImportJob
+    ? [
+        ["Encontrados", latestImportJob.totalFound],
+        ["Resolvidos", latestImportJob.totalResolved],
+        ["Links gerados", latestImportJob.totalLinksGenerated],
+        ["Prontos para publicar", latestImportJob.totalReadyToPublish],
+        ["Pendentes de link", latestImportJob.totalPendingAffiliateLink],
+        ["Não elegíveis", latestImportJob.totalIneligible],
+        ["Criados", latestImportJob.totalCreated],
+        ["Atualizados", latestImportJob.totalUpdated],
+        ["Falhas", latestImportJob.totalFailed],
+      ]
+    : [];
   const connector =
     account?.status === "CONNECTED"
       ? await createMercadoLivreConnector().catch(() => null)
@@ -430,7 +494,7 @@ export default async function MercadoLivreIntegrationPage({
             disabled={account?.status !== "CONNECTED"}
           >
             <RefreshCw aria-hidden="true" size={16} />
-            Sincronizar agora
+            Buscar e importar mais vendidos
           </Button>
         </form>
       </div>
@@ -628,6 +692,47 @@ export default async function MercadoLivreIntegrationPage({
         </CardContent>
       </Card>
 
+      <Card>
+        <CardHeader>
+          <CardTitle>Fluxo de importação dos mais vendidos</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <ol className="grid gap-3 text-sm md:grid-cols-2 lg:grid-cols-4">
+            {[
+              ["1", "Conectar OAuth", "Categorias, ranking e produtos."],
+              [
+                "2",
+                "Configurar sessão de afiliado",
+                "Cookie e tag para gerar meli.la.",
+              ],
+              [
+                "3",
+                "Selecionar categoria",
+                "Escolha uma categoria folha abaixo.",
+              ],
+              [
+                "4",
+                "Buscar e importar mais vendidos",
+                "O resultado usa somente métricas persistidas.",
+              ],
+            ].map(([step, title, description]) => (
+              <li
+                key={step}
+                className="grid gap-1 rounded-md border bg-[var(--background)] p-3"
+              >
+                <span className="text-xs font-semibold text-[var(--muted-foreground)]">
+                  Etapa {step}
+                </span>
+                <span className="font-medium">{title}</span>
+                <span className="text-xs text-[var(--muted-foreground)]">
+                  {description}
+                </span>
+              </li>
+            ))}
+          </ol>
+        </CardContent>
+      </Card>
+
       <div className="grid gap-4 lg:grid-cols-[1.5fr_1fr]">
         <Card>
           <CardHeader>
@@ -733,28 +838,136 @@ export default async function MercadoLivreIntegrationPage({
 
         <Card>
           <CardHeader>
-            <CardTitle>Ultima execucao</CardTitle>
+            <CardTitle>Última importação</CardTitle>
           </CardHeader>
           <CardContent className="grid gap-4 text-sm">
             <div className="grid gap-1">
               <span className="text-[var(--muted-foreground)]">Conta</span>
               <span>{account?.status ?? "DISCONNECTED"}</span>
             </div>
-            <div className="grid gap-1">
-              <span className="text-[var(--muted-foreground)]">
-                Ultima sincronizacao
-              </span>
-              <span>
-                {config?.lastRunAt ? formatDateTime(config.lastRunAt) : "-"}
-              </span>
-            </div>
-            {metrics.length === 0 ? (
+            {latestImportJob ? (
+              <>
+                <dl className="grid gap-3 sm:grid-cols-3">
+                  <div className="grid gap-1">
+                    <dt className="text-[var(--muted-foreground)]">Status</dt>
+                    <dd>{importJobStatusLabel(latestImportJob.status)}</dd>
+                  </div>
+                  <div className="grid gap-1">
+                    <dt className="text-[var(--muted-foreground)]">
+                      Categoria
+                    </dt>
+                    <dd>{latestImportJob.categoryId ?? "-"}</dd>
+                  </div>
+                  <div className="grid gap-1">
+                    <dt className="text-[var(--muted-foreground)]">
+                      Atualização
+                    </dt>
+                    <dd>
+                      {formatDateTime(
+                        latestImportJob.finishedAt ??
+                          latestImportJob.startedAt ??
+                          latestImportJob.createdAt,
+                      )}
+                    </dd>
+                  </div>
+                </dl>
+
+                {latestImportJob.errorMessage ? (
+                  <div className="rounded-md border bg-[var(--background)] p-3">
+                    <div className="text-xs text-[var(--muted-foreground)]">
+                      Erro da execução
+                    </div>
+                    <div className="mt-1 break-words">
+                      {sanitizedImportError(latestImportJob.errorMessage)}
+                    </div>
+                  </div>
+                ) : null}
+
+                <dl className="grid grid-cols-2 gap-3">
+                  {importJobMetrics.map(([label, value]) => (
+                    <div
+                      key={label}
+                      className="rounded-md border bg-[var(--background)] p-3"
+                    >
+                      <dt className="text-xs text-[var(--muted-foreground)]">
+                        {label}
+                      </dt>
+                      <dd className="text-lg font-semibold">{value}</dd>
+                    </div>
+                  ))}
+                </dl>
+
+                {latestImportJob.items.length > 0 ? (
+                  <div className="grid gap-3 border-t pt-4">
+                    <div>
+                      <div className="font-medium">
+                        Diagnósticos por produto
+                      </div>
+                      <p className="text-xs text-[var(--muted-foreground)]">
+                        Até 20 itens não concluídos da última importação.
+                      </p>
+                    </div>
+                    <div className="grid max-h-[480px] gap-2 overflow-y-auto pr-1">
+                      {latestImportJob.items.map((item, index) => (
+                        <div
+                          key={`${item.sourceType ?? "source"}-${item.sourceId ?? "unknown"}-${item.stage}-${index}`}
+                          className="grid gap-2 rounded-md border bg-[var(--background)] p-3"
+                        >
+                          <dl className="grid gap-2 sm:grid-cols-2">
+                            <Result
+                              label="Posição"
+                              value={
+                                item.position === null
+                                  ? "-"
+                                  : String(item.position)
+                              }
+                            />
+                            <Result
+                              label="Origem"
+                              value={`${item.sourceType ?? "-"} · ${item.sourceId ?? "-"}`}
+                            />
+                            <Result
+                              label="Etapa / status"
+                              value={`${item.stage} · ${item.status}`}
+                            />
+                            <Result
+                              label="Tentativas"
+                              value={String(item.attempts)}
+                            />
+                            <Result
+                              label="Código"
+                              value={item.errorCode ?? "-"}
+                            />
+                          </dl>
+                          <div className="grid gap-1">
+                            <div className="text-xs text-[var(--muted-foreground)]">
+                              Mensagem
+                            </div>
+                            <div className="break-words">
+                              {sanitizedImportError(item.errorMessage)}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </>
+            ) : metrics.length === 0 ? (
               <EmptyState
-                title="Sem execucoes registradas"
-                description="Execute uma sincronizacao manual ou aguarde o worker coletar candidatos."
+                title="Sem execuções registradas"
+                description="Execute uma importação manual ou aguarde o worker coletar candidatos."
               />
             ) : (
               <div className="grid gap-3">
+                <div className="grid gap-1">
+                  <span className="text-[var(--muted-foreground)]">
+                    Última sincronização
+                  </span>
+                  <span>
+                    {config?.lastRunAt ? formatDateTime(config.lastRunAt) : "-"}
+                  </span>
+                </div>
                 <dl className="grid grid-cols-2 gap-3">
                   {metrics.map(([key, value]) => (
                     <div

@@ -17,38 +17,72 @@ type AffiliateLinksPageProps = {
 function messageText(message?: string | string[]) {
   const value = Array.isArray(message) ? message[0] : message;
 
-  if (value === "saved") return "Link oficial associado e oferta validada para publicacao.";
-  if (value === "failed") return "Link salvo nao deixou a oferta pronta. Confira os dados da oferta.";
+  if (value === "saved")
+    return "Link oficial associado e oferta validada para publicacao.";
+  if (value === "failed")
+    return "Link salvo nao deixou a oferta pronta. Confira os dados da oferta.";
   if (value === "invalid") return "Informe uma URL afiliada valida.";
   if (value === "not-found") return "Oferta Mercado Livre nao encontrada.";
   return null;
 }
 
-export default async function AffiliateLinksPage({ searchParams }: AffiliateLinksPageProps) {
+export default async function AffiliateLinksPage({
+  searchParams,
+}: AffiliateLinksPageProps) {
   const params = await searchParams;
   const message = messageText(params?.message);
-  const offers = await prisma.offer.findMany({
+  const products = await prisma.product.findMany({
     where: {
       marketplace: "MERCADO_LIVRE",
-      status: "READY_FOR_AFFILIATE_LINK",
-      affiliateUrl: null,
+      offers: {
+        some: {
+          status: "READY_FOR_AFFILIATE_LINK",
+          affiliateUrl: null,
+        },
+      },
     },
-    orderBy: [{ score: "desc" }, { collectedAt: "desc" }],
-    take: 50,
+    orderBy: { updatedAt: "desc" },
+    take: 200,
     select: {
-      id: true,
-      externalProductId: true,
-      title: true,
-      productUrl: true,
-      category: true,
-      currentPrice: true,
-      discountPercentage: true,
-      score: true,
-      scoreCompletenessPercentage: true,
-      affiliateEligibility: true,
-      version: true,
+      offers: {
+        orderBy: { version: "desc" },
+        take: 1,
+        select: {
+          id: true,
+          externalProductId: true,
+          title: true,
+          productUrl: true,
+          category: true,
+          sourceCategoryId: true,
+          bestSellerPosition: true,
+          sourceHighlightType: true,
+          resolutionStrategy: true,
+          currentPrice: true,
+          discountPercentage: true,
+          score: true,
+          scoreCompletenessPercentage: true,
+          affiliateEligibility: true,
+          affiliateUrl: true,
+          status: true,
+          version: true,
+          collectedAt: true,
+        },
+      },
     },
   });
+  const offers = products
+    .flatMap((product) => product.offers)
+    .filter(
+      (offer) =>
+        offer.status === "READY_FOR_AFFILIATE_LINK" &&
+        offer.affiliateUrl === null,
+    )
+    .sort(
+      (left, right) =>
+        (right.score ?? -1) - (left.score ?? -1) ||
+        right.collectedAt.getTime() - left.collectedAt.getTime(),
+    )
+    .slice(0, 50);
 
   return (
     <AdminShell currentPath="/ofertas" title="Links afiliados">
@@ -61,12 +95,25 @@ export default async function AffiliateLinksPage({ searchParams }: AffiliateLink
         </Button>
       </div>
 
-      {message ? <div className="rounded-md border bg-white px-4 py-3 text-sm">{message}</div> : null}
+      {message ? (
+        <div className="rounded-md border bg-white px-4 py-3 text-sm">
+          {message}
+        </div>
+      ) : null}
+
+      <div className="rounded-md border bg-[var(--background)] px-4 py-3 text-sm">
+        <div className="font-medium">Correção manual de links</div>
+        <p className="mt-1 text-[var(--muted-foreground)]">
+          Use esta tela apenas para corrigir links que não puderam ser gerados
+          automaticamente. A importação do Mercado Livre tenta gerar os links
+          antes de enviar ofertas para publicação.
+        </p>
+      </div>
 
       {offers.length === 0 ? (
         <EmptyState
           title="Nenhuma oferta aguardando link"
-          description="Ofertas Mercado Livre validas sem affiliateUrl aparecem aqui para associacao manual do link oficial."
+          description="Não há ofertas que precisem do fallback manual de link oficial."
         />
       ) : (
         <div className="overflow-x-auto rounded-md border bg-white">
@@ -87,13 +134,27 @@ export default async function AffiliateLinksPage({ searchParams }: AffiliateLink
                   <td className="max-w-[280px] px-4 py-3">
                     <div className="font-medium">{offer.title}</div>
                     <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-                      {offer.externalProductId} · v{offer.version} · {offer.category ?? "-"}
+                      {offer.externalProductId} · v{offer.version} ·{" "}
+                      {offer.category ?? "-"}
+                    </div>
+                    <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                      {offer.bestSellerPosition === null
+                        ? "sem posição no ranking"
+                        : `#${offer.bestSellerPosition} mais vendido`}{" "}
+                      · categoria {offer.sourceCategoryId ?? "-"}
+                    </div>
+                    <div className="text-xs text-[var(--muted-foreground)]">
+                      {offer.sourceHighlightType ?? "-"} ·{" "}
+                      {offer.resolutionStrategy ?? "-"}
                     </div>
                   </td>
                   <td className="px-4 py-3">
                     <div>{formatCurrency(offer.currentPrice)}</div>
                     <div className="text-xs text-[var(--muted-foreground)]">
-                      desconto {offer.discountPercentage === null ? "-" : `${formatPercentage(offer.discountPercentage)}%`}
+                      desconto{" "}
+                      {offer.discountPercentage === null
+                        ? "-"
+                        : `${formatPercentage(offer.discountPercentage)}%`}
                     </div>
                   </td>
                   <td className="px-4 py-3">
@@ -116,10 +177,21 @@ export default async function AffiliateLinksPage({ searchParams }: AffiliateLink
                     </a>
                   </td>
                   <td className="px-4 py-3">
-                    <form action={saveMercadoLivreAffiliateUrlAction} className="grid min-w-[320px] gap-2">
+                    <form
+                      action={saveMercadoLivreAffiliateUrlAction}
+                      className="grid min-w-[320px] gap-2"
+                    >
                       <input type="hidden" name="offerId" value={offer.id} />
-                      <Input name="affiliateUrl" type="url" placeholder="https://..." required />
-                      <Input name="affiliateLabel" placeholder="Etiqueta usada (opcional)" />
+                      <Input
+                        name="affiliateUrl"
+                        type="url"
+                        placeholder="https://..."
+                        required
+                      />
+                      <Input
+                        name="affiliateLabel"
+                        placeholder="Etiqueta usada (opcional)"
+                      />
                       <Button type="submit">Salvar link</Button>
                     </form>
                   </td>

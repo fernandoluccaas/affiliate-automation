@@ -10,6 +10,7 @@ export type MercadoLivreAffiliateApiErrorOptions = {
   stage: MercadoLivreAffiliateApiErrorStage;
   status?: number;
   code?: string | number;
+  attempts?: number;
   retryable?: boolean;
   sessionExpired?: boolean;
   productIneligible?: boolean;
@@ -111,6 +112,7 @@ function isRetryableStatus(status: number | undefined) {
 export class MercadoLivreAffiliateApiError extends Error {
   readonly status: number | undefined;
   readonly code: string | number | undefined;
+  readonly attempts: number;
   readonly stage: MercadoLivreAffiliateApiErrorStage;
   readonly retryable: boolean;
   readonly sessionExpired: boolean;
@@ -125,6 +127,7 @@ export class MercadoLivreAffiliateApiError extends Error {
     this.name = "MercadoLivreAffiliateApiError";
     this.status = options.status;
     this.code = sanitizeCode(options.code, options.secrets ?? []);
+    this.attempts = Math.max(1, Math.floor(options.attempts ?? 1));
     this.stage = options.stage;
     this.retryable = options.retryable ?? isRetryableStatus(options.status);
     this.sessionExpired =
@@ -142,6 +145,7 @@ export class MercadoLivreAffiliateApiError extends Error {
       retryable: this.retryable,
       sessionExpired: this.sessionExpired,
       productIneligible: this.productIneligible,
+      attempts: this.attempts,
       ...(this.status !== undefined ? { status: this.status } : {}),
       ...(this.code !== undefined ? { code: this.code } : {}),
     };

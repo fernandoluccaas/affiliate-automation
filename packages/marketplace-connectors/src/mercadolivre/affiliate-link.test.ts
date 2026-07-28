@@ -246,6 +246,7 @@ describe("MercadoLivreAffiliateLinkService", () => {
     expect(error).toMatchObject({
       stage: "LINK_GENERATION",
       code: "NETWORK_OR_TIMEOUT",
+      attempts: 3,
       retryable: true,
       sessionExpired: false,
     });

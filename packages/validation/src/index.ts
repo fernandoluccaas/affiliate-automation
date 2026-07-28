@@ -163,6 +163,50 @@ export function calculateValidatedDiscount(
   };
 }
 
+const DEFAULT_OPERATIONAL_ERROR_MESSAGE = "Operational request failed.";
+const MAX_OPERATIONAL_ERROR_MESSAGE_LENGTH = 500;
+const COOKIE_HEADER_VALUE =
+  /^(?:[!#$%&'*+\-.^_`|~0-9A-Za-z]+=[^;\r\n]*)(?:;\s*[!#$%&'*+\-.^_`|~0-9A-Za-z]+=[^;\r\n]*)*$/;
+
+export function sanitizeOperationalErrorMessage(value: unknown) {
+  const raw =
+    value instanceof Error
+      ? value.message
+      : typeof value === "string"
+        ? value
+        : DEFAULT_OPERATIONAL_ERROR_MESSAGE;
+  const redactedRaw = COOKIE_HEADER_VALUE.test(raw.trim()) ? "[REDACTED]" : raw;
+  const sanitized = [...redactedRaw]
+    .filter((character) => {
+      const code = character.charCodeAt(0);
+      return (
+        code === 9 || code === 10 || code === 13 || (code >= 32 && code !== 127)
+      );
+    })
+    .join("")
+    .replace(
+      /\b(?:authorization|proxy-authorization|cookie|set-cookie|x-csrf-token|x-xsrf-token)\b\s*[:=]\s*[^\r\n]*/gi,
+      "[REDACTED]",
+    )
+    .replace(
+      /(["']?(?:cookie|set-cookie|csrf|csrf-token|csrf_token|xsrf-token|access[_-]?token|refresh[_-]?token)["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^,}\s]+)/gi,
+      "$1[REDACTED]",
+    )
+    .replace(/\bBearer\s+\S+/gi, "Bearer [REDACTED]")
+    .replace(
+      /([?&](?:cookie|csrf|xsrf|access_token|refresh_token|token)=)[^&#\s]+/gi,
+      "$1[REDACTED]",
+    )
+    .replace(
+      /\b(?:[!#$%&'*+\-.^_`|~0-9A-Za-z]+=[^;\s,]+;\s*)+[!#$%&'*+\-.^_`|~0-9A-Za-z]+=[^;\s,]+/g,
+      "[REDACTED]",
+    )
+    .trim()
+    .slice(0, MAX_OPERATIONAL_ERROR_MESSAGE_LENGTH);
+
+  return sanitized || DEFAULT_OPERATIONAL_ERROR_MESSAGE;
+}
+
 function isPrivateIpv4(hostname: string) {
   const parts = hostname.split(".").map(Number);
 
@@ -203,12 +247,26 @@ export type MarketplaceAffiliateUrlValidation =
   | { ok: true; normalizedUrl: string }
   | {
       ok: false;
-      code: "INVALID_URL" | "HTTPS_REQUIRED" | "LOCAL_OR_PRIVATE_HOST";
+      code:
+        | "INVALID_URL"
+        | "HTTPS_REQUIRED"
+        | "LOCAL_OR_PRIVATE_HOST"
+        | "HOST_NOT_ALLOWED";
       message: string;
     };
 
+const MERCADO_LIVRE_AFFILIATE_DOMAINS = [
+  "meli.la",
+  "mercadolivre.com.br",
+  "mercadolibre.com",
+] as const;
+
+function hostnameMatchesDomain(hostname: string, domain: string) {
+  return hostname === domain || hostname.endsWith(`.${domain}`);
+}
+
 export function validateMarketplaceAffiliateUrl(
-  _marketplace: string,
+  marketplace: string,
   value: string,
 ): MarketplaceAffiliateUrlValidation {
   let url: URL;
@@ -248,6 +306,18 @@ export function validateMarketplaceAffiliateUrl(
     };
   }
 
-  // TODO: add a Mercado Livre host allowlist after validating real links from the affiliate portal.
+  if (
+    marketplace === "MERCADO_LIVRE" &&
+    !MERCADO_LIVRE_AFFILIATE_DOMAINS.some((domain) =>
+      hostnameMatchesDomain(hostname, domain),
+    )
+  ) {
+    return {
+      ok: false,
+      code: "HOST_NOT_ALLOWED",
+      message: "Affiliate URL host is not allowed for Mercado Livre.",
+    };
+  }
+
   return { ok: true, normalizedUrl: url.toString() };
 }

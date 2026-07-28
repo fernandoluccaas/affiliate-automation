@@ -77,3 +77,35 @@ Os estados possíveis são:
 - `CONNECTED`: cookie válido e tag selecionada;
 - `EXPIRED`: login/401/403 no Portal de Afiliados;
 - `ERROR`: falha não relacionada à autenticação, com mensagem sanitizada.
+
+## Importação automática e ofertas pendentes
+
+O discovery continua usando OAuth e `GET /highlights/MLB/category/{categoryId}`
+para ranking, categorias e produtos. Depois de resolver `ITEM`, `PRODUCT` ou
+`USER_PRODUCT` para o item final, ele usa a sessão afiliada somente para gerar
+o link e chama `ingestOffer` com a URL original e a URL `meli.la` em campos
+distintos.
+
+A geração usa concorrência limitada a quatro produtos. Cada falha fica isolada:
+
+- o erro de produto não elegível marca a oferta como `INELIGIBLE` e impede
+  publicação;
+- erro transitório mantém a oferta em `READY_FOR_AFFILIATE_LINK`;
+- `401`, `403` ou redirecionamento de login marcam apenas a sessão afiliada
+  como `EXPIRED`, interrompem novas tentativas no lote e preservam o OAuth;
+- produtos já resolvidos continuam sendo ingeridos mesmo sem link.
+
+Importação e enriquecimento de pendências usam o mesmo lock distribuído,
+renovado enquanto o lote estiver ativo. A persistência da rotação de cookie e
+CSRF é otimista: se a sessão tiver sido substituída pelo usuário durante o lote,
+o resultado antigo não sobrescreve a nova sessão.
+
+Cada execução cria um `ImportJob` com contadores reais e `ImportJobItem` para os
+diagnósticos por produto. `Offer` guarda categoria, posição, tipo original do
+highlight e estratégia de resolução. Esses metadados operacionais não entram
+no fingerprint; mudar apenas da posição 8 para 9 atualiza a origem sem criar uma
+nova versão.
+
+O botão **Gerar links pendentes** processa uma quantidade limitada de ofertas
+`READY_FOR_AFFILIATE_LINK` e mantém o versionamento normal da ingestão. A página
+`/ofertas/affiliate-links` deve ser usada somente como fallback manual.

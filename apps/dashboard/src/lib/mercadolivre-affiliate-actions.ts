@@ -4,6 +4,10 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
 import {
+  generatePendingMercadoLivreAffiliateLinks,
+  type GeneratePendingMercadoLivreAffiliateLinksResult,
+} from "@affiliate/marketplace-discovery";
+import {
   clearMercadoLivreAffiliateSession,
   saveMercadoLivreAffiliateSession,
   selectMercadoLivreAffiliateTag,
@@ -33,6 +37,8 @@ const affiliateTagSchema = z.object({
 
 const pendingLinksSchema = z.object({
   limit: z.coerce.number().int().min(1).max(50).default(50),
+  offerIds: z.array(z.string().trim().min(1).max(200)).max(50).default([]),
+  dryRun: z.boolean().default(false),
 });
 
 async function requireAffiliateSessionManager() {
@@ -152,14 +158,44 @@ export async function generatePendingMercadoLivreAffiliateLinksAction(
   await requireAffiliateSessionManager();
   const parsed = pendingLinksSchema.safeParse({
     limit: formData.get("limit") ?? 50,
+    offerIds: formData
+      .getAll("offerId")
+      .filter((value): value is string => typeof value === "string"),
+    dryRun:
+      formData.get("dryRun") === "true" || formData.get("dryRun") === "on",
   });
 
   if (!parsed.success) {
     redirect("/integracoes/mercado-livre?message=affiliate-session-invalid");
   }
 
-  // The bounded enrichment use case is added in Phase 3. Keeping this action
-  // explicit avoids pretending that the current request generated links.
+  let result: GeneratePendingMercadoLivreAffiliateLinksResult;
+
+  try {
+    result = await generatePendingMercadoLivreAffiliateLinks(parsed.data);
+  } catch {
+    revalidateMercadoLivreAffiliatePages();
+    redirect("/integracoes/mercado-livre?message=affiliate-session-error");
+  }
+
   revalidateMercadoLivreAffiliatePages();
-  redirect("/integracoes/mercado-livre?message=affiliate-links-unavailable");
+
+  if (!result.ok) {
+    redirect("/integracoes/mercado-livre?message=affiliate-session-error");
+  }
+
+  if (result.selected === 0) {
+    redirect("/integracoes/mercado-livre?message=affiliate-links-none");
+  }
+
+  if (
+    result.status === "PARTIAL" ||
+    result.ineligible > 0 ||
+    result.pending > 0 ||
+    result.failed > 0
+  ) {
+    redirect("/integracoes/mercado-livre?message=affiliate-links-partial");
+  }
+
+  redirect("/integracoes/mercado-livre?message=affiliate-links-generated");
 }

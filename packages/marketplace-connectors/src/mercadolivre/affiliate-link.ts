@@ -138,7 +138,12 @@ async function responseBody(response: Response) {
   }
 }
 
-function responseError(response: Response, requestUrl: string, body: unknown) {
+function responseError(
+  response: Response,
+  requestUrl: string,
+  body: unknown,
+  attempts: number,
+) {
   const loginRedirect = isMercadoLivreAffiliateLoginRedirect(
     response,
     requestUrl,
@@ -158,6 +163,7 @@ function responseError(response: Response, requestUrl: string, body: unknown) {
         stage: "LINK_GENERATION",
         status: response.status,
         code,
+        attempts,
         productIneligible: true,
         retryable: false,
         sessionExpired: false,
@@ -173,6 +179,7 @@ function responseError(response: Response, requestUrl: string, body: unknown) {
       stage: "LINK_GENERATION",
       status: response.status,
       code,
+      attempts,
       retryable,
       sessionExpired,
     },
@@ -249,6 +256,7 @@ export class MercadoLivreAffiliateLinkService {
           {
             stage: "LINK_GENERATION",
             code: "NETWORK_OR_TIMEOUT",
+            attempts: attempt,
             retryable: true,
             sessionExpired: false,
           },
@@ -290,11 +298,11 @@ export class MercadoLivreAffiliateLinkService {
       const responseCode = findAffiliateErrorCode(body);
 
       if (String(responseCode ?? "") === "111") {
-        throw responseError(response, url, body);
+        throw responseError(response, url, body, attempt);
       }
 
       if (!response.ok) {
-        throw responseError(response, url, body);
+        throw responseError(response, url, body, attempt);
       }
 
       const shortUrl = asRecord(body)?.short_url;
@@ -305,6 +313,7 @@ export class MercadoLivreAffiliateLinkService {
           {
             stage: "RESPONSE_PARSING",
             code: "MISSING_SHORT_URL",
+            attempts: attempt,
           },
         );
       }

@@ -1,4 +1,9 @@
-import { marketplaces, shippingStatuses, stockStatuses } from "@affiliate/shared";
+import {
+  marketplaces,
+  shippingStatuses,
+  stockStatuses,
+} from "@affiliate/shared";
+import { sanitizeOperationalErrorMessage } from "@affiliate/validation";
 import { z } from "zod";
 
 const invalidDecimal = Symbol("invalidDecimal");
@@ -40,7 +45,8 @@ export function parseDecimalInput(value: unknown) {
       return invalidDecimal;
     }
 
-    const validInteger = /^\d+$/.test(integerPart) || /^\d{1,3}(?:\.\d{3})+$/.test(integerPart);
+    const validInteger =
+      /^\d+$/.test(integerPart) || /^\d{1,3}(?:\.\d{3})+$/.test(integerPart);
 
     if (!validInteger || !/^\d+$/.test(decimalPart)) {
       return invalidDecimal;
@@ -131,25 +137,98 @@ const optionalSalesCount = z.preprocess((value) => {
   return parsed === null ? undefined : parsed;
 }, z.number("Informe uma quantidade de vendas valida.").int().min(0).optional());
 
+const optionalPositiveInteger = z.preprocess((value) => {
+  if (value === null || value === undefined || value === "") {
+    return undefined;
+  }
+
+  if (typeof value === "string" && /^\d+$/.test(value.trim())) {
+    return Number(value);
+  }
+
+  return value;
+}, z.number("Informe uma posicao valida.").int().positive().optional());
+
+const optionalFailureCode = z.preprocess(
+  (value) => {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return String(value);
+    }
+
+    return value;
+  },
+  optionalText.pipe(z.string().max(100).optional()),
+);
+
+const affiliateFailureSchema = z
+  .object({
+    stage: z.enum([
+      "SESSION_WARMUP",
+      "TAGS",
+      "LINK_GENERATION",
+      "RESPONSE_PARSING",
+    ]),
+    status: z.number().int().min(100).max(599).optional(),
+    code: optionalFailureCode,
+    message: z
+      .string()
+      .trim()
+      .min(1)
+      .max(500)
+      .transform(sanitizeOperationalErrorMessage),
+    retryable: z.boolean().default(false),
+    sessionExpired: z.boolean().default(false),
+    productIneligible: z.boolean().default(false),
+    attempts: z.number().int().min(0).max(3).optional(),
+  })
+  .strict();
+
 const requiredPrice = z.preprocess(
   decimalPreprocessor,
-  z.number("Preco atual invalido.").positive("O preco atual deve ser maior que zero."),
+  z
+    .number("Preco atual invalido.")
+    .positive("O preco atual deve ser maior que zero."),
 );
 
 export const offerFormSchema = z.object({
   marketplace: z.enum(marketplaces),
-  externalProductId: z.string().trim().min(1, "Informe o ID externo do produto."),
-  title: z.string().trim().min(3, "Informe um titulo com pelo menos 3 caracteres."),
+  externalProductId: z
+    .string()
+    .trim()
+    .min(1, "Informe o ID externo do produto."),
+  title: z
+    .string()
+    .trim()
+    .min(3, "Informe um titulo com pelo menos 3 caracteres."),
   description: optionalText,
   category: optionalText,
+  sourceCategoryId: optionalText,
+  bestSellerPosition: optionalPositiveInteger,
+  sourceHighlightId: optionalText,
+  sourceHighlightType: z
+    .enum(["ITEM", "PRODUCT", "USER_PRODUCT", "UNKNOWN"])
+    .optional(),
+  resolutionStrategy: z
+    .enum([
+      "ITEM_DIRECT",
+      "PRODUCT_DIRECT_BUY_BOX",
+      "PRODUCT_CHILD_BUY_BOX",
+      "USER_PRODUCT_ACTIVE_ITEM",
+    ])
+    .optional(),
   imageUrl: optionalUrl,
   productUrl: z.string().trim().url("Informe uma URL valida do produto."),
   affiliateUrl: optionalUrl,
   affiliateLabel: optionalText,
-  affiliateEligibility: z.enum(["ELIGIBLE", "INELIGIBLE", "UNKNOWN"]).default("UNKNOWN"),
+  affiliateEligibility: z
+    .enum(["ELIGIBLE", "INELIGIBLE", "UNKNOWN"])
+    .default("UNKNOWN"),
+  affiliateFailure: affiliateFailureSchema.nullable().optional(),
   sellerId: optionalText,
   officialStoreId: optionalText,
-  trackingStrategy: z.enum(["INTERNAL_REDIRECT", "DIRECT_AFFILIATE_LINK"]).optional(),
+  trackingStrategy: z
+    .enum(["INTERNAL_REDIRECT", "DIRECT_AFFILIATE_LINK"])
+    .optional(),
   originalPrice: optionalPrice,
   currentPrice: requiredPrice,
   couponCode: optionalText,
@@ -173,3 +252,4 @@ export function formatOfferFormError(error: z.ZodError) {
 
 export type OfferFormInput = z.input<typeof offerFormSchema>;
 export type OfferFormValues = z.output<typeof offerFormSchema>;
+export type AffiliateFailureMetadata = z.output<typeof affiliateFailureSchema>;
