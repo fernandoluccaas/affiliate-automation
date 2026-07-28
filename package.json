@@ -16,6 +16,7 @@
     "lint": "npm run lint --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
+    "test:integration:mercadolivre-affiliate": "npm run test:integration:mercadolivre-affiliate -w @affiliate/marketplace-connectors",
     "format": "prettier --write .",
     "prisma:generate": "prisma generate --schema prisma/schema.prisma",
     "prisma:migrate": "prisma migrate dev --schema prisma/schema.prisma",

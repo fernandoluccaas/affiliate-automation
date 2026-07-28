@@ -82,6 +82,13 @@ export type MercadoLivreEnv = {
   MERCADO_LIVRE_CLIENT_SECRET?: string;
   MERCADO_LIVRE_REDIRECT_URI?: string;
   MERCADO_LIVRE_SITE_ID?: string;
+  MERCADOLIVRE_AFFILIATE_BASE_URL?: string;
+  MERCADOLIVRE_AFFILIATE_REFERER?: string;
+  MERCADOLIVRE_AFFILIATE_USER_AGENT?: string;
+  MERCADOLIVRE_AFFILIATE_MAX_CONCURRENCY?: string;
+  MERCADOLIVRE_AFFILIATE_TIMEOUT_MS?: string;
+  MERCADOLIVRE_AFFILIATE_MAX_RETRIES?: string;
+  CREDENTIALS_ENCRYPTION_KEY?: string;
   ENCRYPTION_KEY?: string;
   AUTH_SECRET?: string;
 };
@@ -375,15 +382,27 @@ export function buildMercadoLivreAuthorizationUrl(
   return url.toString();
 }
 
-function encryptionKey(env: MercadoLivreEnv = process.env) {
-  const secret = env.ENCRYPTION_KEY || env.AUTH_SECRET;
+function encryptionSecrets(env: MercadoLivreEnv = process.env) {
+  const secrets = [
+    env.CREDENTIALS_ENCRYPTION_KEY,
+    env.ENCRYPTION_KEY,
+    env.AUTH_SECRET,
+  ].filter(
+    (secret, index, values): secret is string =>
+      Boolean(secret && secret.length >= 16) &&
+      values.indexOf(secret) === index,
+  );
 
-  if (!secret || secret.length < 16) {
+  if (secrets.length === 0) {
     throw new Error(
-      "ENCRYPTION_KEY or AUTH_SECRET must be configured to encrypt marketplace tokens.",
+      "CREDENTIALS_ENCRYPTION_KEY, ENCRYPTION_KEY or AUTH_SECRET must be configured to encrypt credentials.",
     );
   }
 
+  return secrets;
+}
+
+function encryptionKey(secret: string) {
   return createHash("sha256").update(secret).digest();
 }
 
@@ -392,7 +411,12 @@ export function encryptSecret(
   env: MercadoLivreEnv = process.env,
 ) {
   const iv = randomBytes(12);
-  const cipher = createCipheriv("aes-256-gcm", encryptionKey(env), iv);
+  const [secret] = encryptionSecrets(env);
+  const cipher = createCipheriv(
+    "aes-256-gcm",
+    encryptionKey(secret as string),
+    iv,
+  );
   const encrypted = Buffer.concat([
     cipher.update(value, "utf8"),
     cipher.final(),
@@ -411,16 +435,25 @@ export function decryptSecret(
     throw new Error("Invalid encrypted secret payload.");
   }
 
-  const decipher = createDecipheriv(
-    "aes-256-gcm",
-    encryptionKey(env),
-    Buffer.from(ivValue, "base64url"),
-  );
-  decipher.setAuthTag(Buffer.from(tagValue, "base64url"));
-  return Buffer.concat([
-    decipher.update(Buffer.from(encryptedValue, "base64url")),
-    decipher.final(),
-  ]).toString("utf8");
+  for (const secret of encryptionSecrets(env)) {
+    try {
+      const decipher = createDecipheriv(
+        "aes-256-gcm",
+        encryptionKey(secret),
+        Buffer.from(ivValue, "base64url"),
+      );
+      decipher.setAuthTag(Buffer.from(tagValue, "base64url"));
+      return Buffer.concat([
+        decipher.update(Buffer.from(encryptedValue, "base64url")),
+        decipher.final(),
+      ]).toString("utf8");
+    } catch {
+      // Try legacy keys so configuring a dedicated credential key does not
+      // invalidate OAuth credentials encrypted before the migration.
+    }
+  }
+
+  throw new Error("Invalid encrypted secret payload.");
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -1652,3 +1685,39 @@ export async function createMercadoLivreConnector(fetchFn?: ApiFetch) {
     siteId: config.siteId,
   });
 }
+
+export {
+  extractMercadoLivreCsrfToken,
+  mergeMercadoLivreCookies,
+  normalizeMercadoLivreCookie,
+  parseMercadoLivreCookie,
+} from "./mercadolivre/affiliate-cookie";
+export {
+  MercadoLivreAffiliateApiError,
+  isMercadoLivreAffiliateApiError,
+  sanitizeMercadoLivreAffiliateError,
+  sanitizeMercadoLivreAffiliateErrorMessage,
+  type MercadoLivreAffiliateApiErrorOptions,
+  type MercadoLivreAffiliateApiErrorStage,
+} from "./mercadolivre/affiliate-errors";
+export {
+  MercadoLivreAffiliateLinkService,
+  normalizeMercadoLivreAffiliateProductUrl,
+  normalizeMercadoLivreGeneratedAffiliateUrl,
+} from "./mercadolivre/affiliate-link";
+export {
+  MercadoLivreAffiliateSessionService,
+  type MercadoLivreAffiliateFetch,
+  type MercadoLivreAffiliateHttpOptions,
+  type ValidateMercadoLivreAffiliateSessionInput,
+  type ValidateMercadoLivreAffiliateSessionResult,
+  type WarmMercadoLivreAffiliateSessionInput,
+  type WarmMercadoLivreAffiliateSessionResult,
+} from "./mercadolivre/affiliate-session";
+export {
+  parseMercadoLivreAffiliateTags,
+  selectMercadoLivreAffiliateTag,
+  type CreateMercadoLivreAffiliateLinkInput,
+  type CreateMercadoLivreAffiliateLinkResult,
+  type MercadoLivreAffiliateTag,
+} from "./mercadolivre/affiliate-types";

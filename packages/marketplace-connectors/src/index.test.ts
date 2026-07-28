@@ -93,6 +93,19 @@ describe("Mercado Livre OAuth", () => {
     expect(encrypted).not.toContain("refresh-token");
     expect(decryptSecret(encrypted, encryptionEnv)).toBe("refresh-token");
   });
+
+  it("keeps credentials encrypted with the legacy key readable after a dedicated key is configured", () => {
+    const encrypted = encryptSecret("existing-oauth-token", encryptionEnv);
+    const migratedEnv = {
+      ...encryptionEnv,
+      CREDENTIALS_ENCRYPTION_KEY:
+        "dedicated-credentials-key-with-at-least-32-characters",
+    };
+
+    expect(decryptSecret(encrypted, migratedEnv)).toBe(
+      "existing-oauth-token",
+    );
+  });
 });
 
 describe("MercadoLivreApiClient", () => {

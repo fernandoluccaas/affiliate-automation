@@ -9,7 +9,8 @@
   "scripts": {
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:integration:mercadolivre-affiliate": "vitest run src/mercadolivre/affiliate.integration.test.ts"
   },
   "dependencies": {
     "@affiliate/database": "0.1.0",

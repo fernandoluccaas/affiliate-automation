@@ -26,6 +26,14 @@ enum MarketplaceAccountStatus {
   ERROR
 }
 
+enum MercadoLivreAffiliateSessionStatus {
+  NOT_CONFIGURED
+  VALIDATING
+  CONNECTED
+  EXPIRED
+  ERROR
+}
+
 enum AffiliateEligibility {
   ELIGIBLE
   INELIGIBLE
@@ -130,60 +138,79 @@ model User {
 }
 
 model MarketplaceAccount {
-  id                   String      @id @default(cuid())
-  marketplace          Marketplace
-  name                 String
-  encryptedCredentials String      @default("")
-  externalUserId       String?
-  accessTokenEncrypted String?
+  id                    String                   @id @default(cuid())
+  marketplace           Marketplace
+  name                  String
+  encryptedCredentials  String                   @default("")
+  externalUserId        String?
+  accessTokenEncrypted  String?
   refreshTokenEncrypted String?
-  expiresAt            DateTime?
-  scopes               Json        @default("[]")
-  status               MarketplaceAccountStatus @default(DISCONNECTED)
-  siteId               String?
-  lastRefreshAt        DateTime?
-  lastSyncAt           DateTime?
-  lastErrorAt          DateTime?
-  lastError            String?
-  capabilities         Json        @default("{}")
-  enabled              Boolean     @default(true)
-  createdAt            DateTime    @default(now())
-  updatedAt            DateTime    @updatedAt
+  expiresAt             DateTime?
+  scopes                Json                     @default("[]")
+  status                MarketplaceAccountStatus @default(DISCONNECTED)
+  siteId                String?
+  lastRefreshAt         DateTime?
+  lastSyncAt            DateTime?
+  lastErrorAt           DateTime?
+  lastError             String?
+  capabilities          Json                     @default("{}")
+  enabled               Boolean                  @default(true)
+  createdAt             DateTime                 @default(now())
+  updatedAt             DateTime                 @updatedAt
 
-  importJobs     ImportJob[]
-  automationRuns AutomationRun[]
+  importJobs                   ImportJob[]
+  automationRuns               AutomationRun[]
+  mercadoLivreAffiliateSession MercadoLivreAffiliateSession?
 
   @@index([marketplace, enabled])
   @@index([marketplace, status])
 }
 
+model MercadoLivreAffiliateSession {
+  id                   String                             @id @default(cuid())
+  marketplaceAccountId String                             @unique
+  marketplaceAccount   MarketplaceAccount                 @relation(fields: [marketplaceAccountId], references: [id], onDelete: Cascade)
+  sampleAffiliateLink  String?
+  affiliateTag         String?
+  availableTags        Json?
+  cookieEncrypted      String?                            @db.Text
+  csrfTokenEncrypted   String?                            @db.Text
+  status               MercadoLivreAffiliateSessionStatus @default(NOT_CONFIGURED)
+  lastValidatedAt      DateTime?
+  lastCookieUpdateAt   DateTime?
+  lastErrorAt          DateTime?
+  lastError            String?                            @db.Text
+  createdAt            DateTime                           @default(now())
+  updatedAt            DateTime                           @updatedAt
+}
+
 model Channel {
-  id                    String      @id @default(cuid())
-  name                  String
-  type                  ChannelType
-  encryptedCredentials  String?
-  configuration         Json?
-  capabilities          Json        @default("{}")
-  timezone              String      @default("America/Fortaleza")
-  dailyLimit            Int         @default(10)
-  dailyPublicationLimit Int         @default(10)
-  minIntervalMinutes    Int         @default(30)
-  minimumIntervalMinutes Int        @default(30)
-  allowedHours          Json        @default("[]")
-  allowedStartTime      String?
-  allowedEndTime        String?
-  allowedCategories     Json        @default("[]")
-  allowedMarketplaces   Json        @default("[]")
-  minScore              Int         @default(70)
-  minimumScore          Int         @default(70)
-  minPrice              Decimal?    @db.Decimal(12, 2)
-  maxPrice              Decimal?    @db.Decimal(12, 2)
-  minDiscountPercentage Decimal?    @db.Decimal(5, 2)
-  minRepeatDays         Int         @default(7)
-  productRepeatIntervalDays Int     @default(7)
-  enabled               Boolean     @default(true)
-  createdAt             DateTime    @default(now())
-  updatedAt             DateTime    @updatedAt
+  id                        String      @id @default(cuid())
+  name                      String
+  type                      ChannelType
+  encryptedCredentials      String?
+  configuration             Json?
+  capabilities              Json        @default("{}")
+  timezone                  String      @default("America/Fortaleza")
+  dailyLimit                Int         @default(10)
+  dailyPublicationLimit     Int         @default(10)
+  minIntervalMinutes        Int         @default(30)
+  minimumIntervalMinutes    Int         @default(30)
+  allowedHours              Json        @default("[]")
+  allowedStartTime          String?
+  allowedEndTime            String?
+  allowedCategories         Json        @default("[]")
+  allowedMarketplaces       Json        @default("[]")
+  minScore                  Int         @default(70)
+  minimumScore              Int         @default(70)
+  minPrice                  Decimal?    @db.Decimal(12, 2)
+  maxPrice                  Decimal?    @db.Decimal(12, 2)
+  minDiscountPercentage     Decimal?    @db.Decimal(5, 2)
+  minRepeatDays             Int         @default(7)
+  productRepeatIntervalDays Int         @default(7)
+  enabled                   Boolean     @default(true)
+  createdAt                 DateTime    @default(now())
+  updatedAt                 DateTime    @updatedAt
 
   publications Publication[]
 
@@ -211,47 +238,47 @@ model Product {
 }
 
 model Offer {
-  id                   String      @id @default(cuid())
-  marketplace          Marketplace
-  externalProductId    String
-  productId            String?
-  version              Int         @default(1)
-  offerFingerprint     String
-  title                String
-  description          String?
-  category             String?
-  imageUrl             String?
-  productUrl           String
-  affiliateUrl         String?
-  affiliateLabel       String?
-  affiliateEligibility AffiliateEligibility @default(UNKNOWN)
-  sellerId             String?
-  officialStoreId      String?
-  trackingStrategy     TrackingStrategy @default(INTERNAL_REDIRECT)
-  originalPrice        Decimal?    @db.Decimal(12, 2)
-  currentPrice         Decimal     @db.Decimal(12, 2)
-  discountPercentage   Decimal?    @db.Decimal(5, 2)
-  couponCode           String?
-  couponExpiration     DateTime?
-  commissionPercentage Decimal?    @db.Decimal(5, 2)
-  rating               Decimal?    @db.Decimal(3, 2)
-  salesCount           Int?
-  freeShipping         Boolean     @default(false)
-  shippingStatus       ShippingStatus @default(UNKNOWN)
-  stockStatus          StockStatus @default(UNKNOWN)
-  score                Int?
-  scoreCompletenessPercentage Decimal? @db.Decimal(5, 2)
-  minimumScoreApplied  Int         @default(70)
-  status               OfferStatus @default(PENDING_VALIDATION)
-  statusReason         String?
-  collectedAt          DateTime
-  verifiedAt           DateTime?
-  scheduledAt          DateTime?
-  publishedAt          DateTime?
-  createdAt            DateTime    @default(now())
-  updatedAt            DateTime    @updatedAt
+  id                          String               @id @default(cuid())
+  marketplace                 Marketplace
+  externalProductId           String
+  productId                   String?
+  version                     Int                  @default(1)
+  offerFingerprint            String
+  title                       String
+  description                 String?
+  category                    String?
+  imageUrl                    String?
+  productUrl                  String
+  affiliateUrl                String?
+  affiliateLabel              String?
+  affiliateEligibility        AffiliateEligibility @default(UNKNOWN)
+  sellerId                    String?
+  officialStoreId             String?
+  trackingStrategy            TrackingStrategy     @default(INTERNAL_REDIRECT)
+  originalPrice               Decimal?             @db.Decimal(12, 2)
+  currentPrice                Decimal              @db.Decimal(12, 2)
+  discountPercentage          Decimal?             @db.Decimal(5, 2)
+  couponCode                  String?
+  couponExpiration            DateTime?
+  commissionPercentage        Decimal?             @db.Decimal(5, 2)
+  rating                      Decimal?             @db.Decimal(3, 2)
+  salesCount                  Int?
+  freeShipping                Boolean              @default(false)
+  shippingStatus              ShippingStatus       @default(UNKNOWN)
+  stockStatus                 StockStatus          @default(UNKNOWN)
+  score                       Int?
+  scoreCompletenessPercentage Decimal?             @db.Decimal(5, 2)
+  minimumScoreApplied         Int                  @default(70)
+  status                      OfferStatus          @default(PENDING_VALIDATION)
+  statusReason                String?
+  collectedAt                 DateTime
+  verifiedAt                  DateTime?
+  scheduledAt                 DateTime?
+  publishedAt                 DateTime?
+  createdAt                   DateTime             @default(now())
+  updatedAt                   DateTime             @updatedAt
 
-  product        Product?       @relation(fields: [productId], references: [id], onDelete: SetNull)
+  product        Product?        @relation(fields: [productId], references: [id], onDelete: SetNull)
   coupons        Coupon[]
   affiliateLinks AffiliateLink[]
   scores         OfferScore[]
@@ -272,21 +299,21 @@ model Offer {
 }
 
 model MercadoLivreDiscoveryConfig {
-  id                        String   @id @default(cuid())
-  enabled                   Boolean  @default(false)
-  siteId                    String   @default("MLB")
-  categoryIds               Json     @default("[]")
-  bestSellersEnabled        Boolean  @default(true)
-  minimumPrice              Decimal? @db.Decimal(12, 2)
-  maximumPrice              Decimal? @db.Decimal(12, 2)
-  minimumDiscountPercentage Decimal? @db.Decimal(5, 2)
-  minimumScore              Int      @default(0)
-  maxCandidatesPerCategory  Int      @default(20)
-  refreshIntervalMinutes    Int      @default(360)
+  id                        String    @id @default(cuid())
+  enabled                   Boolean   @default(false)
+  siteId                    String    @default("MLB")
+  categoryIds               Json      @default("[]")
+  bestSellersEnabled        Boolean   @default(true)
+  minimumPrice              Decimal?  @db.Decimal(12, 2)
+  maximumPrice              Decimal?  @db.Decimal(12, 2)
+  minimumDiscountPercentage Decimal?  @db.Decimal(5, 2)
+  minimumScore              Int       @default(0)
+  maxCandidatesPerCategory  Int       @default(20)
+  refreshIntervalMinutes    Int       @default(360)
   lastRunAt                 DateTime?
   lastRunSummary            Json?
-  createdAt                 DateTime @default(now())
-  updatedAt                 DateTime @updatedAt
+  createdAt                 DateTime  @default(now())
+  updatedAt                 DateTime  @updatedAt
 }
 
 model Coupon {
@@ -305,16 +332,16 @@ model Coupon {
 }
 
 model AffiliateLink {
-  id           String   @id @default(cuid())
-  offerId      String
-  slug         String   @unique
-  destination  String
-  marketplace  Marketplace
-  active       Boolean  @default(true)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id          String      @id @default(cuid())
+  offerId     String
+  slug        String      @unique
+  destination String
+  marketplace Marketplace
+  active      Boolean     @default(true)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
 
-  offer Offer @relation(fields: [offerId], references: [id], onDelete: Cascade)
+  offer  Offer   @relation(fields: [offerId], references: [id], onDelete: Cascade)
   clicks Click[]
 
   @@index([offerId])
@@ -322,19 +349,19 @@ model AffiliateLink {
 }
 
 model OfferScore {
-  id                    String   @id @default(cuid())
-  offerId               String
-  total                 Int
-  completenessPercentage Decimal? @db.Decimal(5, 2)
-  discountComponent     Int
-  commissionComponent   Int
-  ratingComponent       Int
-  popularityComponent   Int
-  freeShippingComponent Int
+  id                      String   @id @default(cuid())
+  offerId                 String
+  total                   Int
+  completenessPercentage  Decimal? @db.Decimal(5, 2)
+  discountComponent       Int
+  commissionComponent     Int
+  ratingComponent         Int
+  popularityComponent     Int
+  freeShippingComponent   Int
   couponValidityComponent Int
-  noveltyComponent      Int
-  weights               Json
-  createdAt             DateTime @default(now())
+  noveltyComponent        Int
+  weights                 Json
+  createdAt               DateTime @default(now())
 
   offer Offer @relation(fields: [offerId], references: [id], onDelete: Cascade)
 
@@ -342,39 +369,39 @@ model OfferScore {
 }
 
 model Publication {
-  id                       String            @id @default(cuid())
-  offerId                  String
-  channelId                String
-  status                   PublicationStatus @default(SCHEDULED)
-  idempotencyKey           String            @unique
-  scheduledAt              DateTime
-  publishedAt              DateTime?
-  externalId               String?
-  messagePayload           Json?
-  messageSource            MessageSource     @default(DETERMINISTIC_FALLBACK)
-  aiProvider               AiProviderName    @default(DETERMINISTIC)
-  aiModel                  String?
-  aiGenerationDurationMs   Int?
-  aiValidationPassed       Boolean?
-  aiValidationReasons      Json?
-  generatedAt              DateTime?
-  offerTitleSnapshot       String
-  productExternalIdSnapshot String
-  marketplaceSnapshot      Marketplace
-  categorySnapshot         String?
-  originalPriceSnapshot    Decimal?          @db.Decimal(12, 2)
-  currentPriceSnapshot     Decimal           @db.Decimal(12, 2)
-  discountPercentageSnapshot Decimal?         @db.Decimal(5, 2)
-  couponCodeSnapshot       String?
-  couponExpirationSnapshot DateTime?
-  freeShippingSnapshot     Boolean
-  shippingStatusSnapshot   ShippingStatus     @default(UNKNOWN)
-  affiliateUrlSnapshot     String?
-  trackingUrlSnapshot      String
-  offerVersionSnapshot     Int
-  errorMessage             String?
-  createdAt                DateTime          @default(now())
-  updatedAt                DateTime          @updatedAt
+  id                         String            @id @default(cuid())
+  offerId                    String
+  channelId                  String
+  status                     PublicationStatus @default(SCHEDULED)
+  idempotencyKey             String            @unique
+  scheduledAt                DateTime
+  publishedAt                DateTime?
+  externalId                 String?
+  messagePayload             Json?
+  messageSource              MessageSource     @default(DETERMINISTIC_FALLBACK)
+  aiProvider                 AiProviderName    @default(DETERMINISTIC)
+  aiModel                    String?
+  aiGenerationDurationMs     Int?
+  aiValidationPassed         Boolean?
+  aiValidationReasons        Json?
+  generatedAt                DateTime?
+  offerTitleSnapshot         String
+  productExternalIdSnapshot  String
+  marketplaceSnapshot        Marketplace
+  categorySnapshot           String?
+  originalPriceSnapshot      Decimal?          @db.Decimal(12, 2)
+  currentPriceSnapshot       Decimal           @db.Decimal(12, 2)
+  discountPercentageSnapshot Decimal?          @db.Decimal(5, 2)
+  couponCodeSnapshot         String?
+  couponExpirationSnapshot   DateTime?
+  freeShippingSnapshot       Boolean
+  shippingStatusSnapshot     ShippingStatus    @default(UNKNOWN)
+  affiliateUrlSnapshot       String?
+  trackingUrlSnapshot        String
+  offerVersionSnapshot       Int
+  errorMessage               String?
+  createdAt                  DateTime          @default(now())
+  updatedAt                  DateTime          @updatedAt
 
   offer       Offer                @relation(fields: [offerId], references: [id], onDelete: Cascade)
   channel     Channel              @relation(fields: [channelId], references: [id], onDelete: Cascade)
@@ -388,14 +415,14 @@ model Publication {
 }
 
 model PublicationAttempt {
-  id             String                   @id @default(cuid())
-  publicationId  String
-  attemptNumber  Int                      @default(1)
-  status         PublicationAttemptStatus @default(PENDING)
-  requestPayload Json?
+  id              String                   @id @default(cuid())
+  publicationId   String
+  attemptNumber   Int                      @default(1)
+  status          PublicationAttemptStatus @default(PENDING)
+  requestPayload  Json?
   responsePayload Json?
-  errorMessage   String?
-  attemptedAt    DateTime                 @default(now())
+  errorMessage    String?
+  attemptedAt     DateTime                 @default(now())
 
   publication Publication @relation(fields: [publicationId], references: [id], onDelete: Cascade)
 
@@ -403,7 +430,7 @@ model PublicationAttempt {
 }
 
 model Click {
-  id              String   @id @default(cuid())
+  id              String      @id @default(cuid())
   offerId         String
   affiliateLinkId String?
   publicationId   String?
@@ -411,7 +438,7 @@ model Click {
   marketplace     Marketplace
   userAgent       String?
   referer         String?
-  createdAt       DateTime @default(now())
+  createdAt       DateTime    @default(now())
 
   offer         Offer          @relation(fields: [offerId], references: [id], onDelete: Cascade)
   affiliateLink AffiliateLink? @relation(fields: [affiliateLinkId], references: [id], onDelete: SetNull)
@@ -423,15 +450,15 @@ model Click {
 }
 
 model Conversion {
-  id            String      @id @default(cuid())
-  marketplace   Marketplace
+  id              String      @id @default(cuid())
+  marketplace     Marketplace
   externalOrderId String?
-  offerId       String?
-  publicationId String?
-  amount        Decimal     @db.Decimal(12, 2)
-  occurredAt    DateTime
-  importedAt    DateTime    @default(now())
-  rawPayload     Json?
+  offerId         String?
+  publicationId   String?
+  amount          Decimal     @db.Decimal(12, 2)
+  occurredAt      DateTime
+  importedAt      DateTime    @default(now())
+  rawPayload      Json?
 
   offer       Offer?       @relation(fields: [offerId], references: [id], onDelete: SetNull)
   publication Publication? @relation(fields: [publicationId], references: [id], onDelete: SetNull)
@@ -496,14 +523,14 @@ model AutomationRun {
 }
 
 model SystemAlert {
-  id          String        @id @default(cuid())
-  severity    AlertSeverity
-  source      String
-  message     String
-  metadata    Json?
-  acknowledged Boolean     @default(false)
-  createdAt   DateTime     @default(now())
-  updatedAt   DateTime     @updatedAt
+  id           String        @id @default(cuid())
+  severity     AlertSeverity
+  source       String
+  message      String
+  metadata     Json?
+  acknowledged Boolean       @default(false)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
 
   @@index([severity, acknowledged])
   @@index([source, createdAt])

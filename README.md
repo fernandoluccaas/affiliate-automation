@@ -101,6 +101,10 @@ MERCADO_LIVRE_REDIRECT_URI="http://localhost:3000/api/integrations/mercadolivre/
 MERCADO_LIVRE_SITE_ID="MLB"
 ```
 
+See [docs/mercado-livre-affiliate-session.md](docs/mercado-livre-affiliate-session.md)
+for the separately encrypted Affiliate Portal session, its server-side
+configuration and the opt-in real integration test.
+
 Use `/integracoes` to connect or reconnect through OAuth 2.0. Tokens are encrypted in `MarketplaceAccount`, refresh tokens are treated as rotating credentials, and Redis locks prevent concurrent refresh.
 
 Use `/integracoes/mercado-livre` to enable discovery, choose official category IDs, set price/discount/score filters and run manual sync. Dashboard and worker call the same `MercadoLivreDiscoveryService`; the connector is limited to official HTTP access/parsing and `ingestOffer` owns Product/Offer persistence. A distributed lock at `mercado-livre:discovery:{accountId}` prevents manual and worker runs from overlapping.
