@@ -17,7 +17,12 @@ import {
 } from "@affiliate/marketplace-connectors";
 import {
   MercadoLivreHighlightResolver,
+  applyAffiliateLinksBatch,
   collectMercadoLivreCandidates,
+  parseAffiliateLinksCsv,
+  parsePipeAffiliateLinks,
+  previewAffiliateLinksBatch,
+  type AffiliateLinkBatchEntry,
   type MercadoLivreProductResolutionDiagnostics,
 } from "@affiliate/marketplace-discovery";
 import {
@@ -824,10 +829,14 @@ export async function testMercadoLivreIntegrationAction() {
     }
   } catch (error) {
     const code = classifyMercadoLivreTestError(error);
-    console.error("Mercado Livre integration test failed", {
-      code,
-      error: error instanceof Error ? error.message : "unknown",
-    });
+    console.error(
+      JSON.stringify({
+        event: "mercadolivre_oauth_healthcheck_failed",
+        stage: "OAUTH_HEALTHCHECK",
+        status: "FAILED",
+        errorCode: code,
+      }),
+    );
     message = mercadoLivreFailureMessage(code);
   }
 
@@ -1044,6 +1053,56 @@ export async function saveMercadoLivreAffiliateUrlAction(formData: FormData) {
   redirect(
     `/ofertas/affiliate-links?message=${result.ok ? "saved" : "failed"}`,
   );
+}
+
+export type AffiliateLinkBatchActionInput =
+  | {
+      method: "PIPE" | "CSV";
+      raw: string;
+    }
+  | {
+      method: "ENTRIES";
+      entries: AffiliateLinkBatchEntry[];
+    };
+
+function parseAffiliateLinkBatchInput(input: AffiliateLinkBatchActionInput) {
+  if (input.method === "ENTRIES") {
+    return { entries: input.entries, issues: [] };
+  }
+
+  return input.method === "CSV"
+    ? parseAffiliateLinksCsv(input.raw)
+    : parsePipeAffiliateLinks(input.raw);
+}
+
+export async function previewAffiliateLinksBatchAction(
+  input: AffiliateLinkBatchActionInput,
+) {
+  const parsed = parseAffiliateLinkBatchInput(input);
+  const preview = await previewAffiliateLinksBatch(parsed.entries);
+
+  return { parseIssues: parsed.issues, preview };
+}
+
+export async function applyAffiliateLinksBatchAction(
+  input: AffiliateLinkBatchActionInput,
+) {
+  const parsed = parseAffiliateLinkBatchInput(input);
+
+  if (parsed.issues.length > 0) {
+    return {
+      ok: false as const,
+      parseIssues: parsed.issues,
+      result: null,
+    };
+  }
+
+  const result = await applyAffiliateLinksBatch({ entries: parsed.entries });
+  revalidatePath("/ofertas");
+  revalidatePath("/ofertas/affiliate-links");
+  revalidatePath("/integracoes/mercado-livre");
+
+  return { ok: true as const, parseIssues: [], result };
 }
 
 export async function acknowledgeAlertAction(formData: FormData) {

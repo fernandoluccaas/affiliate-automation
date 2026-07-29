@@ -33,6 +33,21 @@ export {
   type AffiliateLinkGenerationResult,
   type AffiliateLinkProvider,
 } from "./affiliate-link-provider";
+export {
+  applyAffiliateLinksBatch,
+  extractMercadoLivreExternalId,
+  parseAffiliateLinksCsv,
+  parsePipeAffiliateLinks,
+  previewAffiliateLinksBatch,
+  validateMercadoLivreProductUrl,
+  type AffiliateLinkBatchEntry,
+  type AffiliateLinkBatchPreview,
+  type AffiliateLinkPreviewItem,
+  type AffiliateLinkPreviewStatus,
+  type AffiliateLinkParseIssue,
+  type AffiliateLinkParseResult,
+  type ApplyAffiliateLinksBatchResult,
+} from "./affiliate-links";
 
 export type { MercadoLivreProductResolutionDiagnostics } from "@affiliate/marketplace-connectors";
 

@@ -15,7 +15,8 @@
     "@affiliate/database": "0.1.0",
     "@affiliate/ingestion": "0.1.0",
     "@affiliate/marketplace-connectors": "0.1.0",
-    "@affiliate/redis": "0.1.0"
+    "@affiliate/redis": "0.1.0",
+    "@affiliate/validation": "0.1.0"
   },
   "devDependencies": {
     "typescript": "^5.8.3",
