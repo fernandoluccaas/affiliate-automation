@@ -357,6 +357,10 @@ function emptyProductDiagnostics(): MercadoLivreProductResolutionDiagnostics {
     productLeafCount: 0,
     productResolvedDirectly: 0,
     productResolvedViaChild: 0,
+    productResolvedViaItems: 0,
+    productItemsFetched: 0,
+    productItemsUsable: 0,
+    productItemsSkipped: 0,
     productLeafWithoutWinner: 0,
     productParentWithoutResolvableChild: 0,
   };
@@ -375,6 +379,10 @@ function addProductDiagnostics(
   target.productLeafCount += source.productLeafCount;
   target.productResolvedDirectly += source.productResolvedDirectly;
   target.productResolvedViaChild += source.productResolvedViaChild;
+  target.productResolvedViaItems += source.productResolvedViaItems;
+  target.productItemsFetched += source.productItemsFetched;
+  target.productItemsUsable += source.productItemsUsable;
+  target.productItemsSkipped += source.productItemsSkipped;
   target.productLeafWithoutWinner += source.productLeafWithoutWinner;
   target.productParentWithoutResolvableChild +=
     source.productParentWithoutResolvableChild;

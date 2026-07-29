@@ -34,6 +34,8 @@ export type MarketplaceOfferCandidate = {
   rating?: number | null;
   salesCount?: number | null;
   freeShipping?: boolean | null;
+  availableQuantity?: number | null;
+  sellerReputation?: number | null;
   shippingStatus?: ShippingStatus;
   stockStatus?: StockStatus;
   sellerId?: string | null;
@@ -64,6 +66,7 @@ export interface MarketplaceConnector {
   getCategoryChildren(categoryId: string): Promise<MercadoLivreCategoryChild[]>;
   getBestSellers(categoryId: string): Promise<MercadoLivreHighlightCandidate[]>;
   getProduct(productId: string): Promise<MercadoLivreProduct | null>;
+  getProductItems(productId: string): Promise<MercadoLivreProductItem[]>;
   getUserProduct(
     userProductId: string,
   ): Promise<MercadoLivreUserProduct | null>;
@@ -240,6 +243,19 @@ export type MercadoLivreUserProduct = {
   userId: string | null;
 };
 
+export type MercadoLivreProductItem = {
+  itemId: string;
+  siteId: string | null;
+  condition: string | null;
+  status: string | null;
+  price: number | null;
+  availableQuantity: number | null;
+  freeShipping: boolean | null;
+  officialStoreId: string | null;
+  sellerReputation: number | null;
+  channels: string[];
+};
+
 export type MercadoLivreHighlightSkipReason =
   | "UNSUPPORTED_HIGHLIGHT_TYPE"
   | "PRODUCT_NOT_FOUND"
@@ -249,6 +265,9 @@ export type MercadoLivreHighlightSkipReason =
   | "PRODUCT_CHILD_RESOLUTION_ERROR"
   | "PRODUCT_TREE_DEPTH_LIMIT"
   | "PRODUCT_TREE_SIZE_LIMIT"
+  | "PRODUCT_ITEMS_EMPTY"
+  | "PRODUCT_ITEMS_NO_USABLE_ITEM"
+  | "PRODUCT_ITEMS_API_ERROR"
   | "USER_PRODUCT_NOT_FOUND"
   | "USER_PRODUCT_NO_USER"
   | "USER_PRODUCT_NO_ACTIVE_ITEM"
@@ -256,8 +275,10 @@ export type MercadoLivreHighlightSkipReason =
 
 export type MercadoLivreResolutionStrategy =
   | "ITEM_DIRECT"
+  | "HIGHLIGHT_ITEM_DIRECT"
   | "PRODUCT_DIRECT_BUY_BOX"
   | "PRODUCT_CHILD_BUY_BOX"
+  | "PRODUCT_ITEMS_FALLBACK"
   | "USER_PRODUCT_ACTIVE_ITEM";
 
 export type MercadoLivreProductResolutionDiagnostics = {
@@ -266,6 +287,10 @@ export type MercadoLivreProductResolutionDiagnostics = {
   productLeafCount: number;
   productResolvedDirectly: number;
   productResolvedViaChild: number;
+  productResolvedViaItems: number;
+  productItemsFetched: number;
+  productItemsUsable: number;
+  productItemsSkipped: number;
   productLeafWithoutWinner: number;
   productParentWithoutResolvableChild: number;
 };
@@ -530,10 +555,7 @@ function sanitizeDiagnosticText(value: unknown, secrets: string[] = []) {
   return sanitized.slice(0, MAX_DIAGNOSTIC_TEXT_LENGTH);
 }
 
-function sanitizeDiagnosticIdentifier(
-  value: unknown,
-  secrets: string[] = [],
-) {
+function sanitizeDiagnosticIdentifier(value: unknown, secrets: string[] = []) {
   const raw = asStringId(value);
 
   if (!raw) {
@@ -569,10 +591,7 @@ function sanitizeApiErrorCause(value: unknown, secrets: string[]) {
     const code = sanitizeDiagnosticIdentifier(record.code, secrets);
     const message = sanitizeDiagnosticText(record.message, secrets);
     const type = sanitizeDiagnosticIdentifier(record.type, secrets);
-    const department = sanitizeDiagnosticIdentifier(
-      record.department,
-      secrets,
-    );
+    const department = sanitizeDiagnosticIdentifier(record.department, secrets);
     const causeId = sanitizeDiagnosticIdentifier(
       record.cause_id ?? record.causeId,
       secrets,
@@ -768,11 +787,9 @@ export class MercadoLivreApiClient {
           }
 
           const fallback = `Mercado Livre API ${response.status}: ${response.statusText}`;
-          const details = sanitizeApiErrorDetails(
-            body,
-            response.status,
-            [this.options.accessToken],
-          );
+          const details = sanitizeApiErrorDetails(body, response.status, [
+            this.options.accessToken,
+          ]);
           throw new MercadoLivreApiError(
             responseErrorMessage(details, fallback),
             response.status,
@@ -1395,6 +1412,57 @@ export class MercadoLivreConnector implements MarketplaceConnector {
     return parsedProduct;
   }
 
+  async getProductItems(productId: string) {
+    const body = asRecord(
+      await this.options.client.request(
+        `/products/${encodeURIComponent(productId)}/items?limit=100&offset=0`,
+      ),
+    );
+
+    return asArray(body?.results)
+      .map(asRecord)
+      .filter(isRecord)
+      .map((item): MercadoLivreProductItem | null => {
+        const itemId = asStringId(item.item_id ?? item.id);
+
+        if (!itemId) {
+          return null;
+        }
+
+        const shipping = asRecord(item.shipping);
+        const seller = asRecord(item.seller);
+        const reputation = asRecord(
+          item.seller_reputation ?? seller?.seller_reputation,
+        );
+        const transactions = asRecord(reputation?.transactions);
+        const completed = asNumber(transactions?.completed);
+        const total = asNumber(transactions?.total);
+        const sellerReputation =
+          completed !== null && total !== null && total > 0
+            ? completed / total
+            : asNumber(item.seller_reputation_score ?? seller?.reputation);
+
+        return {
+          itemId,
+          siteId: asString(item.site_id),
+          condition: asString(item.condition),
+          status: asString(item.status),
+          price: asNumber(item.price),
+          availableQuantity: asNumber(item.available_quantity),
+          freeShipping:
+            typeof shipping?.free_shipping === "boolean"
+              ? shipping.free_shipping
+              : null,
+          officialStoreId: asStringId(item.official_store_id),
+          sellerReputation,
+          channels: asArray(item.channels)
+            .map(asString)
+            .filter((channel): channel is string => Boolean(channel)),
+        };
+      })
+      .filter((item): item is MercadoLivreProductItem => item !== null);
+  }
+
   async getUserProduct(userProductId: string) {
     const userProduct = asRecord(
       await this.options.client.request(
@@ -1541,9 +1609,7 @@ export class MercadoLivreConnector implements MarketplaceConnector {
             errorCode: error.status === 429 ? "RATE_LIMITED" : "API_ERROR",
             errorMessage: error.details.message ?? error.message,
             apiError: error.details,
-            ...(forbiddenClassification
-              ? { forbiddenClassification }
-              : {}),
+            ...(forbiddenClassification ? { forbiddenClassification } : {}),
           };
         }
 
@@ -1649,6 +1715,8 @@ export class MercadoLivreConnector implements MarketplaceConnector {
         stockStatus: normalizeStock(item),
         shippingStatus,
         freeShipping: shippingStatus === "FREE",
+        availableQuantity: asNumber(item.available_quantity),
+        sellerReputation: null,
         rating: null,
         salesCount: asNumber(item.sold_quantity),
         sellerId: asStringId(item.seller_id),

@@ -21,6 +21,7 @@ import {
   type MercadoLivreHighlightSkipReason,
   type MercadoLivreOperationalEvent,
   type MercadoLivreProduct,
+  type MercadoLivreProductItem,
   type MercadoLivreProductResolutionDiagnostics,
   type MercadoLivreResolutionStrategy,
   type MercadoLivreResolvedHighlightCandidate,
@@ -84,6 +85,10 @@ export type MercadoLivreDiscoveryMetrics = {
   productLeafCount: number;
   productResolvedDirectly: number;
   productResolvedViaChild: number;
+  productResolvedViaItems: number;
+  productItemsFetched: number;
+  productItemsUsable: number;
+  productItemsSkipped: number;
   productLeafWithoutWinner: number;
   productParentWithoutResolvableChild: number;
   resolvedItemCandidates: number;
@@ -334,6 +339,10 @@ export function createMercadoLivreDiscoveryMetrics(): MercadoLivreDiscoveryMetri
     productLeafCount: 0,
     productResolvedDirectly: 0,
     productResolvedViaChild: 0,
+    productResolvedViaItems: 0,
+    productItemsFetched: 0,
+    productItemsUsable: 0,
+    productItemsSkipped: 0,
     productLeafWithoutWinner: 0,
     productParentWithoutResolvableChild: 0,
     resolvedItemCandidates: 0,
@@ -1011,6 +1020,10 @@ function recordProductDiagnostics(
   metrics.productLeafCount += diagnostics.productLeafCount;
   metrics.productResolvedDirectly += diagnostics.productResolvedDirectly;
   metrics.productResolvedViaChild += diagnostics.productResolvedViaChild;
+  metrics.productResolvedViaItems += diagnostics.productResolvedViaItems;
+  metrics.productItemsFetched += diagnostics.productItemsFetched;
+  metrics.productItemsUsable += diagnostics.productItemsUsable;
+  metrics.productItemsSkipped += diagnostics.productItemsSkipped;
   metrics.productLeafWithoutWinner += diagnostics.productLeafWithoutWinner;
   metrics.productParentWithoutResolvableChild +=
     diagnostics.productParentWithoutResolvableChild;
@@ -1031,6 +1044,10 @@ function emptyProductDiagnostics(): MercadoLivreProductResolutionDiagnostics {
     productLeafCount: 0,
     productResolvedDirectly: 0,
     productResolvedViaChild: 0,
+    productResolvedViaItems: 0,
+    productItemsFetched: 0,
+    productItemsUsable: 0,
+    productItemsSkipped: 0,
     productLeafWithoutWinner: 0,
     productParentWithoutResolvableChild: 0,
   };
@@ -1108,6 +1125,90 @@ function compareNullablePriceAsc(left: number | null, right: number | null) {
   return 0;
 }
 
+function booleanPreference(left: boolean, right: boolean) {
+  return left === right ? 0 : left ? -1 : 1;
+}
+
+function isUsableMarketplaceCandidate(candidate: MarketplaceOfferCandidate) {
+  const channels = marketplaceChannels(candidate);
+
+  return (
+    candidate.currentPrice > 0 &&
+    (!candidate.itemStatus || candidate.itemStatus === "active") &&
+    (channels.length === 0 || channels.includes("marketplace"))
+  );
+}
+
+function chooseMarketplaceItem(
+  candidates: MarketplaceOfferCandidate[],
+  productItems: Map<string, MercadoLivreProductItem> = new Map(),
+) {
+  const [chosen] = candidates
+    .filter(isUsableMarketplaceCandidate)
+    .sort((left, right) => {
+      const leftMetadata = productItems.get(left.externalProductId);
+      const rightMetadata = productItems.get(right.externalProductId);
+      const active = booleanPreference(
+        !left.itemStatus || left.itemStatus === "active",
+        !right.itemStatus || right.itemStatus === "active",
+      );
+      if (active !== 0) return active;
+
+      const inStock = booleanPreference(
+        left.stockStatus === "IN_STOCK" ||
+          (leftMetadata?.availableQuantity ?? 0) > 0,
+        right.stockStatus === "IN_STOCK" ||
+          (rightMetadata?.availableQuantity ?? 0) > 0,
+      );
+      if (inStock !== 0) return inStock;
+
+      const freeShipping = booleanPreference(
+        left.freeShipping === true || leftMetadata?.freeShipping === true,
+        right.freeShipping === true || rightMetadata?.freeShipping === true,
+      );
+      if (freeShipping !== 0) return freeShipping;
+
+      const officialStore = booleanPreference(
+        Boolean(left.officialStoreId ?? leftMetadata?.officialStoreId),
+        Boolean(right.officialStoreId ?? rightMetadata?.officialStoreId),
+      );
+      if (officialStore !== 0) return officialStore;
+
+      const reputation = compareNullableNumberDesc(
+        left.sellerReputation ?? leftMetadata?.sellerReputation ?? null,
+        right.sellerReputation ?? rightMetadata?.sellerReputation ?? null,
+      );
+      if (reputation !== 0) return reputation;
+
+      if (left.currentPrice !== right.currentPrice) {
+        return left.currentPrice - right.currentPrice;
+      }
+
+      const quantity = compareNullableNumberDesc(
+        left.availableQuantity ?? leftMetadata?.availableQuantity ?? null,
+        right.availableQuantity ?? rightMetadata?.availableQuantity ?? null,
+      );
+      if (quantity !== 0) return quantity;
+      return left.externalProductId.localeCompare(right.externalProductId);
+    });
+
+  return chosen ?? null;
+}
+
+function isUsableProductItem(item: MercadoLivreProductItem) {
+  const channels = item.channels.map((channel) => channel.toLowerCase());
+  const active = !item.status || item.status === "active";
+
+  return (
+    item.siteId === "MLB" &&
+    item.condition === "new" &&
+    active &&
+    item.price !== null &&
+    item.price > 0 &&
+    (channels.length === 0 || channels.includes("marketplace"))
+  );
+}
+
 type ProductChildCandidate = {
   product: MercadoLivreProduct;
   terminal: boolean;
@@ -1135,7 +1236,11 @@ export class MercadoLivreHighlightResolver {
       }
 
       if (candidate.type === "ITEM") {
-        return resolvedHighlight(candidate, candidate.id, "ITEM_DIRECT");
+        return resolvedHighlight(
+          candidate,
+          candidate.id,
+          "HIGHLIGHT_ITEM_DIRECT",
+        );
       }
 
       if (candidate.type === "PRODUCT") {
@@ -1172,23 +1277,7 @@ export class MercadoLivreHighlightResolver {
       }
 
       const candidates = await this.connector.getItems(itemIds);
-      const order = new Map(itemIds.map((itemId, index) => [itemId, index]));
-      const [chosen] = candidates
-        .filter((item) => item.currentPrice > 0)
-        .filter((item) => !item.itemStatus || item.itemStatus === "active")
-        .filter((item) => {
-          const channels = marketplaceChannels(item);
-          return channels.length === 0 || channels.includes("marketplace");
-        })
-        .sort((left, right) => {
-          const leftOrder =
-            order.get(left.externalProductId) ?? Number.MAX_SAFE_INTEGER;
-          const rightOrder =
-            order.get(right.externalProductId) ?? Number.MAX_SAFE_INTEGER;
-
-          if (leftOrder !== rightOrder) return leftOrder - rightOrder;
-          return left.externalProductId.localeCompare(right.externalProductId);
-        });
+      const chosen = chooseMarketplaceItem(candidates);
 
       if (!chosen) {
         return skippedHighlight(candidate, "USER_PRODUCT_NO_ACTIVE_ITEM");
@@ -1239,11 +1328,7 @@ export class MercadoLivreHighlightResolver {
 
     if (product.childrenIds.length === 0) {
       diagnostics.productLeafWithoutWinner += 1;
-      return skippedHighlight(
-        candidate,
-        "PRODUCT_LEAF_NO_BUY_BOX_WINNER",
-        diagnostics,
-      );
+      return this.resolveProductItemsFallback(candidate, product, diagnostics);
     }
 
     const childResolution = await this.resolveProductChildren(
@@ -1256,7 +1341,7 @@ export class MercadoLivreHighlightResolver {
         diagnostics.productParentWithoutResolvableChild += 1;
       }
 
-      return skippedHighlight(candidate, childResolution.reason, diagnostics);
+      return this.resolveProductItemsFallback(candidate, product, diagnostics);
     }
 
     diagnostics.productResolvedViaChild += 1;
@@ -1265,6 +1350,78 @@ export class MercadoLivreHighlightResolver {
       childResolution.product.buyBoxWinnerItemId as string,
       "PRODUCT_CHILD_BUY_BOX",
       { resolvedProductId: childResolution.product.id },
+      diagnostics,
+    );
+  }
+
+  private async resolveProductItemsFallback(
+    candidate: MercadoLivreHighlightCandidate,
+    product: MercadoLivreProduct,
+    diagnostics: MercadoLivreProductResolutionDiagnostics,
+  ): Promise<MercadoLivreHighlightResolutionResult> {
+    let productItems: MercadoLivreProductItem[];
+
+    try {
+      productItems = await this.connector.getProductItems(product.id);
+    } catch {
+      return skippedHighlight(
+        candidate,
+        "PRODUCT_ITEMS_API_ERROR",
+        diagnostics,
+      );
+    }
+
+    diagnostics.productItemsFetched += productItems.length;
+
+    if (productItems.length === 0) {
+      return skippedHighlight(candidate, "PRODUCT_ITEMS_EMPTY", diagnostics);
+    }
+
+    const usableItems = productItems.filter(isUsableProductItem);
+    diagnostics.productItemsUsable += usableItems.length;
+    diagnostics.productItemsSkipped += productItems.length - usableItems.length;
+
+    if (usableItems.length === 0) {
+      return skippedHighlight(
+        candidate,
+        "PRODUCT_ITEMS_NO_USABLE_ITEM",
+        diagnostics,
+      );
+    }
+
+    let candidates: MarketplaceOfferCandidate[];
+
+    try {
+      candidates = await this.connector.getItems(
+        usableItems.map((item) => item.itemId),
+      );
+    } catch {
+      return skippedHighlight(
+        candidate,
+        "PRODUCT_ITEMS_API_ERROR",
+        diagnostics,
+      );
+    }
+
+    const productItemById = new Map(
+      usableItems.map((item) => [item.itemId, item]),
+    );
+    const chosen = chooseMarketplaceItem(candidates, productItemById);
+
+    if (!chosen) {
+      return skippedHighlight(
+        candidate,
+        "PRODUCT_ITEMS_NO_USABLE_ITEM",
+        diagnostics,
+      );
+    }
+
+    diagnostics.productResolvedViaItems += 1;
+    return resolvedHighlight(
+      candidate,
+      chosen.externalProductId,
+      "PRODUCT_ITEMS_FALLBACK",
+      { resolvedProductId: product.id },
       diagnostics,
     );
   }
@@ -2289,8 +2446,10 @@ function resolutionStrategyFromStoredValue(
   value: string | null,
 ): MercadoLivreResolutionStrategy | undefined {
   return value === "ITEM_DIRECT" ||
+    value === "HIGHLIGHT_ITEM_DIRECT" ||
     value === "PRODUCT_DIRECT_BUY_BOX" ||
     value === "PRODUCT_CHILD_BUY_BOX" ||
+    value === "PRODUCT_ITEMS_FALLBACK" ||
     value === "USER_PRODUCT_ACTIVE_ITEM"
     ? value
     : undefined;

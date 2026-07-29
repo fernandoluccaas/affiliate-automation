@@ -211,8 +211,10 @@ export const offerFormSchema = z.object({
   resolutionStrategy: z
     .enum([
       "ITEM_DIRECT",
+      "HIGHLIGHT_ITEM_DIRECT",
       "PRODUCT_DIRECT_BUY_BOX",
       "PRODUCT_CHILD_BUY_BOX",
+      "PRODUCT_ITEMS_FALLBACK",
       "USER_PRODUCT_ACTIVE_ITEM",
     ])
     .optional(),

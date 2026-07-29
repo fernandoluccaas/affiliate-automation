@@ -102,9 +102,7 @@ describe("Mercado Livre OAuth", () => {
         "dedicated-credentials-key-with-at-least-32-characters",
     };
 
-    expect(decryptSecret(encrypted, migratedEnv)).toBe(
-      "existing-oauth-token",
-    );
+    expect(decryptSecret(encrypted, migratedEnv)).toBe("existing-oauth-token");
   });
 });
 
@@ -405,6 +403,56 @@ describe("MercadoLivreConnector", () => {
     });
     expect(log).not.toHaveBeenCalled();
     log.mockRestore();
+  });
+
+  it("loads and normalizes official catalog product items", async () => {
+    let requestedUrl = "";
+    let requestedHeaders: Headers | undefined;
+    const fetchFn: ApiFetch = vi.fn(async (url, init) => {
+      requestedUrl = String(url);
+      requestedHeaders = init?.headers as Headers;
+      return jsonResponse({
+        paging: { total: 1, limit: 100, offset: 0 },
+        results: [
+          {
+            item_id: "MLB123",
+            site_id: "MLB",
+            condition: "new",
+            status: "active",
+            price: 199.9,
+            available_quantity: 8,
+            shipping: { free_shipping: true },
+            official_store_id: 42,
+            channels: ["marketplace"],
+            seller_reputation: {
+              transactions: { completed: 95, total: 100 },
+            },
+          },
+        ],
+      });
+    });
+    const connector = new MercadoLivreConnector({
+      client: new MercadoLivreApiClient({ accessToken: "token", fetchFn }),
+    });
+
+    await expect(connector.getProductItems("MLB-CATALOG")).resolves.toEqual([
+      {
+        itemId: "MLB123",
+        siteId: "MLB",
+        condition: "new",
+        status: "active",
+        price: 199.9,
+        availableQuantity: 8,
+        freeShipping: true,
+        officialStoreId: "42",
+        sellerReputation: 0.95,
+        channels: ["marketplace"],
+      },
+    ]);
+    expect(requestedUrl).toBe(
+      "https://api.mercadolibre.com/products/MLB-CATALOG/items?limit=100&offset=0",
+    );
+    expect(requestedHeaders?.get("authorization")).toBe("Bearer token");
   });
 });
 
