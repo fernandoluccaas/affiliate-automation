@@ -1,4 +1,4 @@
-import { ArrowLeft, Plus, RefreshCw, Save, Search } from "lucide-react";
+import { ArrowLeft, Plus, Save, Search } from "lucide-react";
 import Link from "next/link";
 import { prisma } from "@affiliate/database";
 import {
@@ -31,6 +31,7 @@ import {
   selectMercadoLivreAffiliateTagAction,
   testMercadoLivreAffiliateSessionAction,
 } from "@/lib/mercadolivre-affiliate-actions";
+import { MercadoLivreImportButton } from "./mercado-livre-import-button";
 
 export const dynamic = "force-dynamic";
 
@@ -503,14 +504,9 @@ export default async function MercadoLivreIntegrationPage({
           </Link>
         </Button>
         <form action={syncMercadoLivreNowAction}>
-          <Button
-            type="submit"
-            variant="outline"
+          <MercadoLivreImportButton
             disabled={account?.status !== "CONNECTED"}
-          >
-            <RefreshCw aria-hidden="true" size={16} />
-            Importar mais vendidos e gerar links
-          </Button>
+          />
         </form>
       </div>
 
@@ -802,8 +798,8 @@ export default async function MercadoLivreIntegrationPage({
               ],
               [
                 "4",
-                "Importar links",
-                "Cole meli.la na tela de ofertas pendentes.",
+                "Gerar ou importar links",
+                "A sessao conectada gera meli.la; o lote manual permanece como fallback.",
               ],
             ].map(([step, title, description]) => (
               <li

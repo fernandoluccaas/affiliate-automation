@@ -1,4 +1,5 @@
 import { Plus } from "lucide-react";
+import Image from "next/image";
 import Link from "next/link";
 import { prisma } from "@affiliate/database";
 import { marketplaces, offerStatuses, stockStatuses } from "@affiliate/shared";
@@ -7,6 +8,7 @@ import { EmptyState } from "@/components/empty-state";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { formatCurrency, formatDateTime, formatPercentage } from "@/lib/format";
+import { CopyAffiliateLinkButton } from "./copy-affiliate-link-button";
 
 export const dynamic = "force-dynamic";
 
@@ -88,6 +90,7 @@ export default async function OffersPage({ searchParams }: OffersPageProps) {
         externalProductId: true,
         version: true,
         title: true,
+        imageUrl: true,
         productUrl: true,
         category: true,
         sourceCategoryId: true,
@@ -150,7 +153,11 @@ export default async function OffersPage({ searchParams }: OffersPageProps) {
           <option value="">Todos status</option>
           {offerStatuses.map((item) => (
             <option key={item} value={item}>
-              {item}
+              {item === "READY_FOR_AFFILIATE_LINK"
+                ? "Aguardando link"
+                : item === "READY_TO_PUBLISH"
+                  ? "Prontas para publicar"
+                  : item}
             </option>
           ))}
         </Select>
@@ -167,7 +174,7 @@ export default async function OffersPage({ searchParams }: OffersPageProps) {
         >
           <option value="">Todas elegibilidades</option>
           <option value="ELIGIBLE">ELIGIBLE</option>
-          <option value="INELIGIBLE">INELIGIBLE</option>
+          <option value="INELIGIBLE">Link/oferta invalido</option>
           <option value="UNKNOWN">UNKNOWN</option>
         </Select>
         <Select
@@ -213,7 +220,19 @@ export default async function OffersPage({ searchParams }: OffersPageProps) {
               {offers.map((offer) => (
                 <tr key={offer.id} className="border-b last:border-0">
                   <td className="max-w-[260px] px-4 py-3">
-                    <div className="font-medium">{offer.title}</div>
+                    <div className="flex items-start gap-3">
+                      {offer.imageUrl ? (
+                        <Image
+                          src={offer.imageUrl}
+                          alt=""
+                          width={64}
+                          height={64}
+                          unoptimized
+                          className="h-16 w-16 rounded-md border object-cover"
+                        />
+                      ) : null}
+                      <div className="font-medium">{offer.title}</div>
+                    </div>
                     <a
                       className="mt-1 inline-block text-xs text-[var(--primary)] underline-offset-2 hover:underline"
                       href={offer.productUrl}
@@ -277,14 +296,17 @@ export default async function OffersPage({ searchParams }: OffersPageProps) {
                     {offer.affiliateEligibility}
                     <div className="text-xs text-[var(--muted-foreground)]">
                       {offer.affiliateUrl ? (
-                        <a
-                          className="text-[var(--primary)] underline-offset-2 hover:underline"
-                          href={offer.affiliateUrl}
-                          rel="noreferrer"
-                          target="_blank"
-                        >
-                          abrir link afiliado
-                        </a>
+                        <span className="grid gap-2">
+                          <a
+                            className="text-[var(--primary)] underline-offset-2 hover:underline"
+                            href={offer.affiliateUrl}
+                            rel="noreferrer"
+                            target="_blank"
+                          >
+                            abrir link afiliado
+                          </a>
+                          <CopyAffiliateLinkButton value={offer.affiliateUrl} />
+                        </span>
                       ) : (
                         "sem link afiliado"
                       )}{" "}

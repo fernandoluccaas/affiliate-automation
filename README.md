@@ -135,7 +135,10 @@ The worker processes queued `AFFILIATE_LINK_BATCH` jobs and isolates expiration,
 
 Mercado Livre publications use `DIRECT_AFFILIATE_LINK`. A missing or invalid affiliate URL prevents scheduling and publication; there is no fallback to the original URL.
 
-See [docs/mercado-livre-supported-import.md](docs/mercado-livre-supported-import.md) for formats, validation and versioning details. A future automatic provider must use an officially documented link-generation API and implement `AffiliateLinkProvider`.
+See [docs/mercado-livre-supported-import.md](docs/mercado-livre-supported-import.md) for formats, validation and versioning details. The current automatic provider is limited to the owner-authorized Mercado Livre affiliate-session resources documented in `AGENTS.md`; any future provider must remain behind `AffiliateLinkProvider` and use an explicitly authorized or officially documented API.
+
+For an end-to-end owner-authorized session check, follow
+[docs/mercado-livre-one-click-manual-test.md](docs/mercado-livre-one-click-manual-test.md).
 
 ## Tracking
 
