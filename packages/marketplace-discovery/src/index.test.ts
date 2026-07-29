@@ -11,10 +11,12 @@ import {
   MercadoLivreDiscoveryService,
   MercadoLivreHighlightResolver,
   createMercadoLivreDiscoveryMetrics,
+  diagnoseMercadoLivreProduct,
   discoverCandidatesFromLeafCategories,
   generatePendingMercadoLivreAffiliateLinks,
   passesMinimumDiscount,
   refreshMercadoLivreOffers,
+  selectBestMercadoLivreProductItem,
 } from "./index";
 
 function catalogProduct(
@@ -266,6 +268,85 @@ function refreshOffer(id: string, overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
+
+describe("diagnoseMercadoLivreProduct", () => {
+  it("runs a read-only product-items evaluation and selects deterministically", async () => {
+    const marketplace = connector({
+      getProduct: vi.fn().mockResolvedValue(
+        catalogProduct({
+          id: "MLB62081577",
+          buyBoxWinnerItemId: null,
+        }),
+      ),
+      getProductItems: vi.fn().mockResolvedValue(
+        productItemsResolution(
+          [
+            {
+              itemId: "MLB1111111111",
+              price: 90,
+              freeShipping: false,
+            },
+            {
+              itemId: "MLB2222222222",
+              price: 110,
+              freeShipping: true,
+            },
+          ],
+          [
+            offerCandidate("MLB1111111111", {
+              currentPrice: 90,
+              freeShipping: false,
+            }),
+            offerCandidate("MLB2222222222", {
+              currentPrice: 110,
+              freeShipping: true,
+            }),
+          ],
+          {
+            productItemsHydrated: 2,
+            productItemsUsable: 2,
+          },
+        ),
+      ),
+    });
+
+    await expect(
+      diagnoseMercadoLivreProduct(marketplace, "MLB62081577"),
+    ).resolves.toMatchObject({
+      productId: "MLB62081577",
+      productFound: true,
+      buyBoxWinnerPresent: false,
+      selectedItemId: "MLB2222222222",
+      diagnostics: {
+        productItemsResultsCount: 2,
+        productItemsHydrated: 2,
+        productItemsUsable: 2,
+      },
+    });
+    expect(marketplace.getProduct).toHaveBeenCalledTimes(1);
+    expect(marketplace.getProductItems).toHaveBeenCalledTimes(1);
+  });
+
+  it("prefers proven active, new, stocked marketplace facts over unknowns", () => {
+    const selected = selectBestMercadoLivreProductItem([
+      offerCandidate("MLBUNKNOWN", {
+        currentPrice: 50,
+        freeShipping: true,
+        officialStoreId: "1",
+        stockStatus: "UNKNOWN",
+      }),
+      offerCandidate("MLBPROVEN", {
+        currentPrice: 100,
+        itemStatus: "active",
+        itemCondition: "new",
+        stockStatus: "IN_STOCK",
+        channels: ["marketplace"],
+      }),
+    ]);
+
+    expect(selected?.externalProductId).toBe("MLBPROVEN");
+  });
+});
 
 describe("shared discovery architecture", () => {
   it("is the single import used by dashboard and worker", () => {

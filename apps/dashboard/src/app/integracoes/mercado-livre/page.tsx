@@ -17,6 +17,7 @@ import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import {
   addMercadoLivreCategoryAction,
+  diagnoseMercadoLivreProductAction,
   probeMercadoLivreCategorySearchAction,
   saveMercadoLivreConfigAction,
   syncMercadoLivreNowAction,
@@ -68,6 +69,11 @@ function messageText(message?: string | string[]) {
     return "A importação falhou. Veja os alertas antes de tentar novamente.";
   if (value === "category-search-tested")
     return "Probe de busca da categoria concluido.";
+  if (value === "product-diagnosed") return "Diagnostico de PRODUCT concluido.";
+  if (value === "product-diagnostic-invalid")
+    return "Informe um PRODUCT ID valido no formato MLB seguido de numeros.";
+  if (value === "product-diagnostic-error")
+    return "Nao foi possivel diagnosticar o PRODUCT na API oficial.";
   if (value === "affiliate-session-saved")
     return "Sessão de afiliado salva e validada.";
   if (value === "affiliate-session-tested")
@@ -211,6 +217,63 @@ function probeCause(value: string | string[] | undefined) {
     return entries.length > 0 ? entries.join(" | ") : "-";
   } catch {
     return "-";
+  }
+}
+
+function productProbeRejectionReasons(value: string | string[] | undefined) {
+  const raw = single(value);
+
+  if (!raw) return [];
+
+  try {
+    const parsed = JSON.parse(raw);
+
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return [];
+    }
+
+    return Object.entries(parsed as Record<string, unknown>).filter(
+      (entry): entry is [string, number] =>
+        typeof entry[1] === "number" && entry[1] > 0,
+    );
+  } catch {
+    return [];
+  }
+}
+
+type ProductProbeSample = {
+  itemId: string;
+  summaryFieldsPresent: string[];
+  hydrationHttpStatus?: number;
+  hydratedStatus?: string;
+  hydratedCondition?: string;
+  hydratedAvailableQuantity?: number;
+  hydratedChannels?: string[];
+  hasPermalink?: boolean;
+  hasPrice?: boolean;
+  rejectedReason?: string;
+};
+
+function productProbeSamples(value: string | string[] | undefined) {
+  const raw = single(value);
+
+  if (!raw) return [];
+
+  try {
+    const parsed = JSON.parse(raw);
+
+    if (!Array.isArray(parsed)) return [];
+
+    return parsed
+      .filter(
+        (item): item is ProductProbeSample =>
+          item &&
+          typeof item === "object" &&
+          typeof (item as { itemId?: unknown }).itemId === "string",
+      )
+      .slice(0, 3);
+  } catch {
+    return [];
   }
 }
 
@@ -484,6 +547,14 @@ export default async function MercadoLivreIntegrationPage({
     single(params?.message) === "category-tested" ? params : null;
   const categorySearchResult =
     single(params?.message) === "category-search-tested" ? params : null;
+  const productProbeResult =
+    single(params?.message) === "product-diagnosed" ? params : null;
+  const productProbeReasons = productProbeRejectionReasons(
+    productProbeResult?.rejectionReasons,
+  );
+  const productProbeDiagnosticSamples = productProbeSamples(
+    productProbeResult?.diagnosticSamples,
+  );
   const showAffiliateSession = true;
   const generatedAffiliateUrl = single(params?.generatedAffiliateUrl);
   const affiliateEndpointMode = single(params?.affiliateEndpointMode);
@@ -919,6 +990,173 @@ export default async function MercadoLivreIntegrationPage({
                 Salvar configuracao
               </Button>
             </form>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Diagnosticar PRODUCT</CardTitle>
+          </CardHeader>
+          <CardContent className="grid gap-4 text-sm">
+            <p className="text-[var(--muted-foreground)]">
+              Consulta o PRODUCT, interpreta os product items resumidos e
+              hidrata os ITEM IDs pela API oficial. Este probe nao gera meli.la,
+              nao ingere ofertas e nao cria jobs.
+            </p>
+            <form
+              action={diagnoseMercadoLivreProductAction}
+              className="grid gap-3"
+            >
+              <Field label="PRODUCT ID">
+                <Input
+                  name="productId"
+                  defaultValue={single(params?.productId) ?? ""}
+                  placeholder="MLB62081577"
+                />
+              </Field>
+              <Button type="submit" variant="outline" disabled={!connector}>
+                <Search aria-hidden="true" size={16} />
+                Diagnosticar PRODUCT
+              </Button>
+            </form>
+
+            {productProbeResult ? (
+              <div className="grid gap-4 rounded-md border bg-[var(--background)] p-3">
+                <dl className="grid gap-2 sm:grid-cols-2">
+                  <Result
+                    label="PRODUCT"
+                    value={single(productProbeResult.productId) ?? "-"}
+                  />
+                  <Result
+                    label="PRODUCT encontrado"
+                    value={
+                      single(productProbeResult.productFound) === "true"
+                        ? "sim"
+                        : "nao"
+                    }
+                  />
+                  <Result
+                    label="buy_box_winner"
+                    value={
+                      single(productProbeResult.buyBoxWinnerPresent) === "true"
+                        ? `presente (${single(productProbeResult.buyBoxWinnerItemId) ?? "-"})`
+                        : "ausente"
+                    }
+                  />
+                  <Result
+                    label="HTTP product items"
+                    value={
+                      single(productProbeResult.productItemsHttpStatus) ?? "-"
+                    }
+                  />
+                  <Result
+                    label="Product items encontrados"
+                    value={
+                      single(productProbeResult.productItemsResultsCount) ?? "0"
+                    }
+                  />
+                  <Result
+                    label="IDs interpretados"
+                    value={
+                      single(productProbeResult.productItemsParsedCount) ?? "0"
+                    }
+                  />
+                  <Result
+                    label="IDs unicos para hidratacao"
+                    value={
+                      single(productProbeResult.productItemsUniqueIds) ?? "0"
+                    }
+                  />
+                  <Result
+                    label="Hidratacoes solicitadas"
+                    value={
+                      single(
+                        productProbeResult.productItemsHydrationRequested,
+                      ) ?? "0"
+                    }
+                  />
+                  <Result
+                    label="Itens hidratados"
+                    value={
+                      single(productProbeResult.productItemsHydrated) ?? "0"
+                    }
+                  />
+                  <Result
+                    label="Itens utilizaveis"
+                    value={single(productProbeResult.productItemsUsable) ?? "0"}
+                  />
+                  <Result
+                    label="Item selecionado"
+                    value={single(productProbeResult.selectedItemId) || "-"}
+                  />
+                </dl>
+
+                <div className="grid gap-2">
+                  <div className="font-medium">Motivos de descarte</div>
+                  {productProbeReasons.length > 0 ? (
+                    <ul className="grid gap-1">
+                      {productProbeReasons.map(([reason, count]) => (
+                        <li key={reason}>
+                          {reason}: {count}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="text-[var(--muted-foreground)]">
+                      Nenhum descarte registrado.
+                    </p>
+                  )}
+                </div>
+
+                <div className="grid gap-2">
+                  <div className="font-medium">Amostras sanitizadas</div>
+                  {productProbeDiagnosticSamples.length > 0 ? (
+                    <div className="grid gap-2">
+                      {productProbeDiagnosticSamples.map((sample) => (
+                        <dl
+                          key={`${sample.itemId}-${sample.rejectedReason ?? "accepted"}`}
+                          className="grid gap-1 rounded-md border bg-white p-3"
+                        >
+                          <Result label="ITEM" value={sample.itemId} />
+                          <Result
+                            label="Campos do summary"
+                            value={
+                              sample.summaryFieldsPresent?.join(", ") || "-"
+                            }
+                          />
+                          <Result
+                            label="HTTP hydration"
+                            value={
+                              sample.hydrationHttpStatus?.toString() ?? "-"
+                            }
+                          />
+                          <Result
+                            label="Status / condition / estoque"
+                            value={`${sample.hydratedStatus ?? "unknown"} / ${sample.hydratedCondition ?? "unknown"} / ${sample.hydratedAvailableQuantity ?? "unknown"}`}
+                          />
+                          <Result
+                            label="Channels"
+                            value={sample.hydratedChannels?.join(", ") || "-"}
+                          />
+                          <Result
+                            label="Permalink / preco"
+                            value={`${sample.hasPermalink ? "sim" : "nao"} / ${sample.hasPrice ? "sim" : "nao"}`}
+                          />
+                          <Result
+                            label="Resultado"
+                            value={sample.rejectedReason ?? "utilizavel"}
+                          />
+                        </dl>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-[var(--muted-foreground)]">
+                      Nenhuma amostra disponivel.
+                    </p>
+                  )}
+                </div>
+              </div>
+            ) : null}
           </CardContent>
         </Card>
 

@@ -573,6 +573,7 @@ describe("MercadoLivreConnector", () => {
       externalProductId: "MLB123456",
       currentPrice: 89.9,
       priceSource: "ITEM_FALLBACK",
+      itemCondition: "new",
       availableQuantity: null,
       channels: [],
       stockStatus: "UNKNOWN",

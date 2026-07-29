@@ -19,6 +19,7 @@ import {
   MercadoLivreHighlightResolver,
   applyAffiliateLinksBatch,
   collectMercadoLivreCandidates,
+  diagnoseMercadoLivreProduct,
   parseAffiliateLinksCsv,
   parsePipeAffiliateLinks,
   previewAffiliateLinksBatch,
@@ -175,6 +176,13 @@ const affiliateLinkSchema = z.object({
 
 const mercadoLivreCategorySchema = z.object({
   categoryId: z.string().trim().min(1, "Informe a categoria."),
+});
+
+const mercadoLivreProductSchema = z.object({
+  productId: z
+    .string()
+    .trim()
+    .regex(/^MLB\d+$/i),
 });
 
 function stringList(value?: string) {
@@ -893,22 +901,10 @@ function appendCategorySearchAttempt(
   query.set(`${prefix}UsableItems`, String(attempt.usableItemIds.length));
   query.set(`${prefix}ErrorCode`, attempt.errorCode ?? "");
   query.set(`${prefix}ErrorMessage`, attempt.errorMessage ?? "");
-  query.set(
-    `${prefix}MercadoLivreCode`,
-    attempt.apiError?.code ?? "",
-  );
-  query.set(
-    `${prefix}MercadoLivreError`,
-    attempt.apiError?.error ?? "",
-  );
-  query.set(
-    `${prefix}Cause`,
-    JSON.stringify(attempt.apiError?.cause ?? []),
-  );
-  query.set(
-    `${prefix}BlockedBy`,
-    attempt.apiError?.blocked_by ?? "",
-  );
+  query.set(`${prefix}MercadoLivreCode`, attempt.apiError?.code ?? "");
+  query.set(`${prefix}MercadoLivreError`, attempt.apiError?.error ?? "");
+  query.set(`${prefix}Cause`, JSON.stringify(attempt.apiError?.cause ?? []));
+  query.set(`${prefix}BlockedBy`, attempt.apiError?.blocked_by ?? "");
   query.set(
     `${prefix}ForbiddenClassification`,
     attempt.forbiddenClassification ?? "",
@@ -986,6 +982,63 @@ export async function probeMercadoLivreCategorySearchAction(
   appendCategorySearchAttempt(query, "probePublic", result.publicAttempt);
 
   redirect(`/integracoes/mercado-livre?${query.toString()}`);
+}
+
+export async function diagnoseMercadoLivreProductAction(formData: FormData) {
+  const parsed = mercadoLivreProductSchema.safeParse({
+    productId: formData.get("productId")?.toString(),
+  });
+
+  if (!parsed.success) {
+    redirect("/integracoes/mercado-livre?message=product-diagnostic-invalid");
+  }
+
+  let connector: MarketplaceConnector;
+
+  try {
+    connector = await createMercadoLivreConnector();
+  } catch {
+    redirect("/integracoes/mercado-livre?message=product-diagnostic-error");
+  }
+
+  let successRedirect: string;
+
+  try {
+    const result = await diagnoseMercadoLivreProduct(
+      connector,
+      parsed.data.productId.toUpperCase(),
+    );
+    const diagnostics = result.diagnostics;
+    const query = new URLSearchParams({
+      message: "product-diagnosed",
+      productId: result.productId,
+      productFound: String(result.productFound),
+      buyBoxWinnerPresent: String(result.buyBoxWinnerPresent),
+      buyBoxWinnerItemId: result.buyBoxWinnerItemId ?? "",
+      productItemsHttpStatus:
+        diagnostics.productItemsHttpStatus?.toString() ?? "",
+      productItemsTotal: String(diagnostics.productItemsTotal),
+      productItemsResultsCount: String(diagnostics.productItemsResultsCount),
+      productItemsParsedCount: String(diagnostics.productItemsParsedCount),
+      productItemsUniqueIds: String(diagnostics.productItemsUniqueIds),
+      productItemsHydrationRequested: String(
+        diagnostics.productItemsHydrationRequested,
+      ),
+      productItemsHydrated: String(diagnostics.productItemsHydrated),
+      productItemsUsable: String(diagnostics.productItemsUsable),
+      selectedItemId: result.selectedItemId ?? "",
+      rejectionReasons: JSON.stringify(diagnostics.rejectionReasons),
+      diagnosticSamples: JSON.stringify(diagnostics.samples),
+    });
+
+    successRedirect = `/integracoes/mercado-livre?${query.toString()}`;
+  } catch {
+    redirect(
+      `/integracoes/mercado-livre?message=product-diagnostic-error&productId=${encodeURIComponent(parsed.data.productId.toUpperCase())}`,
+    );
+  }
+
+  redirect(successRedirect);
 }
 
 export async function saveMercadoLivreAffiliateUrlAction(formData: FormData) {

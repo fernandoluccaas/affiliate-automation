@@ -44,6 +44,7 @@ export type MarketplaceOfferCandidate = {
   affiliateLabel?: string | null;
   trackingStrategy?: "INTERNAL_REDIRECT" | "DIRECT_AFFILIATE_LINK";
   itemStatus?: string | null;
+  itemCondition?: MercadoLivreItemCondition;
   channels?: string[];
   sourceHighlightId?: string;
   sourceHighlightType?: MercadoLivreHighlightCandidate["type"];
@@ -1962,6 +1963,7 @@ export class MercadoLivreConnector implements MarketplaceConnector {
           affiliateEligibility: this.eligibility.evaluate(detail),
           trackingStrategy: "DIRECT_AFFILIATE_LINK",
           itemStatus: status,
+          itemCondition: condition,
           channels,
           priceSource,
           collectedAt: new Date(),

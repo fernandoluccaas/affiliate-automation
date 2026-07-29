@@ -14,6 +14,7 @@ const createPublication = vi.fn();
 const createMercadoLivreConnector = vi.fn();
 const getMercadoLivreConfig = vi.fn();
 const collectMercadoLivreCandidates = vi.fn();
+const diagnoseMercadoLivreProduct = vi.fn();
 const ingestOffer = vi.fn();
 const consoleError = vi
   .spyOn(console, "error")
@@ -75,6 +76,7 @@ vi.mock("@affiliate/marketplace-connectors", () => ({
 
 vi.mock("@affiliate/marketplace-discovery", () => ({
   collectMercadoLivreCandidates,
+  diagnoseMercadoLivreProduct,
   MercadoLivreHighlightResolver: class {
     resolveCandidate = vi.fn();
   },
@@ -111,6 +113,7 @@ describe("phase 3a imports", () => {
       siteId: "MLB",
     });
     collectMercadoLivreCandidates.mockReset();
+    diagnoseMercadoLivreProduct.mockReset();
   });
 
   it("imports dashboard actions through the public ingestion package", async () => {
@@ -120,6 +123,78 @@ describe("phase 3a imports", () => {
     expect(typeof actions.saveMercadoLivreAffiliateUrlAction).toBe("function");
     expect(typeof actions.testMercadoLivreIntegrationAction).toBe("function");
     expect(typeof actions.syncMercadoLivreNowAction).toBe("function");
+    expect(typeof actions.diagnoseMercadoLivreProductAction).toBe("function");
+  });
+
+  it("runs the read-only PRODUCT probe and redirects with sanitized diagnostics", async () => {
+    const { diagnoseMercadoLivreProductAction } = await import("./actions");
+    const connector = {};
+    createMercadoLivreConnector.mockResolvedValueOnce(connector);
+    diagnoseMercadoLivreProduct.mockResolvedValueOnce({
+      productId: "MLB62081577",
+      productFound: true,
+      buyBoxWinnerPresent: false,
+      buyBoxWinnerItemId: null,
+      selectedItemId: "MLB1234567890",
+      diagnostics: {
+        productItemsHttpStatus: 200,
+        productItemsTotal: 3,
+        productItemsResultsCount: 3,
+        productItemsParsedCount: 3,
+        productItemsUniqueIds: 3,
+        productItemsHydrationRequested: 3,
+        productItemsHydrated: 2,
+        productItemsUsable: 1,
+        priceApiFetched: 1,
+        priceFallbackUsed: 0,
+        priceUnavailable: 0,
+        rejectionReasons: { PRODUCT_ITEM_INACTIVE: 1 },
+        samples: [
+          {
+            itemId: "MLB1234567890",
+            summaryFieldsPresent: ["item_id", "price"],
+            hydrationHttpStatus: 206,
+            hydratedStatus: "active",
+            hydratedCondition: "new",
+            hasPermalink: true,
+            hasPrice: true,
+          },
+        ],
+      },
+    });
+    const formData = new FormData();
+    formData.set("productId", "mlb62081577");
+
+    await expect(diagnoseMercadoLivreProductAction(formData)).rejects.toThrow(
+      "REDIRECT:/integracoes/mercado-livre?",
+    );
+
+    expect(diagnoseMercadoLivreProduct).toHaveBeenCalledWith(
+      connector,
+      "MLB62081577",
+    );
+    const redirectUrl = redirectMock.mock.calls.at(-1)?.[0] as string;
+    const query = new URL(redirectUrl, "http://localhost").searchParams;
+    expect(query.get("message")).toBe("product-diagnosed");
+    expect(query.get("productItemsHydrated")).toBe("2");
+    expect(query.get("selectedItemId")).toBe("MLB1234567890");
+    expect(query.get("rejectionReasons")).toBe(
+      JSON.stringify({ PRODUCT_ITEM_INACTIVE: 1 }),
+    );
+    expect(redirectUrl).not.toContain("access_token");
+    expect(redirectUrl).not.toContain("cookie");
+  });
+
+  it("rejects an invalid PRODUCT ID before creating a connector", async () => {
+    const { diagnoseMercadoLivreProductAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("productId", "not-a-product");
+
+    await expect(diagnoseMercadoLivreProductAction(formData)).rejects.toThrow(
+      "REDIRECT:/integracoes/mercado-livre?message=product-diagnostic-invalid",
+    );
+    expect(createMercadoLivreConnector).not.toHaveBeenCalled();
+    expect(diagnoseMercadoLivreProduct).not.toHaveBeenCalled();
   });
 
   it("keeps ingestion exports available from the public package", async () => {
@@ -328,10 +403,8 @@ describe("phase 3a imports", () => {
       shortCircuitOnAuthenticatedSuccess: true,
     });
     const redirectUrl = redirectMock.mock.calls.at(-1)?.[0];
-    const redirectQuery = new URL(
-      redirectUrl ?? "",
-      "http://localhost",
-    ).searchParams;
+    const redirectQuery = new URL(redirectUrl ?? "", "http://localhost")
+      .searchParams;
 
     expect(redirectQuery.get("probeAuthenticatedHttpStatus")).toBe("403");
     expect(redirectQuery.get("probeAuthenticatedMercadoLivreCode")).toBe(

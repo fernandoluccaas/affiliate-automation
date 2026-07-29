@@ -1250,7 +1250,7 @@ function isUsableMarketplaceCandidate(candidate: MarketplaceOfferCandidate) {
   );
 }
 
-function chooseMarketplaceItem(
+export function selectBestMercadoLivreProductItem(
   candidates: MarketplaceOfferCandidate[],
   productItems: Map<string, MercadoLivreProductItem> = new Map(),
 ) {
@@ -1260,10 +1260,16 @@ function chooseMarketplaceItem(
       const leftMetadata = productItems.get(left.externalProductId);
       const rightMetadata = productItems.get(right.externalProductId);
       const active = booleanPreference(
-        !left.itemStatus || left.itemStatus === "active",
-        !right.itemStatus || right.itemStatus === "active",
+        left.itemStatus === "active",
+        right.itemStatus === "active",
       );
       if (active !== 0) return active;
+
+      const condition = booleanPreference(
+        left.itemCondition === "new" || leftMetadata?.condition === "new",
+        right.itemCondition === "new" || rightMetadata?.condition === "new",
+      );
+      if (condition !== 0) return condition;
 
       const inStock = booleanPreference(
         left.stockStatus === "IN_STOCK" ||
@@ -1272,6 +1278,12 @@ function chooseMarketplaceItem(
           (rightMetadata?.availableQuantity ?? 0) > 0,
       );
       if (inStock !== 0) return inStock;
+
+      const marketplaceChannel = booleanPreference(
+        marketplaceChannels(left).includes("marketplace"),
+        marketplaceChannels(right).includes("marketplace"),
+      );
+      if (marketplaceChannel !== 0) return marketplaceChannel;
 
       const freeShipping = booleanPreference(
         left.freeShipping === true || leftMetadata?.freeShipping === true,
@@ -1304,6 +1316,48 @@ function chooseMarketplaceItem(
     });
 
   return chosen ?? null;
+}
+
+export type MercadoLivreProductProbeResult = {
+  productId: string;
+  productFound: boolean;
+  buyBoxWinnerPresent: boolean;
+  buyBoxWinnerItemId: string | null;
+  selectedItemId: string | null;
+  diagnostics: Awaited<
+    ReturnType<MarketplaceConnector["getProductItems"]>
+  >["diagnostics"];
+};
+
+/**
+ * Read-only PRODUCT probe. It deliberately avoids ingestion, affiliate-link
+ * generation and job persistence so operators can inspect catalog resolution
+ * without changing application state.
+ */
+export async function diagnoseMercadoLivreProduct(
+  connector: MarketplaceConnector,
+  productId: string,
+): Promise<MercadoLivreProductProbeResult> {
+  const [product, productItems] = await Promise.all([
+    connector.getProduct(productId),
+    connector.getProductItems(productId),
+  ]);
+  const summariesById = new Map(
+    productItems.summaries.map((summary) => [summary.itemId, summary]),
+  );
+  const selected = selectBestMercadoLivreProductItem(
+    productItems.candidates,
+    summariesById,
+  );
+
+  return {
+    productId,
+    productFound: product !== null,
+    buyBoxWinnerPresent: Boolean(product?.buyBoxWinnerItemId),
+    buyBoxWinnerItemId: product?.buyBoxWinnerItemId ?? null,
+    selectedItemId: selected?.externalProductId ?? null,
+    diagnostics: productItems.diagnostics,
+  };
 }
 
 type ProductChildCandidate = {
@@ -1374,7 +1428,7 @@ export class MercadoLivreHighlightResolver {
       }
 
       const candidates = await this.connector.getItems(itemIds);
-      const chosen = chooseMarketplaceItem(candidates);
+      const chosen = selectBestMercadoLivreProductItem(candidates);
 
       if (!chosen) {
         return skippedHighlight(candidate, "USER_PRODUCT_NO_ACTIVE_ITEM");
@@ -1524,7 +1578,7 @@ export class MercadoLivreHighlightResolver {
     const productItemById = new Map(
       productItems.summaries.map((item) => [item.itemId, item]),
     );
-    const chosen = chooseMarketplaceItem(
+    const chosen = selectBestMercadoLivreProductItem(
       productItems.candidates,
       productItemById,
     );

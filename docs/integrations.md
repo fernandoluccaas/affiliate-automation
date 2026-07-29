@@ -51,6 +51,12 @@ failure and hydrated-but-unusable items. They store counts, rejection reasons
 and at most three sanitized field-presence samples; raw responses, OAuth
 headers and affiliate-session secrets are never stored.
 
+The Mercado Livre integration page also offers a read-only **Diagnosticar
+PRODUCT** probe. It calls the official product and product-items resources,
+hydrates parsed ITEM IDs, and displays counts, rejection reasons and at most
+three sanitized samples. The probe does not generate an affiliate link, ingest
+an offer, create an import job or otherwise mutate application data.
+
 `bestSellersEnabled=true` enables the highlights source. When it is false, discovery returns `DISCOVERY_SOURCE_DISABLED` and does not call highlights. No automatic category-search fallback exists yet.
 
 The manual category-search probe is available only for a validated leaf category and remains `EXPERIMENTAL`. It reports the logical endpoint and parameters, authentication mode, HTTP status, total results, usable item IDs and up to five ID/title samples. Non-2xx responses preserve only the sanitized Mercado Livre fields `error`, `code`, `message`, `cause` and `blocked_by`. Authorization headers, access tokens, refresh tokens and client secrets are never included in the result or logs.
