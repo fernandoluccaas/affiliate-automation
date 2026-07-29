@@ -25,6 +25,7 @@ import {
 import { formatDateTime } from "@/lib/format";
 import {
   clearMercadoLivreAffiliateSessionAction,
+  generateMercadoLivreAffiliateTestLinkAction,
   generatePendingMercadoLivreAffiliateLinksAction,
   saveMercadoLivreAffiliateSessionAction,
   selectMercadoLivreAffiliateTagAction,
@@ -73,6 +74,8 @@ function messageText(message?: string | string[]) {
   if (value === "affiliate-session-cleared")
     return "Sessão de afiliado removida.";
   if (value === "affiliate-tag-selected") return "Tag de afiliado atualizada.";
+  if (value === "affiliate-test-link-generated")
+    return "Link meli.la de teste gerado pelo Portal de Afiliados.";
   if (value === "affiliate-links-generated")
     return "Geração dos links pendentes concluída.";
   if (value === "affiliate-links-partial")
@@ -480,7 +483,10 @@ export default async function MercadoLivreIntegrationPage({
     single(params?.message) === "category-tested" ? params : null;
   const categorySearchResult =
     single(params?.message) === "category-search-tested" ? params : null;
-  const showLegacyAffiliateSession: boolean = false;
+  const showAffiliateSession = true;
+  const generatedAffiliateUrl = single(params?.generatedAffiliateUrl);
+  const affiliateEndpointMode = single(params?.affiliateEndpointMode);
+  const generatedAt = single(params?.generatedAt);
 
   return (
     <AdminShell currentPath="/integracoes" title="Mercado Livre">
@@ -503,7 +509,7 @@ export default async function MercadoLivreIntegrationPage({
             disabled={account?.status !== "CONNECTED"}
           >
             <RefreshCw aria-hidden="true" size={16} />
-            Buscar e importar mais vendidos
+            Importar mais vendidos e gerar links
           </Button>
         </form>
       </div>
@@ -514,193 +520,252 @@ export default async function MercadoLivreIntegrationPage({
         </div>
       ) : null}
 
-      {showLegacyAffiliateSession ? (
-      <Card>
-        <CardHeader>
-          <CardTitle>Sessão de afiliado Mercado Livre</CardTitle>
-          <div className="grid gap-2 text-sm text-[var(--muted-foreground)] md:grid-cols-2">
-            <p className="rounded-md border bg-[var(--background)] p-3">
-              <span className="font-medium text-[var(--foreground)]">
-                OAuth:
-              </span>{" "}
-              categorias, ranking e dados dos produtos.
-            </p>
-            <p className="rounded-md border bg-[var(--background)] p-3">
-              <span className="font-medium text-[var(--foreground)]">
-                Cookie:
-              </span>{" "}
-              Portal de Afiliados e geração dos links meli.la.
-            </p>
-          </div>
-        </CardHeader>
-        <CardContent className="grid gap-6">
-          <dl className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <SessionResult
-              label="Status da sessão"
-              value={affiliateSessionStatusLabel(affiliateSession?.status)}
-            />
-            <SessionResult
-              label="Cookie"
-              value={
-                affiliateSessionConfigured
-                  ? "Cookie configurado"
-                  : "Não configurado"
-              }
-            />
-            <SessionResult
-              label="Tag selecionada"
-              value={affiliateSession?.affiliateTag ?? "-"}
-            />
-            <SessionResult
-              label="Quantidade de tags encontradas"
-              value={String(affiliateTags.length)}
-            />
-            <SessionResult
-              label="Última validação"
-              value={
-                affiliateLastValidatedAt
-                  ? formatDateTime(affiliateLastValidatedAt)
-                  : "-"
-              }
-            />
-            <SessionResult
-              label="Última atualização do cookie"
-              value={
-                affiliateLastCookieUpdateAt
-                  ? formatDateTime(affiliateLastCookieUpdateAt)
-                  : "-"
-              }
-            />
-            <SessionResult
-              label="Status OAuth separado"
-              value={account?.status ?? "DISCONNECTED"}
-            />
-            <SessionResult
-              label="Último erro"
-              value={affiliateSession?.lastError ?? "-"}
-            />
-          </dl>
-
-          {!account ? (
-            <div className="rounded-md border bg-[var(--background)] p-3 text-sm">
-              Conecte o OAuth do Mercado Livre antes de configurar a sessão de
-              afiliado.
+      {showAffiliateSession ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Sessão de afiliado Mercado Livre</CardTitle>
+            <div className="grid gap-2 text-sm text-[var(--muted-foreground)] md:grid-cols-2">
+              <p className="rounded-md border bg-[var(--background)] p-3">
+                <span className="font-medium text-[var(--foreground)]">
+                  OAuth:
+                </span>{" "}
+                categorias, ranking e dados dos produtos.
+              </p>
+              <p className="rounded-md border bg-[var(--background)] p-3">
+                <span className="font-medium text-[var(--foreground)]">
+                  Cookie:
+                </span>{" "}
+                Portal de Afiliados e geração dos links meli.la.
+              </p>
             </div>
-          ) : null}
+          </CardHeader>
+          <CardContent className="grid gap-6">
+            <dl className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <SessionResult
+                label="Status da sessão"
+                value={affiliateSessionStatusLabel(affiliateSession?.status)}
+              />
+              <SessionResult
+                label="Cookie"
+                value={
+                  affiliateSessionConfigured
+                    ? "Cookie configurado"
+                    : "Não configurado"
+                }
+              />
+              <SessionResult
+                label="Tag selecionada"
+                value={affiliateSession?.affiliateTag ?? "-"}
+              />
+              <SessionResult
+                label="Quantidade de tags encontradas"
+                value={String(affiliateTags.length)}
+              />
+              <SessionResult
+                label="Última validação"
+                value={
+                  affiliateLastValidatedAt
+                    ? formatDateTime(affiliateLastValidatedAt)
+                    : "-"
+                }
+              />
+              <SessionResult
+                label="Última atualização do cookie"
+                value={
+                  affiliateLastCookieUpdateAt
+                    ? formatDateTime(affiliateLastCookieUpdateAt)
+                    : "-"
+                }
+              />
+              <SessionResult
+                label="Status OAuth separado"
+                value={account?.status ?? "DISCONNECTED"}
+              />
+              <SessionResult
+                label="Último erro"
+                value={affiliateSession?.lastError ?? "-"}
+              />
+            </dl>
 
-          <form
-            action={saveMercadoLivreAffiliateSessionAction}
-            className="grid gap-4"
-          >
-            <div className="grid gap-4 lg:grid-cols-2">
-              <Field label="Link de afiliado de referência">
-                <Input
-                  name="sampleAffiliateLink"
-                  type="url"
+            {!account ? (
+              <div className="rounded-md border bg-[var(--background)] p-3 text-sm">
+                Conecte o OAuth do Mercado Livre antes de configurar a sessão de
+                afiliado.
+              </div>
+            ) : null}
+
+            <form
+              action={saveMercadoLivreAffiliateSessionAction}
+              className="grid gap-4"
+            >
+              <div className="grid gap-4 lg:grid-cols-2">
+                <Field label="Link de afiliado de referência">
+                  <Input
+                    name="sampleAffiliateLink"
+                    type="url"
+                    defaultValue=""
+                    placeholder="https://meli.la/..."
+                    autoComplete="off"
+                  />
+                  <p className="text-xs text-[var(--muted-foreground)]">
+                    Usado apenas para validar o fluxo da sua conta. O sistema
+                    não fabrica links a partir desta referência.
+                  </p>
+                </Field>
+
+                <Field label="Tag de afiliado">
+                  <Select
+                    name="affiliateTag"
+                    defaultValue={selectedAffiliateTag}
+                  >
+                    <option value="">Selecionar automaticamente</option>
+                    {selectedAffiliateTag &&
+                    !affiliateTags.some(
+                      (tag) => tag.value === selectedAffiliateTag,
+                    ) ? (
+                      <option value={selectedAffiliateTag}>
+                        {selectedAffiliateTag}
+                      </option>
+                    ) : null}
+                    {affiliateTags.map((tag) => (
+                      <option key={tag.value} value={tag.value}>
+                        {tag.label}
+                        {tag.isDefault ? " (padrão)" : ""}
+                      </option>
+                    ))}
+                  </Select>
+                  <p className="text-xs text-[var(--muted-foreground)]">
+                    Depois da primeira validação, todas as tags encontradas
+                    ficam disponíveis aqui.
+                  </p>
+                </Field>
+              </div>
+
+              <Field label="Cookie completo do Mercado Livre">
+                <Textarea
+                  name="cookie"
                   defaultValue=""
-                  placeholder="https://meli.la/..."
+                  placeholder={
+                    affiliateSessionConfigured
+                      ? "Cookie configurado. Cole aqui somente para substituir."
+                      : "cookie1=valor1; cookie2=valor2"
+                  }
                   autoComplete="off"
+                  spellCheck={false}
+                  rows={5}
                 />
                 <p className="text-xs text-[var(--muted-foreground)]">
-                  Usado apenas para validar o fluxo da sua conta. O sistema não
-                  fabrica links a partir desta referência.
+                  O valor salvo nunca é exibido. Deixe vazio para preservar o
+                  cookie atual; cole um novo valor para substituí-lo.
                 </p>
               </Field>
 
-              <Field label="Tag de afiliado">
-                <Select
-                  name="affiliateTag"
-                  defaultValue={selectedAffiliateTag}
+              <div className="flex flex-wrap gap-2">
+                <Button type="submit" disabled={!account}>
+                  Salvar e testar
+                </Button>
+                <Button
+                  type="submit"
+                  variant="outline"
+                  formAction={selectMercadoLivreAffiliateTagAction}
+                  disabled={!account || affiliateTags.length === 0}
                 >
-                  <option value="">Selecionar automaticamente</option>
-                  {selectedAffiliateTag &&
-                  !affiliateTags.some(
-                    (tag) => tag.value === selectedAffiliateTag,
-                  ) ? (
-                    <option value={selectedAffiliateTag}>
-                      {selectedAffiliateTag}
-                    </option>
-                  ) : null}
-                  {affiliateTags.map((tag) => (
-                    <option key={tag.value} value={tag.value}>
-                      {tag.label}
-                      {tag.isDefault ? " (padrão)" : ""}
-                    </option>
-                  ))}
-                </Select>
-                <p className="text-xs text-[var(--muted-foreground)]">
-                  Depois da primeira validação, todas as tags encontradas ficam
-                  disponíveis aqui.
-                </p>
-              </Field>
-            </div>
-
-            <Field label="Cookie completo do Mercado Livre">
-              <Textarea
-                name="cookie"
-                defaultValue=""
-                placeholder={
-                  affiliateSessionConfigured
-                    ? "Cookie configurado. Cole aqui somente para substituir."
-                    : "cookie1=valor1; cookie2=valor2"
-                }
-                autoComplete="off"
-                spellCheck={false}
-                rows={5}
-              />
-              <p className="text-xs text-[var(--muted-foreground)]">
-                O valor salvo nunca é exibido. Deixe vazio para preservar o
-                cookie atual; cole um novo valor para substituí-lo.
-              </p>
-            </Field>
-
-            <div className="flex flex-wrap gap-2">
-              <Button type="submit" disabled={!account}>
-                Salvar e testar
-              </Button>
-              <Button
-                type="submit"
-                variant="outline"
-                formAction={selectMercadoLivreAffiliateTagAction}
-                disabled={!account || affiliateTags.length === 0}
-              >
-                Atualizar tag
-              </Button>
-            </div>
-          </form>
-
-          <div className="flex flex-wrap gap-2 border-t pt-4">
-            <form action={testMercadoLivreAffiliateSessionAction}>
-              <Button
-                type="submit"
-                variant="outline"
-                disabled={!affiliateSessionConfigured}
-              >
-                Testar conexão
-              </Button>
+                  Atualizar tag
+                </Button>
+              </div>
             </form>
-            <form action={clearMercadoLivreAffiliateSessionAction}>
+
+            <form
+              action={generateMercadoLivreAffiliateTestLinkAction}
+              className="grid gap-4 border-t pt-4"
+            >
+              <div className="grid gap-4 lg:grid-cols-2">
+                <Field label="URL publica do produto para teste">
+                  <Input
+                    name="productUrl"
+                    type="url"
+                    placeholder="https://produto.mercadolivre.com.br/MLB-..."
+                    autoComplete="off"
+                    required
+                  />
+                </Field>
+                <Field label="Tag para o teste">
+                  <Select
+                    name="affiliateTag"
+                    defaultValue={selectedAffiliateTag}
+                  >
+                    <option value="">Usar tag selecionada</option>
+                    {affiliateTags.map((tag) => (
+                      <option key={tag.value} value={tag.value}>
+                        {tag.label}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+              </div>
               <Button
                 type="submit"
                 variant="outline"
-                disabled={!affiliateSession}
-              >
-                Limpar sessão
-              </Button>
-            </form>
-            <form action={generatePendingMercadoLivreAffiliateLinksAction}>
-              <input name="limit" type="hidden" value="50" />
-              <Button
-                type="submit"
-                variant="outline"
+                className="w-fit"
                 disabled={affiliateSession?.status !== "CONNECTED"}
               >
-                Gerar links pendentes
+                Gerar link meli.la de teste
               </Button>
             </form>
-          </div>
-        </CardContent>
-      </Card>
+
+            {generatedAffiliateUrl ? (
+              <div className="grid gap-2 rounded-md border bg-[var(--background)] p-3 text-sm">
+                <p>
+                  <span className="font-medium">Link gerado:</span>{" "}
+                  <a
+                    href={generatedAffiliateUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="break-all underline"
+                  >
+                    {generatedAffiliateUrl}
+                  </a>
+                </p>
+                <p>Modo: {affiliateEndpointMode ?? "stripe_v2"}</p>
+                <p>
+                  Horario:{" "}
+                  {generatedAt ? formatDateTime(new Date(generatedAt)) : "-"}
+                </p>
+              </div>
+            ) : null}
+
+            <div className="flex flex-wrap gap-2 border-t pt-4">
+              <form action={testMercadoLivreAffiliateSessionAction}>
+                <Button
+                  type="submit"
+                  variant="outline"
+                  disabled={!affiliateSessionConfigured}
+                >
+                  Testar conexão
+                </Button>
+              </form>
+              <form action={clearMercadoLivreAffiliateSessionAction}>
+                <Button
+                  type="submit"
+                  variant="outline"
+                  disabled={!affiliateSession}
+                >
+                  Limpar sessão
+                </Button>
+              </form>
+              <form action={generatePendingMercadoLivreAffiliateLinksAction}>
+                <input name="limit" type="hidden" value="50" />
+                <Button
+                  type="submit"
+                  variant="outline"
+                  disabled={affiliateSession?.status !== "CONNECTED"}
+                >
+                  Gerar links pendentes
+                </Button>
+              </form>
+            </div>
+          </CardContent>
+        </Card>
       ) : (
         <Card>
           <CardHeader>
@@ -729,11 +794,7 @@ export default async function MercadoLivreIntegrationPage({
           <ol className="grid gap-3 text-sm md:grid-cols-2 lg:grid-cols-4">
             {[
               ["1", "Conectar OAuth", "Categorias, ranking e produtos."],
-              [
-                "2",
-                "Selecionar categoria",
-                "Escolha uma categoria folha.",
-              ],
+              ["2", "Selecionar categoria", "Escolha uma categoria folha."],
               [
                 "3",
                 "Importar mais vendidos",

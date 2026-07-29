@@ -213,6 +213,7 @@ export class MercadoLivreAffiliateLinkService {
 
   async create(
     input: CreateMercadoLivreAffiliateLinkInput,
+    options: { skipInitialWarmup?: boolean } = {},
   ): Promise<CreateMercadoLivreAffiliateLinkResult> {
     const productUrl = normalizeMercadoLivreAffiliateProductUrl(
       input.productUrl,
@@ -223,12 +224,15 @@ export class MercadoLivreAffiliateLinkService {
       input.csrfToken ?? extractMercadoLivreCsrfToken(originalCookie) ?? null;
     let cookie = originalCookie;
     let csrfToken = originalCsrfToken;
-    const warmed = await this.sessionService.warmup({
-      cookie,
-      csrfToken,
-    });
-    cookie = warmed.cookie;
-    csrfToken = warmed.csrfToken;
+
+    if (!options.skipInitialWarmup) {
+      const warmed = await this.sessionService.warmup({
+        cookie,
+        csrfToken,
+      });
+      cookie = warmed.cookie;
+      csrfToken = warmed.csrfToken;
+    }
 
     const url = `${this.runtime.baseUrl}/links`;
     let refreshedAfterForbidden = false;
@@ -340,5 +344,9 @@ export class MercadoLivreAffiliateLinkService {
 
   async createAffiliateLink(input: CreateMercadoLivreAffiliateLinkInput) {
     return this.create(input);
+  }
+
+  warmupSession(input: { cookie: string; csrfToken?: string | null }) {
+    return this.sessionService.warmup(input);
   }
 }

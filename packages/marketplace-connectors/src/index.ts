@@ -1767,6 +1767,12 @@ export {
   normalizeMercadoLivreGeneratedAffiliateUrl,
 } from "./mercadolivre/affiliate-link";
 export {
+  StripeV2MercadoLivreAffiliatePortalAdapter,
+  createMercadoLivreAffiliatePortalAdapter,
+  type MercadoLivreAffiliateEndpointMode,
+  type MercadoLivreAffiliatePortalAdapter,
+} from "./mercadolivre/affiliate-portal-adapter";
+export {
   emitMercadoLivreOperationalMetric,
   type MercadoLivreOperationalEvent,
   type MercadoLivreOperationalMetricFields,

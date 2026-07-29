@@ -23,6 +23,7 @@ MERCADOLIVRE_AFFILIATE_USER_AGENT=""
 MERCADOLIVRE_AFFILIATE_MAX_CONCURRENCY="4"
 MERCADOLIVRE_AFFILIATE_TIMEOUT_MS="15000"
 MERCADOLIVRE_AFFILIATE_MAX_RETRIES="3"
+MERCADO_LIVRE_AFFILIATE_ENDPOINT_MODE="stripe_v2"
 ```
 
 `ENCRYPTION_KEY` e `AUTH_SECRET` continuam aceitas para compatibilidade com
@@ -109,3 +110,31 @@ nova versão.
 O botão **Gerar links pendentes** processa uma quantidade limitada de ofertas
 `READY_FOR_AFFILIATE_LINK` e mantém o versionamento normal da ingestão. A página
 `/ofertas/affiliate-links` deve ser usada somente como fallback manual.
+
+O botão **Importar mais vendidos e gerar links** usa a mesma factory no
+dashboard e no worker. Com uma sessão `CONNECTED`, o
+`MercadoLivreAffiliateSessionLinkProvider` gera links reais pelo adapter do
+Portal; sem sessão ou com cookie expirado, os produtos ainda são persistidos em
+`READY_FOR_AFFILIATE_LINK`. O modo habilitado é `stripe_v2`. O modo conceitual
+`create_link_v2` permanece bloqueado até existir autorização explícita para um
+recurso compatível.
+
+A seção da sessão também permite gerar um único link de teste a partir de uma
+URL pública e da tag selecionada. A resposta visível contém apenas o modo, o
+horário e o `meli.la`; cookie e CSRF permanecem criptografados no servidor.
+
+## Worker, refresh e diagnósticos
+
+O worker executa expiração, discovery, enriquecimento pendente, refresh,
+agendamento, retry e publicação como etapas independentes. Uma falha no
+discovery deixa o ciclo como `PARTIAL`, cria um alerta sanitizado e não impede
+as etapas seguintes.
+
+O refresh preserva o link afiliado e os metadados de ranking da versão atual e
+registra `selected`, `refreshed`, `unchanged`, `newVersions`, `notFound`,
+`failed` e `affiliateUrlsPreserved`. Publicações novas recebem snapshots da
+categoria de origem, posição, highlight e estratégia de resolução.
+
+Os eventos estruturados da integração aceitam somente IDs, etapa, duração,
+status, tentativa, contagem e código de erro. Mensagens livres, URLs, cookie,
+CSRF, `Authorization` e tokens não fazem parte desse contrato.

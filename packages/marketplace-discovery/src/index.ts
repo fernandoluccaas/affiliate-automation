@@ -30,11 +30,14 @@ import {
 import { acquireLock, type LockHandle } from "@affiliate/redis";
 import {
   ManualAffiliateLinkProvider,
+  createMercadoLivreAffiliateLinkProvider,
   type AffiliateLinkProvider,
 } from "./affiliate-link-provider";
 
 export {
   ManualAffiliateLinkProvider,
+  MercadoLivreAffiliateSessionLinkProvider,
+  createMercadoLivreAffiliateLinkProvider,
   type AffiliateLinkGenerationResult,
   type AffiliateLinkProvider,
 } from "./affiliate-link-provider";
@@ -59,10 +62,10 @@ export {
 export type { MercadoLivreProductResolutionDiagnostics } from "@affiliate/marketplace-connectors";
 
 const DISCOVERY_LOCK_TTL_MS = 10 * 60 * 1000;
-const AFFILIATE_BATCH_CONCURRENCY = 4;
+const AFFILIATE_BATCH_CONCURRENCY = 2;
+const MAX_AFFILIATE_BATCH_CONCURRENCY = 4;
 const MAX_PENDING_AFFILIATE_LINKS_PER_RUN = 100;
-const AFFILIATE_OPERATION_LOCK_PREFIX =
-  "mercado-livre:affiliate-link-operations";
+const AFFILIATE_OPERATION_LOCK_PREFIX = "mercado-livre:affiliate-session";
 
 export type MercadoLivreCategorySkipReason =
   | "NO_HIGHLIGHTS_FOR_CATEGORY"
@@ -134,7 +137,8 @@ type DiscoveryDependencies = {
   database: typeof prisma;
   createConnector: () => Promise<MarketplaceConnector>;
   affiliateLinkProvider: AffiliateLinkProvider;
-  affiliateLinkService: Pick<MercadoLivreAffiliateLinkService, "create">;
+  affiliateLinkService: Pick<MercadoLivreAffiliateLinkService, "create"> &
+    Partial<Pick<MercadoLivreAffiliateLinkService, "warmupSession">>;
   affiliateConcurrency: number;
   decryptCredential: typeof decryptSecret;
   encryptCredential: typeof encryptSecret;
@@ -163,6 +167,7 @@ export type MercadoLivreAffiliateFailure = {
 
 type AffiliateLinkCreator = (
   input: CreateMercadoLivreAffiliateLinkInput,
+  options?: { skipInitialWarmup?: boolean },
 ) => Promise<CreateMercadoLivreAffiliateLinkResult>;
 
 type AffiliateSessionCredentials =
@@ -225,7 +230,10 @@ function affiliateBatchConcurrency(value: string | number | undefined) {
     return AFFILIATE_BATCH_CONCURRENCY;
   }
 
-  return Math.min(AFFILIATE_BATCH_CONCURRENCY, Math.max(1, Math.floor(parsed)));
+  return Math.min(
+    MAX_AFFILIATE_BATCH_CONCURRENCY,
+    Math.max(1, Math.floor(parsed)),
+  );
 }
 
 function discoveryDependencies(
@@ -242,6 +250,7 @@ function discoveryDependencies(
       new MercadoLivreAffiliateLinkService(),
     affiliateConcurrency: affiliateBatchConcurrency(
       dependencies.affiliateConcurrency ??
+        process.env.MERCADOLIVRE_AFFILIATE_MAX_CONCURRENCY ??
         process.env.MERCADOLIVRE_DISCOVERY_MAX_CONCURRENCY,
     ),
     decryptCredential: dependencies.decryptCredential ?? decryptSecret,
@@ -709,8 +718,95 @@ async function enrichCandidatesWithAffiliateLinks(
     metrics,
   );
   let stopNewLinkAttempts = false;
-  const createLink: AffiliateLinkCreator = (input) =>
-    dependencies.affiliateLinkService.create(input);
+  let batchWarmupFailure: MercadoLivreAffiliateFailure | null = null;
+  const createLink: AffiliateLinkCreator = (input, options) =>
+    dependencies.affiliateLinkService.create(input, options);
+
+  if (session.ready && dependencies.affiliateLinkService.warmupSession) {
+    const cookieAtStart = session.cookie;
+    const csrfTokenAtStart = session.csrfToken;
+
+    try {
+      const warmed = await dependencies.affiliateLinkService.warmupSession({
+        cookie: cookieAtStart,
+        csrfToken: csrfTokenAtStart,
+      });
+      if (warmed.cookie !== cookieAtStart) {
+        session.cookie = warmed.cookie;
+        session.cookieChanged = true;
+      }
+      if (warmed.csrfToken !== csrfTokenAtStart) {
+        session.csrfToken = warmed.csrfToken;
+        session.csrfTokenChanged = true;
+      }
+    } catch (error) {
+      batchWarmupFailure = classifyMercadoLivreAffiliateError(error, [
+        cookieAtStart,
+        csrfTokenAtStart ?? "",
+      ]);
+      stopNewLinkAttempts = batchWarmupFailure.sessionExpired;
+    }
+  }
+
+  const provider =
+    session.ready && !batchWarmupFailure
+      ? createMercadoLivreAffiliateLinkProvider({
+          sessionStatus: "CONNECTED",
+          generate: async (input) => {
+            const cookieAtStart = session.cookie;
+            const csrfTokenAtStart = session.csrfToken;
+            const result = await createLink(
+              {
+                productUrl: input.productUrl,
+                affiliateTag: session.affiliateTag,
+                cookie: cookieAtStart,
+                csrfToken: csrfTokenAtStart,
+              },
+              {
+                skipInitialWarmup: true,
+              },
+            );
+
+            if (result.refreshedCookie) {
+              session.cookie = mergeAffiliateCookieSnapshots(
+                session.cookie,
+                cookieAtStart,
+                result.refreshedCookie,
+              );
+              session.cookieChanged = true;
+            }
+
+            if ("refreshedCsrfToken" in result) {
+              session.csrfToken = result.refreshedCsrfToken ?? null;
+              session.csrfTokenChanged = true;
+            }
+
+            return {
+              status: "GENERATED",
+              affiliateUrl: result.affiliateUrl,
+              provider: "mercado-livre-affiliate-portal",
+            };
+          },
+        })
+      : createMercadoLivreAffiliateLinkProvider({
+          sessionStatus: (
+            session.ready
+              ? batchWarmupFailure?.sessionExpired
+              : session.failure.sessionExpired
+          )
+            ? "EXPIRED"
+            : !session.ready &&
+                session.failure.code === "AFFILIATE_SESSION_NOT_CONFIGURED"
+              ? "NOT_CONFIGURED"
+              : "UNAVAILABLE",
+          ...((session.ready ? batchWarmupFailure?.code : session.failure.code)
+            ? {
+                reason: (session.ready
+                  ? batchWarmupFailure?.code
+                  : session.failure.code) as string,
+              }
+            : {}),
+        });
 
   const results = await mapWithConcurrency(
     candidates,
@@ -750,30 +846,48 @@ async function enrichCandidatesWithAffiliateLinks(
         };
       }
 
-      if (!session.ready) {
+      if (!session.ready || batchWarmupFailure) {
+        const generated = await provider.generate({
+          marketplace: candidate.marketplace,
+          productUrl: candidate.productUrl,
+          externalProductId: candidate.externalProductId,
+        });
         metrics.affiliatePending += 1;
         metrics.errors += 1;
+        const failure = session.ready
+          ? (batchWarmupFailure ??
+            fixedAffiliateFailure(
+              "AFFILIATE_SESSION_UNAVAILABLE",
+              "Mercado Livre affiliate session is unavailable.",
+            ))
+          : session.failure;
         emitItem(
           "mercadolivre_affiliate_link_failed",
           "PENDING",
-          session.failure.attempts,
-          session.failure.code,
-          session.failure.stage,
+          failure.attempts,
+          failure.code,
+          failure.stage,
         );
         emitItem(
           "mercadolivre_discovery_items_pending_link",
           "PENDING",
-          session.failure.attempts,
-          session.failure.code,
-          session.failure.stage,
+          failure.attempts,
+          failure.code,
+          failure.stage,
         );
         return {
           candidate,
           affiliateUrl: null,
           affiliateEligibility: "UNKNOWN",
           affiliateLabel: null,
-          affiliateFailure: session.failure,
-          linkAttempted: false,
+          affiliateFailure: {
+            ...failure,
+            message:
+              generated.status === "MANUAL_REQUIRED"
+                ? generated.reason
+                : failure.message,
+          },
+          linkAttempted: Boolean(batchWarmupFailure),
           linkGenerated: false,
           linkReused: false,
         };
@@ -811,36 +925,30 @@ async function enrichCandidatesWithAffiliateLinks(
       }
 
       metrics.affiliateLinkAttempts += 1;
-      const cookieAtStart = session.cookie;
-      const csrfTokenAtStart = session.csrfToken;
 
       try {
-        const result = await createLink({
+        const generated = await provider.generate({
+          marketplace: candidate.marketplace,
           productUrl: candidate.productUrl,
-          affiliateTag: session.affiliateTag,
-          cookie: cookieAtStart,
-          csrfToken: csrfTokenAtStart,
+          externalProductId: candidate.externalProductId,
         });
 
-        if (result.refreshedCookie) {
-          session.cookie = mergeAffiliateCookieSnapshots(
-            session.cookie,
-            cookieAtStart,
-            result.refreshedCookie,
-          );
-          session.cookieChanged = true;
-        }
-
-        if ("refreshedCsrfToken" in result) {
-          session.csrfToken = result.refreshedCsrfToken ?? null;
-          session.csrfTokenChanged = true;
+        if (generated.status !== "GENERATED") {
+          throw new MercadoLivreAffiliateApiError(generated.reason, {
+            stage: "LINK_GENERATION",
+            code:
+              generated.status === "INELIGIBLE"
+                ? "PRODUCT_INELIGIBLE"
+                : "MANUAL_REQUIRED",
+            productIneligible: generated.status === "INELIGIBLE",
+          });
         }
 
         metrics.affiliateLinksGenerated += 1;
         emitItem("mercadolivre_affiliate_link_generated", "SUCCEEDED", 1);
         return {
           candidate,
-          affiliateUrl: result.affiliateUrl,
+          affiliateUrl: generated.affiliateUrl,
           affiliateEligibility: "ELIGIBLE",
           affiliateLabel: session.affiliateTag,
           affiliateFailure: null,
@@ -851,7 +959,7 @@ async function enrichCandidatesWithAffiliateLinks(
       } catch (error) {
         const failure = classifyMercadoLivreAffiliateError(
           error,
-          [cookieAtStart, csrfTokenAtStart ?? ""],
+          [session.cookie, session.csrfToken ?? ""],
           error instanceof MercadoLivreAffiliateApiError ? error.attempts : 1,
         );
 
@@ -2056,8 +2164,12 @@ function importJobTotals(metrics: MercadoLivreDiscoveryMetrics) {
 
 export class MercadoLivreDiscoveryService {
   private readonly dependencies: DiscoveryDependencies;
+  private readonly useConfiguredAffiliateProvider: boolean;
 
   constructor(dependencies: Partial<DiscoveryDependencies> = {}) {
+    this.useConfiguredAffiliateProvider = Boolean(
+      dependencies.affiliateLinkProvider,
+    );
     this.dependencies = discoveryDependencies(dependencies);
   }
 
@@ -2231,15 +2343,57 @@ export class MercadoLivreDiscoveryService {
         this.dependencies.database,
         selectedCandidates,
       );
-      const enrichments =
-        selectedCandidates.length === 0
-          ? []
-          : await enrichCandidatesWithProvider(
+      let enrichments: AffiliateEnrichmentResult[] = [];
+
+      if (selectedCandidates.length > 0) {
+        if (this.useConfiguredAffiliateProvider) {
+          enrichments = await enrichCandidatesWithProvider(
+            selectedCandidates,
+            this.dependencies,
+            existingAffiliateLinks,
+            metrics,
+          );
+        } else {
+          const affiliateSessionLock = await this.dependencies.lock(
+            affiliateOperationLockKey(account.id),
+            DISCOVERY_LOCK_TTL_MS,
+          );
+
+          if (!affiliateSessionLock.acquired) {
+            enrichments = await enrichCandidatesWithProvider(
               selectedCandidates,
-              this.dependencies,
+              {
+                ...this.dependencies,
+                affiliateLinkProvider: new ManualAffiliateLinkProvider(
+                  "AFFILIATE_SESSION_BUSY",
+                ),
+              },
               existingAffiliateLinks,
               metrics,
             );
+          } else {
+            const stopAffiliateLockHeartbeat = startLockHeartbeat(
+              affiliateSessionLock,
+              DISCOVERY_LOCK_TTL_MS,
+            );
+
+            try {
+              enrichments = await enrichCandidatesWithAffiliateLinks(
+                selectedCandidates,
+                this.dependencies,
+                account.id,
+                importJob.id,
+                existingAffiliateLinks,
+                metrics,
+                now,
+              );
+            } finally {
+              stopAffiliateLockHeartbeat();
+              await affiliateSessionLock.release();
+            }
+          }
+        }
+      }
 
       await ingestAffiliateEnrichments(
         enrichments,

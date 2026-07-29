@@ -5,6 +5,7 @@ vi.mock("server-only", () => ({}));
 
 import {
   clearMercadoLivreAffiliateSession,
+  generateMercadoLivreAffiliateTestLink,
   saveMercadoLivreAffiliateSession,
   selectMercadoLivreAffiliateTag,
   testMercadoLivreAffiliateSession,
@@ -18,11 +19,14 @@ const updateMarketplaceAccount = vi.fn();
 const findAffiliateSession = vi.fn();
 const upsertAffiliateSession = vi.fn();
 const updateAffiliateSession = vi.fn();
+const updateManyAffiliateSessions = vi.fn();
 const deleteAffiliateSessions = vi.fn();
 const validateSession = vi.fn();
 const createAffiliateLink = vi.fn();
 const encrypt = vi.fn((value: string) => `encrypted<${value}>`);
 const decrypt = vi.fn((value: string) => value);
+const monotonicNow = vi.fn(() => 100);
+const emitOperationalMetric = vi.fn();
 
 const database = {
   marketplaceAccount: {
@@ -33,6 +37,7 @@ const database = {
     findUnique: findAffiliateSession,
     upsert: upsertAffiliateSession,
     update: updateAffiliateSession,
+    updateMany: updateManyAffiliateSessions,
     deleteMany: deleteAffiliateSessions,
   },
 } as unknown as MercadoLivreAffiliateSessionDependencies["database"];
@@ -62,6 +67,8 @@ function dependencies(): Partial<MercadoLivreAffiliateSessionDependencies> {
     encrypt,
     decrypt,
     now: () => now,
+    monotonicNow,
+    emitOperationalMetric,
   };
 }
 
@@ -71,11 +78,15 @@ beforeEach(() => {
   findAffiliateSession.mockReset();
   upsertAffiliateSession.mockReset();
   updateAffiliateSession.mockReset();
+  updateManyAffiliateSessions.mockReset();
   deleteAffiliateSessions.mockReset();
   validateSession.mockReset();
   createAffiliateLink.mockReset();
   encrypt.mockClear();
   decrypt.mockReset();
+  monotonicNow.mockReset();
+  monotonicNow.mockReturnValue(100);
+  emitOperationalMetric.mockReset();
 
   findMarketplaceAccount.mockResolvedValue({ id: accountId });
   findAffiliateSession.mockResolvedValue(null);
@@ -145,6 +156,16 @@ describe("Mercado Livre affiliate session use cases", () => {
     expect(result).not.toHaveProperty("csrfTokenEncrypted");
     expect(JSON.stringify(result)).not.toContain("valid-session");
     expect(JSON.stringify(result)).not.toContain("csrf token");
+    expect(emitOperationalMetric).toHaveBeenCalledWith(
+      "mercadolivre_affiliate_session_validation",
+      expect.objectContaining({
+        marketplaceAccountId: accountId,
+        stage: "SESSION_VALIDATION",
+        durationMs: 0,
+        status: "CONNECTED",
+        count: 1,
+      }),
+    );
   });
 
   it("preserves the stored cookie and cookie timestamp when an empty replacement is submitted", async () => {
@@ -202,6 +223,54 @@ describe("Mercado Livre affiliate session use cases", () => {
       code: "SAVED",
       status: "CONNECTED",
     });
+  });
+
+  it("generates a real test link and persists only rotated encrypted session values", async () => {
+    findAffiliateSession.mockResolvedValue({
+      status: "CONNECTED",
+      cookieEncrypted: "session=opaque",
+      csrfTokenEncrypted: "csrf=opaque",
+      affiliateTag: "tag-primary",
+      updatedAt: new Date("2026-07-28T14:00:00.000Z"),
+    });
+    decrypt.mockImplementation((value: string) =>
+      value === "session=opaque" ? "session=valid" : "csrf-valid",
+    );
+    createAffiliateLink.mockResolvedValue({
+      affiliateUrl: "https://meli.la/real-test",
+      refreshedCookie: "session=rotated",
+      refreshedCsrfToken: "csrf-rotated",
+    });
+    updateManyAffiliateSessions.mockResolvedValue({ count: 1 });
+
+    const result = await generateMercadoLivreAffiliateTestLink(
+      {
+        productUrl: "https://produto.mercadolivre.com.br/MLB-123456789-produto",
+        affiliateTag: "tag-primary",
+      },
+      dependencies(),
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      code: "LINK_GENERATED",
+      affiliateUrl: "https://meli.la/real-test",
+      provider: "stripe_v2",
+      generatedAt: now,
+    });
+    expect(updateManyAffiliateSessions).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          marketplaceAccountId: accountId,
+        }),
+        data: expect.objectContaining({
+          cookieEncrypted: "encrypted<session=rotated>",
+          csrfTokenEncrypted: "encrypted<csrf-rotated>",
+        }),
+      }),
+    );
+    expect(JSON.stringify(result)).not.toContain("session=rotated");
+    expect(JSON.stringify(result)).not.toContain("csrf-rotated");
   });
 
   it("lets a new cookie recover a session without decrypting stale CSRF", async () => {
@@ -361,6 +430,22 @@ describe("Mercado Livre affiliate session use cases", () => {
         }),
       });
       expect(updateMarketplaceAccount).not.toHaveBeenCalled();
+      expect(emitOperationalMetric).toHaveBeenCalledWith(
+        "mercadolivre_affiliate_session_validation",
+        expect.objectContaining({
+          marketplaceAccountId: accountId,
+          status: "EXPIRED",
+          errorCode: "EXPIRED",
+        }),
+      );
+      expect(emitOperationalMetric).toHaveBeenCalledWith(
+        "mercadolivre_affiliate_session_expired",
+        expect.objectContaining({
+          marketplaceAccountId: accountId,
+          status: "EXPIRED",
+          count: 1,
+        }),
+      );
     },
   );
 

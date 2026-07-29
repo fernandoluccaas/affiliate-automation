@@ -9,6 +9,7 @@ const saveAffiliateSessionMock = vi.fn();
 const testAffiliateSessionMock = vi.fn();
 const clearAffiliateSessionMock = vi.fn();
 const selectAffiliateTagMock = vi.fn();
+const generateAffiliateTestLinkMock = vi.fn();
 const generatePendingAffiliateLinksMock = vi.fn();
 
 vi.mock("server-only", () => ({}));
@@ -30,6 +31,7 @@ vi.mock("./mercadolivre-affiliate-session", () => ({
   testMercadoLivreAffiliateSession: testAffiliateSessionMock,
   clearMercadoLivreAffiliateSession: clearAffiliateSessionMock,
   selectMercadoLivreAffiliateTag: selectAffiliateTagMock,
+  generateMercadoLivreAffiliateTestLink: generateAffiliateTestLinkMock,
 }));
 
 vi.mock("@affiliate/marketplace-discovery", () => ({
@@ -60,6 +62,16 @@ function limitForm(value = "50") {
   return formData;
 }
 
+function testLinkForm() {
+  const formData = new FormData();
+  formData.set(
+    "productUrl",
+    "https://produto.mercadolivre.com.br/MLB-123456789-produto",
+  );
+  formData.set("affiliateTag", "tag-primary");
+  return formData;
+}
+
 beforeEach(() => {
   redirectMock.mockClear();
   revalidatePathMock.mockReset();
@@ -68,6 +80,7 @@ beforeEach(() => {
   testAffiliateSessionMock.mockReset();
   clearAffiliateSessionMock.mockReset();
   selectAffiliateTagMock.mockReset();
+  generateAffiliateTestLinkMock.mockReset();
   generatePendingAffiliateLinksMock.mockReset();
 
   requireSessionMock.mockResolvedValue({
@@ -107,9 +120,34 @@ beforeEach(() => {
     pending: 0,
     failed: 0,
   });
+  generateAffiliateTestLinkMock.mockResolvedValue({
+    ok: true,
+    code: "LINK_GENERATED",
+    status: "CONNECTED",
+    affiliateUrl: "https://meli.la/real-test",
+    provider: "stripe_v2",
+    generatedAt: new Date("2026-07-28T14:30:00.000Z"),
+  });
 });
 
 describe("Mercado Livre affiliate server actions", () => {
+  it("redirects with only sanitized test-link result fields", async () => {
+    const actions = await import("./mercadolivre-affiliate-actions");
+
+    await expect(
+      actions.generateMercadoLivreAffiliateTestLinkAction(testLinkForm()),
+    ).rejects.toThrow("REDIRECT:");
+    expect(generateAffiliateTestLinkMock).toHaveBeenCalledWith({
+      productUrl: "https://produto.mercadolivre.com.br/MLB-123456789-produto",
+      affiliateTag: "tag-primary",
+    });
+    const redirectUrl = String(redirectMock.mock.calls.at(-1)?.[0] ?? "");
+    expect(redirectUrl).toContain("affiliate-test-link-generated");
+    expect(redirectUrl).toContain("https%3A%2F%2Fmeli.la%2Freal-test");
+    expect(redirectUrl).not.toContain("cookie");
+    expect(redirectUrl).not.toContain("csrf");
+  });
+
   it("preprocesses empty optional values so saving preserves the cookie", async () => {
     const { saveMercadoLivreAffiliateSessionAction } =
       await import("./mercadolivre-affiliate-actions");

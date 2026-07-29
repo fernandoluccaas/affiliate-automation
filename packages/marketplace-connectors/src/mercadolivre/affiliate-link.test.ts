@@ -100,6 +100,25 @@ describe("MercadoLivreAffiliateLinkService", () => {
     });
   });
 
+  it("reuses a session warmed once by a batch", async () => {
+    const fetchFn = vi
+      .fn<MercadoLivreAffiliateFetch>()
+      .mockResolvedValueOnce(
+        response({ short_url: "https://meli.la/batch-link" }),
+      );
+    const service = new MercadoLivreAffiliateLinkService({ fetchFn });
+
+    await expect(
+      service.create(validInput, { skipInitialWarmup: true }),
+    ).resolves.toMatchObject({
+      affiliateUrl: "https://meli.la/batch-link",
+    });
+    expect(fetchFn).toHaveBeenCalledOnce();
+    expect(fetchFn.mock.calls[0]?.[0]).toBe(
+      "https://www.mercadolivre.com.br/affiliate-program/api/v2/stripe/user/links",
+    );
+  });
+
   it("classifies code 111 from an HTTP 200 body as product ineligible", async () => {
     const fetchFn = vi
       .fn<MercadoLivreAffiliateFetch>()

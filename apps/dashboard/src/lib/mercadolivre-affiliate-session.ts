@@ -4,6 +4,7 @@ import {
   MercadoLivreAffiliateLinkService,
   MercadoLivreAffiliateSessionService,
   decryptSecret,
+  emitMercadoLivreOperationalMetric,
   encryptSecret,
   isMercadoLivreAffiliateApiError,
   normalizeMercadoLivreCookie,
@@ -24,6 +25,7 @@ export type MercadoLivreAffiliateSessionResult = {
     | "TESTED"
     | "CLEARED"
     | "TAG_SELECTED"
+    | "LINK_GENERATED"
     | "NOT_CONFIGURED"
     | "ACCOUNT_NOT_FOUND"
     | "INVALID_INPUT"
@@ -32,6 +34,9 @@ export type MercadoLivreAffiliateSessionResult = {
   status: AffiliateSessionStatus;
   affiliateTag?: string | null;
   availableTags?: MercadoLivreAffiliateTag[];
+  affiliateUrl?: string;
+  provider?: "stripe_v2";
+  generatedAt?: Date;
   errorMessage?: string;
 };
 
@@ -48,12 +53,19 @@ export type MercadoLivreAffiliateSessionDependencies = {
   encrypt: typeof encryptSecret;
   decrypt: typeof decryptSecret;
   now: () => Date;
+  monotonicNow: () => number;
+  emitOperationalMetric: typeof emitMercadoLivreOperationalMetric;
 };
 
 export type SaveMercadoLivreAffiliateSessionInput = {
   sampleAffiliateLink?: string | null | undefined;
   cookie?: string | null | undefined;
   affiliateTag?: string | null | undefined;
+};
+
+export type GenerateMercadoLivreAffiliateTestLinkInput = {
+  productUrl: string;
+  affiliateTag?: string | null;
 };
 
 function dependencies(
@@ -70,7 +82,45 @@ function dependencies(
     encrypt: overrides.encrypt ?? encryptSecret,
     decrypt: overrides.decrypt ?? decryptSecret,
     now: overrides.now ?? (() => new Date()),
+    monotonicNow: overrides.monotonicNow ?? Date.now,
+    emitOperationalMetric:
+      overrides.emitOperationalMetric ?? emitMercadoLivreOperationalMetric,
   };
+}
+
+function emitSessionValidation(
+  deps: MercadoLivreAffiliateSessionDependencies,
+  input: {
+    marketplaceAccountId: string;
+    startedAt: number;
+    status: AffiliateSessionStatus;
+    errorCode?: string;
+  },
+) {
+  const durationMs = Math.max(0, deps.monotonicNow() - input.startedAt);
+  try {
+    deps.emitOperationalMetric("mercadolivre_affiliate_session_validation", {
+      marketplaceAccountId: input.marketplaceAccountId,
+      stage: "SESSION_VALIDATION",
+      durationMs,
+      status: input.status,
+      ...(input.errorCode ? { errorCode: input.errorCode } : {}),
+      count: 1,
+    });
+
+    if (input.status === "EXPIRED") {
+      deps.emitOperationalMetric("mercadolivre_affiliate_session_expired", {
+        marketplaceAccountId: input.marketplaceAccountId,
+        stage: "SESSION_VALIDATION",
+        durationMs,
+        status: input.status,
+        ...(input.errorCode ? { errorCode: input.errorCode } : {}),
+        count: 1,
+      });
+    }
+  } catch {
+    // Observability must not change the result of the session operation.
+  }
 }
 
 function normalizedOptional(value?: string | null) {
@@ -337,6 +387,7 @@ export async function saveMercadoLivreAffiliateSession(
       lastCookieUpdateAt: now,
     },
   });
+  const validationStartedAt = deps.monotonicNow();
 
   try {
     const validation = await deps.createSessionService().validateSession({
@@ -374,6 +425,11 @@ export async function saveMercadoLivreAffiliateSession(
         lastError: null,
       },
     });
+    emitSessionValidation(deps, {
+      marketplaceAccountId: account.id,
+      startedAt: validationStartedAt,
+      status: "CONNECTED",
+    });
 
     return {
       ok: true,
@@ -384,6 +440,12 @@ export async function saveMercadoLivreAffiliateSession(
     };
   } catch (error) {
     const failure = await persistFailure(deps.database, account.id, error, now);
+    emitSessionValidation(deps, {
+      marketplaceAccountId: account.id,
+      startedAt: validationStartedAt,
+      status: failure.status,
+      errorCode: failure.code,
+    });
     return {
       ok: false,
       code: failure.code,
@@ -429,6 +491,7 @@ export async function testMercadoLivreAffiliateSession(
       lastError: null,
     },
   });
+  const validationStartedAt = deps.monotonicNow();
 
   try {
     const cookie = normalizeMercadoLivreCookie(
@@ -461,6 +524,11 @@ export async function testMercadoLivreAffiliateSession(
         lastError: null,
       },
     });
+    emitSessionValidation(deps, {
+      marketplaceAccountId: account.id,
+      startedAt: validationStartedAt,
+      status: "CONNECTED",
+    });
 
     return {
       ok: true,
@@ -471,6 +539,12 @@ export async function testMercadoLivreAffiliateSession(
     };
   } catch (error) {
     const failure = await persistFailure(deps.database, account.id, error, now);
+    emitSessionValidation(deps, {
+      marketplaceAccountId: account.id,
+      startedAt: validationStartedAt,
+      status: failure.status,
+      errorCode: failure.code,
+    });
     return {
       ok: false,
       code: failure.code,
@@ -536,4 +610,104 @@ export async function selectMercadoLivreAffiliateTag(
     affiliateTag: selected.value,
     availableTags: tags,
   };
+}
+
+export async function generateMercadoLivreAffiliateTestLink(
+  input: GenerateMercadoLivreAffiliateTestLinkInput,
+  overrides: Partial<MercadoLivreAffiliateSessionDependencies> = {},
+): Promise<MercadoLivreAffiliateSessionResult> {
+  const deps = dependencies(overrides);
+  const account = await findMercadoLivreAccount(deps.database);
+
+  if (!account) {
+    return noAccountResult();
+  }
+
+  const session = await deps.database.mercadoLivreAffiliateSession.findUnique({
+    where: { marketplaceAccountId: account.id },
+    select: {
+      status: true,
+      cookieEncrypted: true,
+      csrfTokenEncrypted: true,
+      affiliateTag: true,
+      updatedAt: true,
+    },
+  });
+
+  if (!session?.cookieEncrypted || session.status !== "CONNECTED") {
+    return {
+      ok: false,
+      code: session?.status === "EXPIRED" ? "EXPIRED" : "NOT_CONFIGURED",
+      status: session?.status === "EXPIRED" ? "EXPIRED" : "NOT_CONFIGURED",
+    };
+  }
+
+  const affiliateTag =
+    normalizedOptional(input.affiliateTag) ?? session.affiliateTag;
+
+  if (!affiliateTag) {
+    return invalidInputResult();
+  }
+
+  const now = deps.now();
+
+  try {
+    const productUrl = normalizeMercadoLivreAffiliateProductUrl(
+      input.productUrl,
+    );
+    const cookie = normalizeMercadoLivreCookie(
+      deps.decrypt(session.cookieEncrypted),
+    );
+    const csrfToken = session.csrfTokenEncrypted
+      ? deps.decrypt(session.csrfTokenEncrypted)
+      : null;
+    const generated = await deps.createLinkService().create({
+      productUrl,
+      affiliateTag,
+      cookie,
+      csrfToken,
+    });
+    const refreshedCookie = generated.refreshedCookie ?? cookie;
+    const refreshedCsrfToken =
+      generated.refreshedCsrfToken === undefined
+        ? csrfToken
+        : generated.refreshedCsrfToken;
+
+    await deps.database.mercadoLivreAffiliateSession.updateMany({
+      where: {
+        marketplaceAccountId: account.id,
+        updatedAt: session.updatedAt,
+      },
+      data: {
+        affiliateTag,
+        cookieEncrypted: deps.encrypt(refreshedCookie),
+        csrfTokenEncrypted: refreshedCsrfToken
+          ? deps.encrypt(refreshedCsrfToken)
+          : null,
+        status: "CONNECTED",
+        lastValidatedAt: now,
+        ...(refreshedCookie !== cookie ? { lastCookieUpdateAt: now } : {}),
+        lastErrorAt: null,
+        lastError: null,
+      },
+    });
+
+    return {
+      ok: true,
+      code: "LINK_GENERATED",
+      status: "CONNECTED",
+      affiliateTag,
+      affiliateUrl: generated.affiliateUrl,
+      provider: "stripe_v2",
+      generatedAt: now,
+    };
+  } catch (error) {
+    const failure = await persistFailure(deps.database, account.id, error, now);
+    return {
+      ok: false,
+      code: failure.code,
+      status: failure.status,
+      errorMessage: failure.message,
+    };
+  }
 }

@@ -9,6 +9,7 @@ import {
 } from "@affiliate/marketplace-discovery";
 import {
   clearMercadoLivreAffiliateSession,
+  generateMercadoLivreAffiliateTestLink,
   saveMercadoLivreAffiliateSession,
   selectMercadoLivreAffiliateTag,
   testMercadoLivreAffiliateSession,
@@ -39,6 +40,14 @@ const pendingLinksSchema = z.object({
   limit: z.coerce.number().int().min(1).max(50).default(50),
   offerIds: z.array(z.string().trim().min(1).max(200)).max(50).default([]),
   dryRun: z.boolean().default(false),
+});
+
+const testLinkSchema = z.object({
+  productUrl: z.string().trim().url().max(2_048),
+  affiliateTag: z.preprocess(
+    (value) => (value === "" || value === null ? undefined : value),
+    z.string().trim().min(1).max(200).optional(),
+  ),
 });
 
 async function requireAffiliateSessionManager() {
@@ -126,6 +135,42 @@ export async function testMercadoLivreAffiliateSessionAction() {
     testMercadoLivreAffiliateSession(),
   );
   finish(result, "affiliate-session-tested");
+}
+
+export async function generateMercadoLivreAffiliateTestLinkAction(
+  formData: FormData,
+) {
+  await requireAffiliateSessionManager();
+  const parsed = testLinkSchema.safeParse({
+    productUrl: formData.get("productUrl"),
+    affiliateTag: formData.get("affiliateTag"),
+  });
+
+  if (!parsed.success) {
+    redirect("/integracoes/mercado-livre?message=affiliate-session-invalid");
+  }
+
+  const result = await safelyRunAffiliateOperation(() =>
+    generateMercadoLivreAffiliateTestLink({
+      productUrl: parsed.data.productUrl,
+      ...(parsed.data.affiliateTag
+        ? { affiliateTag: parsed.data.affiliateTag }
+        : {}),
+    }),
+  );
+  revalidateMercadoLivreAffiliatePages();
+
+  if (!result.ok || !result.affiliateUrl) {
+    redirect(`/integracoes/mercado-livre?message=${failureMessage(result)}`);
+  }
+
+  const query = new URLSearchParams({
+    message: "affiliate-test-link-generated",
+    generatedAffiliateUrl: result.affiliateUrl,
+    affiliateEndpointMode: result.provider ?? "stripe_v2",
+    generatedAt: result.generatedAt?.toISOString() ?? new Date().toISOString(),
+  });
+  redirect(`/integracoes/mercado-livre?${query.toString()}`);
 }
 
 export async function clearMercadoLivreAffiliateSessionAction() {

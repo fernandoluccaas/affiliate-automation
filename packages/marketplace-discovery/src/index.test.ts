@@ -977,7 +977,7 @@ describe("MercadoLivre affiliate discovery enrichment", () => {
     );
   });
 
-  it("treats manual-required results as a successful pending discovery", async () => {
+  it("stops new attempts after session expiry and persists other products pending", async () => {
     const database = fakeDatabase(
       enabledConfig({ maxCandidatesPerCategory: 20 }),
     );
@@ -1044,20 +1044,24 @@ describe("MercadoLivre affiliate discovery enrichment", () => {
 
     expect(result).toMatchObject({
       ok: true,
-      status: "SUCCEEDED",
+      status: "PARTIAL",
       metrics: {
-        affiliateLinkAttempts: 8,
-        affiliateLinksGenerated: 0,
-        affiliatePending: 8,
-        affiliateSkippedAfterSessionExpired: 0,
-        readyForAffiliateLink: 8,
+        affiliateLinkAttempts: 2,
+        affiliateLinksGenerated: 1,
+        affiliatePending: 7,
+        affiliateSkippedAfterSessionExpired: 6,
+        readyForAffiliateLink: 7,
       },
     });
-    expect(createLink).not.toHaveBeenCalled();
+    expect(createLink).toHaveBeenCalledTimes(2);
     expect(ingest).toHaveBeenCalledTimes(8);
     expect(
       database.mercadoLivreAffiliateSession.updateMany,
-    ).not.toHaveBeenCalled();
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "EXPIRED" }),
+      }),
+    );
     for (const [call] of database.marketplaceAccount.update.mock.calls) {
       expect(call.data).not.toHaveProperty("status");
     }
@@ -1065,10 +1069,10 @@ describe("MercadoLivre affiliate discovery enrichment", () => {
       emitOperationalMetric.mock.calls.filter(
         ([event]) => event === "mercadolivre_discovery_items_pending_link",
       ),
-    ).toHaveLength(8);
+    ).toHaveLength(7);
   });
 
-  it("does not read, encrypt or rotate browser cookies during discovery", async () => {
+  it("rotates encrypted session values during connected discovery", async () => {
     const database = fakeDatabase();
     const marketplace = connector({
       getBestSellers: vi.fn().mockResolvedValue([
@@ -1131,11 +1135,17 @@ describe("MercadoLivre affiliate discovery enrichment", () => {
     }).run(new Date("2026-07-28T14:00:00.000Z"), { force: true });
 
     expect(result.status).toBe("SUCCEEDED");
-    expect(createLink).not.toHaveBeenCalled();
-    expect(encryptCredential).not.toHaveBeenCalled();
+    expect(createLink).toHaveBeenCalledTimes(2);
+    expect(encryptCredential).toHaveBeenCalled();
     expect(
       database.mercadoLivreAffiliateSession.updateMany,
-    ).not.toHaveBeenCalled();
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          cookieEncrypted: "encrypted-refreshed-cookie",
+        }),
+      }),
+    );
   });
 
   it("reuses an existing generated link on repeated discovery without duplicating the product", async () => {
@@ -1323,7 +1333,7 @@ describe("generatePendingMercadoLivreAffiliateLinks", () => {
       failed: 0,
     });
     expect(lock).toHaveBeenCalledWith(
-      "mercado-livre:affiliate-link-operations:account-1",
+      "mercado-livre:affiliate-session:account-1",
       10 * 60 * 1000,
     );
     expect(ingest).toHaveBeenCalledWith(
