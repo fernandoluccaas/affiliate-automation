@@ -285,7 +285,11 @@ export function AffiliateLinkBatch({ offers }: AffiliateLinkBatchProps) {
 
       {result ? (
         <section className="rounded-md border bg-emerald-50 p-4">
-          <h2 className="font-semibold">Lote concluído</h2>
+          <h2 className="font-semibold">
+            {result.status === "QUEUED"
+              ? "Lote enfileirado para o worker"
+              : "Lote concluído"}
+          </h2>
           <div className="mt-2 grid gap-2 sm:grid-cols-3">
             <div>Atualizados: {result.updated}</div>
             <div>Ignorados: {result.ignored}</div>

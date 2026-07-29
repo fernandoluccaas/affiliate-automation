@@ -54,7 +54,7 @@ export type AffiliateLinkBatchPreview = {
 
 export type ApplyAffiliateLinksBatchResult = {
   importJobId: string;
-  status: "SUCCEEDED" | "SUCCEEDED_WITH_ERRORS";
+  status: "QUEUED" | "SUCCEEDED" | "SUCCEEDED_WITH_ERRORS";
   total: number;
   updated: number;
   ignored: number;
@@ -515,7 +515,10 @@ async function retirePendingVersion(
 }
 
 export async function applyAffiliateLinksBatch(
-  input: { entries: readonly AffiliateLinkBatchEntry[] },
+  input: {
+    entries: readonly AffiliateLinkBatchEntry[];
+    importJobId?: string;
+  },
   dependencyOverrides: Partial<AffiliateLinkBatchDependencies> = {},
 ): Promise<ApplyAffiliateLinksBatchResult> {
   const dependencies: AffiliateLinkBatchDependencies = {
@@ -530,16 +533,26 @@ export async function applyAffiliateLinksBatch(
     orderBy: { updatedAt: "desc" },
     select: { id: true },
   });
-  const job = await dependencies.database.importJob.create({
-    data: {
-      marketplaceAccountId: account?.id ?? null,
-      marketplace: "MERCADO_LIVRE",
-      source: "AFFILIATE_LINK_BATCH",
-      status: "RUNNING",
-      totalFound: entries.length,
-      startedAt: new Date(),
-    },
-  });
+  const job = input.importJobId
+    ? await dependencies.database.importJob.update({
+        where: { id: input.importJobId },
+        data: {
+          status: "RUNNING",
+          totalFound: entries.length,
+          startedAt: new Date(),
+          errorMessage: null,
+        },
+      })
+    : await dependencies.database.importJob.create({
+        data: {
+          marketplaceAccountId: account?.id ?? null,
+          marketplace: "MERCADO_LIVRE",
+          source: "AFFILIATE_LINK_BATCH",
+          status: "RUNNING",
+          totalFound: entries.length,
+          startedAt: new Date(),
+        },
+      });
   const preview = await previewAffiliateLinksBatch(entries, dependencies);
   let connector: MarketplaceConnector | null = null;
   let updated = 0;
@@ -724,5 +737,148 @@ export async function applyAffiliateLinksBatch(
     rejected,
     invalidLinks,
     notFound,
+  };
+}
+
+export async function queueAffiliateLinksBatch(
+  entries: readonly AffiliateLinkBatchEntry[],
+  dependencyOverrides: Partial<AffiliateLinkBatchDependencies> = {},
+): Promise<ApplyAffiliateLinksBatchResult> {
+  const database = dependencyOverrides.database ?? prisma;
+  const limitedEntries = entries.slice(0, batchLimit());
+  const account = await database.marketplaceAccount.findFirst({
+    where: { marketplace: "MERCADO_LIVRE", enabled: true },
+    orderBy: { updatedAt: "desc" },
+    select: { id: true },
+  });
+  const job = await database.importJob.create({
+    data: {
+      marketplaceAccountId: account?.id ?? null,
+      marketplace: "MERCADO_LIVRE",
+      source: "AFFILIATE_LINK_BATCH",
+      status: "QUEUED",
+      totalFound: limitedEntries.length,
+      summary: { entries: limitedEntries },
+    },
+  });
+
+  return {
+    importJobId: job.id,
+    status: "QUEUED",
+    total: limitedEntries.length,
+    updated: 0,
+    ignored: 0,
+    failed: 0,
+    readyToPublish: 0,
+    readyForAffiliateLink: 0,
+    rejected: 0,
+    invalidLinks: 0,
+    notFound: 0,
+  };
+}
+
+function queuedEntries(value: Prisma.JsonValue | null) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  const entries = (value as { entries?: unknown }).entries;
+
+  if (!Array.isArray(entries)) return [];
+
+  return entries.flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const item = entry as Record<string, unknown>;
+
+    if (
+      typeof item.line !== "number" ||
+      typeof item.affiliateUrl !== "string" ||
+      (typeof item.externalId !== "string" &&
+        typeof item.productUrl !== "string")
+    ) {
+      return [];
+    }
+
+    return [
+      {
+        line: item.line,
+        ...(typeof item.externalId === "string"
+          ? { externalId: item.externalId }
+          : {}),
+        ...(typeof item.productUrl === "string"
+          ? { productUrl: item.productUrl }
+          : {}),
+        affiliateUrl: item.affiliateUrl,
+      },
+    ];
+  });
+}
+
+export async function processAffiliateLinkJobs(
+  input: { limit?: number } = {},
+  dependencyOverrides: Partial<AffiliateLinkBatchDependencies> = {},
+) {
+  const dependencies: AffiliateLinkBatchDependencies = {
+    database: dependencyOverrides.database ?? prisma,
+    ingest: dependencyOverrides.ingest ?? ingestOffer,
+    createConnector:
+      dependencyOverrides.createConnector ?? createMercadoLivreConnector,
+  };
+  const limit = Math.min(25, Math.max(1, Math.floor(input.limit ?? 10)));
+  const jobs = await dependencies.database.importJob.findMany({
+    where: {
+      marketplace: "MERCADO_LIVRE",
+      source: "AFFILIATE_LINK_BATCH",
+      status: "QUEUED",
+    },
+    orderBy: { createdAt: "asc" },
+    take: limit,
+    select: { id: true, summary: true },
+  });
+  let processed = 0;
+  let failed = 0;
+
+  for (const job of jobs) {
+    const entries = queuedEntries(job.summary);
+
+    if (entries.length === 0) {
+      failed += 1;
+      await dependencies.database.importJob.update({
+        where: { id: job.id },
+        data: {
+          status: "FAILED",
+          finishedAt: new Date(),
+          totalFailed: 1,
+          errorMessage: "Job sem linhas válidas para processamento.",
+        },
+      });
+      continue;
+    }
+
+    try {
+      const result = await applyAffiliateLinksBatch(
+        { entries, importJobId: job.id },
+        dependencies,
+      );
+      processed += 1;
+      if (result.status === "SUCCEEDED_WITH_ERRORS") failed += 1;
+    } catch (error) {
+      failed += 1;
+      await dependencies.database.importJob.update({
+        where: { id: job.id },
+        data: {
+          status: "FAILED",
+          finishedAt: new Date(),
+          totalFailed: entries.length,
+          errorMessage:
+            error instanceof Error
+              ? error.message.slice(0, 500)
+              : "Falha no job de links.",
+        },
+      });
+    }
+  }
+
+  return {
+    selected: jobs.length,
+    processed,
+    failed,
   };
 }

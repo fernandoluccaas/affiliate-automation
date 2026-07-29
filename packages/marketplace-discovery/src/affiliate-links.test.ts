@@ -308,4 +308,51 @@ describe("applyAffiliateLinksBatch", () => {
     expect(ingest).toHaveBeenCalledTimes(1);
     expect(result.updated).toBe(1);
   });
+
+  it("records a partially invalid batch without cancelling valid lines", async () => {
+    const database = databaseWithProduct();
+    const ingest = vi.fn().mockResolvedValue({
+      ok: true,
+      offerId: "offer-2",
+      productId: "product-1",
+      status: "READY_TO_PUBLISH",
+      statusReason: "ready",
+      offerCreated: true,
+      productCreated: false,
+      version: 2,
+    });
+    const result = await applyAffiliateLinksBatch(
+      {
+        entries: [
+          {
+            line: 1,
+            externalId: "MLB1234567890",
+            affiliateUrl: "https://meli.la/valid",
+          },
+          {
+            line: 2,
+            externalId: "MLB9999999999",
+            affiliateUrl: "https://meli.la.evil.example/invalid",
+          },
+        ],
+      },
+      { database: database as never, ingest: ingest as never },
+    );
+
+    expect(result).toMatchObject({
+      status: "SUCCEEDED_WITH_ERRORS",
+      updated: 1,
+      ignored: 1,
+      invalidLinks: 1,
+    });
+    expect(database.importJobItem.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          stage: "AFFILIATE_LINK_VALIDATION",
+          status: "FAILED",
+          errorCode: "INVALID_LINK",
+        }),
+      }),
+    );
+  });
 });

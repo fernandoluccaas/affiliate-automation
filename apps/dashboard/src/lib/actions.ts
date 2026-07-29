@@ -22,6 +22,7 @@ import {
   parseAffiliateLinksCsv,
   parsePipeAffiliateLinks,
   previewAffiliateLinksBatch,
+  queueAffiliateLinksBatch,
   type AffiliateLinkBatchEntry,
   type MercadoLivreProductResolutionDiagnostics,
 } from "@affiliate/marketplace-discovery";
@@ -1097,7 +1098,14 @@ export async function applyAffiliateLinksBatchAction(
     };
   }
 
-  const result = await applyAffiliateLinksBatch({ entries: parsed.entries });
+  const inlineLimit = Math.max(
+    1,
+    Math.floor(Number(process.env.AFFILIATE_LINK_JOB_INLINE_LIMIT ?? 50)),
+  );
+  const result =
+    parsed.entries.length > inlineLimit
+      ? await queueAffiliateLinksBatch(parsed.entries)
+      : await applyAffiliateLinksBatch({ entries: parsed.entries });
   revalidatePath("/ofertas");
   revalidatePath("/ofertas/affiliate-links");
   revalidatePath("/integracoes/mercado-livre");

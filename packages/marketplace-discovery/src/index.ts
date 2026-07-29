@@ -27,6 +27,10 @@ import {
   type MercadoLivreUserProduct,
 } from "@affiliate/marketplace-connectors";
 import { acquireLock, type LockHandle } from "@affiliate/redis";
+import {
+  ManualAffiliateLinkProvider,
+  type AffiliateLinkProvider,
+} from "./affiliate-link-provider";
 
 export {
   ManualAffiliateLinkProvider,
@@ -38,7 +42,9 @@ export {
   extractMercadoLivreExternalId,
   parseAffiliateLinksCsv,
   parsePipeAffiliateLinks,
+  processAffiliateLinkJobs,
   previewAffiliateLinksBatch,
+  queueAffiliateLinksBatch,
   validateMercadoLivreProductUrl,
   type AffiliateLinkBatchEntry,
   type AffiliateLinkBatchPreview,
@@ -122,6 +128,7 @@ export type MercadoLivreDiscoveryOptions = {
 type DiscoveryDependencies = {
   database: typeof prisma;
   createConnector: () => Promise<MarketplaceConnector>;
+  affiliateLinkProvider: AffiliateLinkProvider;
   affiliateLinkService: Pick<MercadoLivreAffiliateLinkService, "create">;
   affiliateConcurrency: number;
   decryptCredential: typeof decryptSecret;
@@ -223,12 +230,14 @@ function discoveryDependencies(
     database: dependencies.database ?? prisma,
     createConnector:
       dependencies.createConnector ?? createMercadoLivreConnector,
+    affiliateLinkProvider:
+      dependencies.affiliateLinkProvider ?? new ManualAffiliateLinkProvider(),
     affiliateLinkService:
       dependencies.affiliateLinkService ??
       new MercadoLivreAffiliateLinkService(),
     affiliateConcurrency: affiliateBatchConcurrency(
       dependencies.affiliateConcurrency ??
-        process.env.MERCADOLIVRE_AFFILIATE_MAX_CONCURRENCY,
+        process.env.MERCADOLIVRE_DISCOVERY_MAX_CONCURRENCY,
     ),
     decryptCredential: dependencies.decryptCredential ?? decryptSecret,
     encryptCredential: dependencies.encryptCredential ?? encryptSecret,
@@ -1759,6 +1768,121 @@ async function ingestAffiliateEnrichments(
   );
 }
 
+async function enrichCandidatesWithProvider(
+  candidates: readonly MercadoLivreDiscoveredCandidate[],
+  dependencies: DiscoveryDependencies,
+  existingLinks: ReadonlyMap<
+    string,
+    { affiliateUrl: string; affiliateLabel: string | null }
+  >,
+  metrics: MercadoLivreDiscoveryMetrics,
+) {
+  return mapWithConcurrency(
+    candidates,
+    dependencies.affiliateConcurrency,
+    async (candidate): Promise<AffiliateEnrichmentResult> => {
+      const existing = existingLinks.get(candidate.externalProductId);
+
+      if (existing) {
+        metrics.affiliateLinksReused += 1;
+        return {
+          candidate,
+          affiliateUrl: existing.affiliateUrl,
+          affiliateEligibility: "ELIGIBLE",
+          affiliateLabel: existing.affiliateLabel,
+          affiliateFailure: null,
+          linkAttempted: false,
+          linkGenerated: false,
+          linkReused: true,
+        };
+      }
+
+      metrics.affiliateLinkAttempts += 1;
+      const generated = await dependencies.affiliateLinkProvider.generate({
+        marketplace: candidate.marketplace,
+        productUrl: candidate.productUrl,
+        externalProductId: candidate.externalProductId,
+      });
+
+      if (generated.status === "GENERATED") {
+        metrics.affiliateLinksGenerated += 1;
+        emitOperationalMetric(
+          dependencies,
+          "mercadolivre_affiliate_link_generated",
+          {
+            stage: "AFFILIATE_LINK",
+            status: "SUCCEEDED",
+            count: 1,
+          },
+        );
+        return {
+          candidate,
+          affiliateUrl: generated.affiliateUrl,
+          affiliateEligibility: "ELIGIBLE",
+          affiliateLabel: generated.provider,
+          affiliateFailure: null,
+          linkAttempted: true,
+          linkGenerated: true,
+          linkReused: false,
+        };
+      }
+
+      if (generated.status === "INELIGIBLE") {
+        metrics.affiliateIneligible += 1;
+        emitOperationalMetric(
+          dependencies,
+          "mercadolivre_discovery_items_ineligible",
+          {
+            stage: "AFFILIATE_LINK",
+            status: "INELIGIBLE",
+            count: 1,
+          },
+        );
+        return {
+          candidate,
+          affiliateUrl: null,
+          affiliateEligibility: "INELIGIBLE",
+          affiliateLabel: null,
+          affiliateFailure: fixedAffiliateFailure(
+            "AFFILIATE_LINK_INELIGIBLE",
+            generated.reason,
+            { productIneligible: true, attempts: 1 },
+          ),
+          linkAttempted: true,
+          linkGenerated: false,
+          linkReused: false,
+        };
+      }
+
+      metrics.affiliatePending += 1;
+      emitOperationalMetric(
+        dependencies,
+        "mercadolivre_discovery_items_pending_link",
+        {
+          stage: "AFFILIATE_LINK",
+          status: "MANUAL_REQUIRED",
+          count: 1,
+          errorCode: "MANUAL_REQUIRED",
+        },
+      );
+      return {
+        candidate,
+        affiliateUrl: null,
+        affiliateEligibility: "UNKNOWN",
+        affiliateLabel: null,
+        affiliateFailure: fixedAffiliateFailure(
+          "MANUAL_REQUIRED",
+          generated.reason,
+          { attempts: 1 },
+        ),
+        linkAttempted: true,
+        linkGenerated: false,
+        linkReused: false,
+      };
+    },
+  );
+}
+
 function importJobTotals(metrics: MercadoLivreDiscoveryMetrics) {
   return {
     totalFound: metrics.candidatesFound,
@@ -1834,7 +1958,7 @@ export class MercadoLivreDiscoveryService {
     }
 
     const lock = await this.dependencies.lock(
-      affiliateOperationLockKey(account.id),
+      discoveryLockKey(account),
       DISCOVERY_LOCK_TTL_MS,
     );
 
@@ -1866,7 +1990,7 @@ export class MercadoLivreDiscoveryService {
           categoryId:
             categoryIds.length === 1 ? (categoryIds[0] ?? null) : null,
           status: "RUNNING",
-          source: "MERCADO_LIVRE_HIGHLIGHTS",
+          source: "MERCADOLIVRE_BEST_SELLERS",
           startedAt: now,
           summary: metrics,
         },
@@ -1953,14 +2077,11 @@ export class MercadoLivreDiscoveryService {
       const enrichments =
         selectedCandidates.length === 0
           ? []
-          : await enrichCandidatesWithAffiliateLinks(
+          : await enrichCandidatesWithProvider(
               selectedCandidates,
               this.dependencies,
-              account.id,
-              importJob.id,
               existingAffiliateLinks,
               metrics,
-              now,
             );
 
       await ingestAffiliateEnrichments(
@@ -1975,8 +2096,7 @@ export class MercadoLivreDiscoveryService {
       const hasPartialFailures =
         metrics.errors > 0 ||
         metrics.unresolvedCandidates > 0 ||
-        metrics.affiliateIneligible > 0 ||
-        metrics.affiliatePending > 0;
+        metrics.affiliateIneligible > 0;
       const status = hasPartialFailures ? "PARTIAL" : "SUCCEEDED";
       const issueCount = metrics.errors + metrics.unresolvedCandidates;
       const lastError =

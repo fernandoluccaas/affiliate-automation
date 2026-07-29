@@ -25,8 +25,11 @@ import {
 } from "@affiliate/database";
 import {
   collectMercadoLivreCandidates,
+  processAffiliateLinkJobs,
   refreshMercadoLivreOffers,
 } from "@affiliate/marketplace-discovery";
+import { sanitizeMercadoLivreAffiliateError } from "@affiliate/marketplace-connectors";
+import { validateMarketplaceAffiliateUrl } from "@affiliate/validation";
 
 const DEFAULT_POLL_INTERVAL_MS = 60_000;
 const DEFAULT_MAX_ATTEMPTS = 3;
@@ -168,8 +171,13 @@ export function resolvePublicationUrl(offer: OfferWithLinks) {
     offer.marketplace === "MERCADO_LIVRE" ||
     offer.trackingStrategy === "DIRECT_AFFILIATE_LINK"
   ) {
-    return offer.affiliateUrl
-      ? { url: offer.affiliateUrl, affiliateLinkId: null }
+    if (!offer.affiliateUrl) return null;
+    const validation = validateMarketplaceAffiliateUrl(
+      offer.marketplace,
+      offer.affiliateUrl,
+    );
+    return validation.ok
+      ? { url: validation.normalizedUrl, affiliateLinkId: null }
       : null;
   }
 
@@ -337,6 +345,11 @@ export async function createPublicationIdempotently(
       affiliateUrlSnapshot: offer.affiliateUrl,
       trackingUrlSnapshot: payload.trackingUrl,
       offerVersionSnapshot: offer.version,
+      sourceCategoryIdSnapshot: offer.sourceCategoryId,
+      bestSellerPositionSnapshot: offer.bestSellerPosition,
+      sourceHighlightIdSnapshot: offer.sourceHighlightId,
+      sourceHighlightTypeSnapshot: offer.sourceHighlightType,
+      resolutionStrategySnapshot: offer.resolutionStrategy,
     },
   });
 }
@@ -670,9 +683,132 @@ export async function expireInvalidOffers(now = new Date()) {
   return metrics;
 }
 
-export async function runWorkerCycle(now = new Date()) {
+type WorkerStageName =
+  | "expire"
+  | "discovery"
+  | "affiliate-links"
+  | "refresh"
+  | "schedule"
+  | "retry"
+  | "publish";
+
+type WorkerStageStatus = "SUCCEEDED" | "SKIPPED" | "PARTIAL" | "FAILED";
+
+type WorkerStageDiagnostic = {
+  status: WorkerStageStatus;
+  durationMs: number;
+  errorCode: string | null;
+};
+
+type WorkerStageClassification = {
+  status: WorkerStageStatus;
+  errorCode?: string;
+  errorMessage?: string;
+};
+
+type WorkerStageIssue = {
+  stage: WorkerStageName;
+  status: "PARTIAL" | "FAILED";
+  errorCode: string;
+  errorMessage: string;
+};
+
+type MercadoLivreDiscoveryCycleResult = Awaited<
+  ReturnType<typeof collectMercadoLivreCandidates>
+>;
+type MercadoLivreAffiliateCycleResult = Awaited<
+  ReturnType<typeof processAffiliateLinkJobs>
+>;
+type MercadoLivreRefreshCycleMetrics = Awaited<
+  ReturnType<typeof refreshMercadoLivreOffers>
+>;
+
+export type WorkerCycleMetrics = JobMetrics & {
+  stages: Partial<Record<WorkerStageName, WorkerStageDiagnostic>>;
+  discovery: MercadoLivreDiscoveryCycleResult | null;
+  affiliateLinks: MercadoLivreAffiliateCycleResult | null;
+  refresh: MercadoLivreRefreshCycleMetrics | null;
+};
+
+type WorkerCycleDependencies = {
+  expireInvalidOffers: typeof expireInvalidOffers;
+  collectMercadoLivreCandidates: typeof collectMercadoLivreCandidates;
+  processAffiliateLinkJobs: typeof processAffiliateLinkJobs;
+  refreshMercadoLivreOffers: typeof refreshMercadoLivreOffers;
+  scheduleReadyOffers: typeof scheduleReadyOffers;
+  retryFailedPublications: typeof retryFailedPublications;
+  publishScheduledOffers: typeof publishScheduledOffers;
+};
+
+function emptyWorkerCycleMetrics(): WorkerCycleMetrics {
+  return {
+    ...emptyMetrics(),
+    stages: {},
+    discovery: null,
+    affiliateLinks: null,
+    refresh: null,
+  };
+}
+
+function sanitizedWorkerError(error: unknown) {
+  return sanitizeMercadoLivreAffiliateError(error).slice(0, 500);
+}
+
+function sanitizedWorkerCode(value: unknown, fallback: string) {
+  if (typeof value !== "string" && typeof value !== "number") {
+    return fallback;
+  }
+
+  return sanitizeMercadoLivreAffiliateError(String(value))
+    .replace(/\s+/g, "_")
+    .slice(0, 100);
+}
+
+function pendingAffiliateBatchLimit() {
+  const parsed = Number(process.env.AFFILIATE_LINK_JOB_INLINE_LIMIT ?? 10);
+
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return 25;
+  }
+
+  return Math.min(100, Math.floor(parsed));
+}
+
+async function recordWorkerStageIssue(runId: string, issue: WorkerStageIssue) {
+  await prisma.systemAlert
+    .create({
+      data: {
+        severity: issue.status === "FAILED" ? "ERROR" : "WARNING",
+        source: `worker.${issue.stage}`,
+        message: `Worker stage ${issue.stage} completed as ${issue.status}.`,
+        metadata: {
+          runId,
+          stage: issue.stage,
+          status: issue.status,
+          errorCode: issue.errorCode,
+        },
+      },
+    })
+    .catch(() => undefined);
+}
+
+export async function runWorkerCycle(
+  now = new Date(),
+  dependencyOverrides: Partial<WorkerCycleDependencies> = {},
+) {
   const startedAt = new Date();
-  const metrics = emptyMetrics();
+  const metrics = emptyWorkerCycleMetrics();
+  const issues: WorkerStageIssue[] = [];
+  const dependencies: WorkerCycleDependencies = {
+    expireInvalidOffers,
+    collectMercadoLivreCandidates,
+    processAffiliateLinkJobs,
+    refreshMercadoLivreOffers,
+    scheduleReadyOffers,
+    retryFailedPublications,
+    publishScheduledOffers,
+    ...dependencyOverrides,
+  };
   const idempotencyKey = `worker-cycle:${startedAt.toISOString()}:${process.pid}`;
   const run = await prisma.automationRun.create({
     data: {
@@ -683,44 +819,203 @@ export async function runWorkerCycle(now = new Date()) {
     },
   });
 
-  try {
-    mergeMetrics(metrics, await expireInvalidOffers(now));
-    const discovery = await collectMercadoLivreCandidates(now);
+  async function runStage<T>(
+    stage: WorkerStageName,
+    operation: () => Promise<T>,
+    classify: (result: T) => WorkerStageClassification = () => ({
+      status: "SUCCEEDED",
+    }),
+  ) {
+    const stageStartedAt = Date.now();
 
-    if (discovery.status === "FAILED") {
-      throw new Error(
-        discovery.errorMessage ?? "Mercado Livre discovery failed.",
-      );
-    }
+    try {
+      const result = await operation();
+      const classification = classify(result);
+      const durationMs = Math.max(0, Date.now() - stageStartedAt);
+      metrics.stages[stage] = {
+        status: classification.status,
+        durationMs,
+        errorCode: classification.errorCode ?? null,
+      };
 
-    mergeMetrics(metrics, await refreshMercadoLivreOffers(now));
-    mergeMetrics(metrics, await scheduleReadyOffers(now));
-    mergeMetrics(metrics, await retryFailedPublications(now));
-    mergeMetrics(metrics, await publishScheduledOffers(now));
+      if (
+        classification.status === "PARTIAL" ||
+        classification.status === "FAILED"
+      ) {
+        const issue: WorkerStageIssue = {
+          stage,
+          status: classification.status,
+          errorCode: sanitizedWorkerCode(
+            classification.errorCode,
+            `${stage.toUpperCase()}_${classification.status}`,
+          ),
+          errorMessage: sanitizedWorkerError(
+            classification.errorMessage ??
+              `Worker stage ${stage} completed as ${classification.status}.`,
+          ),
+        };
+        issues.push(issue);
+        await recordWorkerStageIssue(run.id, issue);
+      }
 
-    await prisma.automationRun.update({
-      where: { id: run.id },
-      data: {
-        status: "SUCCEEDED",
-        finishedAt: new Date(),
-        metrics,
-      },
-    });
-
-    return metrics;
-  } catch (error) {
-    await prisma.automationRun.update({
-      where: { id: run.id },
-      data: {
+      return result;
+    } catch (error) {
+      const durationMs = Math.max(0, Date.now() - stageStartedAt);
+      const issue: WorkerStageIssue = {
+        stage,
         status: "FAILED",
-        finishedAt: new Date(),
-        metrics,
-        errorMessage:
-          error instanceof Error ? error.message : "Worker cycle failed.",
-      },
-    });
-    throw error;
+        errorCode: `${stage.toUpperCase()}_FAILED`,
+        errorMessage: sanitizedWorkerError(error),
+      };
+      metrics.stages[stage] = {
+        status: "FAILED",
+        durationMs,
+        errorCode: issue.errorCode,
+      };
+      issues.push(issue);
+      await recordWorkerStageIssue(run.id, issue);
+      return null;
+    }
   }
+
+  const expired = await runStage("expire", () =>
+    dependencies.expireInvalidOffers(now),
+  );
+  if (expired) mergeMetrics(metrics, expired);
+
+  const discovery = await runStage(
+    "discovery",
+    () => dependencies.collectMercadoLivreCandidates(now),
+    (result) => {
+      if (result.status === "FAILED") {
+        return {
+          status: "FAILED",
+          errorCode: result.errorCode ?? "MELI_DISCOVERY_FAILED",
+          errorMessage:
+            result.errorMessage ?? "Mercado Livre discovery failed.",
+        };
+      }
+
+      if (result.status === "PARTIAL") {
+        return {
+          status: "PARTIAL",
+          errorCode: result.errorCode ?? "MELI_DISCOVERY_PARTIAL",
+          errorMessage:
+            result.errorMessage ??
+            "Mercado Livre discovery completed with isolated item failures.",
+        };
+      }
+
+      return {
+        status: result.status === "SKIPPED" ? "SKIPPED" : "SUCCEEDED",
+      };
+    },
+  );
+  if (discovery) {
+    metrics.discovery = discovery;
+  }
+
+  const affiliateLinks = await runStage(
+    "affiliate-links",
+    () =>
+      dependencies.processAffiliateLinkJobs({
+        limit: pendingAffiliateBatchLimit(),
+      }),
+    (result) => {
+      if (result.failed > 0) {
+        return {
+          status: "PARTIAL",
+          errorCode: "AFFILIATE_LINK_JOBS_PARTIAL",
+          errorMessage: `${result.failed} affiliate link job(s) completed with errors.`,
+        };
+      }
+
+      return { status: "SUCCEEDED" };
+    },
+  );
+  if (affiliateLinks) {
+    metrics.affiliateLinks = affiliateLinks;
+  }
+
+  const refresh = await runStage(
+    "refresh",
+    () => dependencies.refreshMercadoLivreOffers(now),
+    (result) =>
+      result.failed > 0
+        ? {
+            status: "PARTIAL",
+            errorCode: "MELI_REFRESH_PARTIAL",
+            errorMessage: `Mercado Livre refresh completed with ${result.failed} isolated failure(s).`,
+          }
+        : { status: "SUCCEEDED" },
+  );
+  if (refresh) metrics.refresh = refresh;
+
+  const scheduled = await runStage("schedule", () =>
+    dependencies.scheduleReadyOffers(now),
+  );
+  if (scheduled) mergeMetrics(metrics, scheduled);
+
+  const retried = await runStage(
+    "retry",
+    () => dependencies.retryFailedPublications(now),
+    (result) =>
+      result.failed > 0
+        ? {
+            status: "PARTIAL",
+            errorCode: "PUBLICATION_RETRY_PARTIAL",
+            errorMessage: `${result.failed} publication(s) exhausted their retry limit.`,
+          }
+        : { status: "SUCCEEDED" },
+  );
+  if (retried) mergeMetrics(metrics, retried);
+
+  const published = await runStage(
+    "publish",
+    () => dependencies.publishScheduledOffers(now),
+    (result) =>
+      result.failed > 0
+        ? {
+            status: "PARTIAL",
+            errorCode: "PUBLICATION_PARTIAL",
+            errorMessage: `${result.failed} publication attempt(s) failed.`,
+          }
+        : { status: "SUCCEEDED" },
+  );
+  if (published) mergeMetrics(metrics, published);
+
+  const errorMessage =
+    issues.length > 0
+      ? issues
+          .map(
+            (issue) =>
+              `${issue.stage} (${issue.errorCode}): ${issue.errorMessage}`,
+          )
+          .join(" | ")
+          .slice(0, 2_000)
+      : null;
+  const stageStatuses = Object.values(metrics.stages);
+  const failedStageCount = stageStatuses.filter(
+    (stage) => stage?.status === "FAILED",
+  ).length;
+  const finalStatus =
+    stageStatuses.length > 0 && failedStageCount === stageStatuses.length
+      ? "FAILED"
+      : issues.length > 0
+        ? "PARTIAL"
+        : "SUCCEEDED";
+
+  await prisma.automationRun.update({
+    where: { id: run.id },
+    data: {
+      status: finalStatus,
+      finishedAt: new Date(),
+      metrics: metrics as unknown as Prisma.InputJsonValue,
+      errorMessage,
+    },
+  });
+
+  return metrics;
 }
 
 let loopStarted = false;
@@ -762,8 +1057,15 @@ if (process.env.NODE_ENV !== "test") {
     process.env.WORKER_POLL_INTERVAL_MS ?? DEFAULT_POLL_INTERVAL_MS,
   );
 
-  startWorker({ once, pollIntervalMs }).catch((error: unknown) => {
-    console.error(error instanceof Error ? error.message : "Worker failed.");
+  startWorker({ once, pollIntervalMs }).catch(() => {
+    console.error(
+      JSON.stringify({
+        event: "worker_failed",
+        stage: "WORKER_LOOP",
+        status: "FAILED",
+        errorCode: "WORKER_FAILED",
+      }),
+    );
     process.exit(1);
   });
 }

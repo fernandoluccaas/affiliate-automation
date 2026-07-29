@@ -101,36 +101,41 @@ MERCADO_LIVRE_REDIRECT_URI="http://localhost:3000/api/integrations/mercadolivre/
 MERCADO_LIVRE_SITE_ID="MLB"
 ```
 
-See [docs/mercado-livre-affiliate-session.md](docs/mercado-livre-affiliate-session.md)
-for the separately encrypted Affiliate Portal session, its server-side
-configuration and the opt-in real integration test.
-
 Use `/integracoes` to connect or reconnect through OAuth 2.0. Tokens are encrypted in `MarketplaceAccount`, refresh tokens are treated as rotating credentials, and Redis locks prevent concurrent refresh.
 
-Use `/integracoes/mercado-livre` to enable discovery, choose official category IDs, set price/discount/score filters and run manual sync. Dashboard and worker call the same `MercadoLivreDiscoveryService`; the connector is limited to official HTTP access/parsing and `ingestOffer` owns Product/Offer persistence. Discovery and pending-link enrichment share the renewable distributed lock `mercado-livre:affiliate-link-operations:{accountId}`. Session updates also use the loaded `updatedAt` value as an optimistic concurrency guard, so a batch cannot overwrite a cookie that the user replaced while it was running.
+Use `/integracoes/mercado-livre` to enable discovery, synchronize categories, choose leaf category IDs, set price/discount/score filters and import the best sellers. Dashboard and worker call the same `MercadoLivreDiscoveryService`; the connector is limited to official HTTP access/parsing and `ingestOffer` owns Product/Offer persistence.
 
-Discovery uses official categories, highlights/best sellers, catalog product resolution, multiget item details and the official item prices endpoint. Highlight `PRODUCT` entries may be catalog parents; the resolver follows bounded `children_ids` to a child with `buy_box_winner.item_id` before deduplicating by final item ID. Missing original price, shipping certainty, image, rating, sales count or commission stays `null`/`UNKNOWN`. A configured minimum discount of zero means no discount requirement, and a minimum score of zero is passed explicitly to ingestion and stored on the Offer version for later affiliate-link enrichment.
+The primary ranking source is the official authenticated endpoint `GET /highlights/MLB/category/{categoryId}`. Discovery keeps at most 20 positions per leaf category and resolves `ITEM`, `PRODUCT` and `USER_PRODUCT` into the final item before deduplicating. `PRODUCT` parents are traversed through bounded `children_ids` until a `buy_box_winner.item_id` is found. An individual resolution or ingestion failure is recorded in `ImportJobItem` and does not cancel the other products.
 
-The integration screen also provides an experimental manual category-search probe using `/sites/{siteId}/search?category={categoryId}&limit={limit}`. It first uses the connected account's Bearer token and, when that attempt fails, repeats the same request without `Authorization` strictly for comparison. HTTP failures retain only sanitized Mercado Livre fields (`error`, `code`, `message`, `cause` and `blocked_by`); credentials and sensitive headers are never returned. A successful authenticated attempt short-circuits the public comparison.
+Each Offer stores `sourceCategoryId`, `bestSellerPosition`, `sourceHighlightId`, `sourceHighlightType` and `resolutionStrategy`; Publication copies those values into immutable snapshots. Ranking-only changes are intentionally excluded from the commercial fingerprint, so moving from position 8 to 9 does not create a new Offer version by itself.
 
-The probe returns at most five diagnostic samples and never calls `ingestOffer` or creates Product, Offer or Publication rows. A probe 403 does not change a connected account's status. Category search is not an automatic discovery source or fallback in Phase 3A.1 because its real behavior depends on the permissions and policies Mercado Livre makes available to the application. When `bestSellersEnabled=false`, normal discovery returns `DISCOVERY_SOURCE_DISABLED`.
+## Mercado Livre affiliate links
 
-For a configured Affiliate Portal session, discovery generates the official
-affiliate URL after highlight resolution and before `ingestOffer`, with at most
-four products in flight. Product-level failures do not abort the batch:
-ineligible products are rejected deterministically, transient failures remain
-`READY_FOR_AFFILIATE_LINK`, and an expired cookie stops new link attempts while
-the resolved products are still persisted. Existing pending offers can be
-enriched in bounded batches; `/ofertas/affiliate-links` remains the manual
-fallback. Mercado Livre publications use `DIRECT_AFFILIATE_LINK`, so the worker
-sends the official affiliate URL directly instead of `/go/[slug]`.
+Link generation remains in the official Mercado Livre Affiliate Portal. The supported import flow does not require or store browser cookies, CSRF values, usernames, passwords, MFA codes or CAPTCHA data. `ManualAffiliateLinkProvider` returns `MANUAL_REQUIRED`; it never fabricates `meli.la` and never substitutes the original product URL.
 
-Every import persists ranking origin on `Offer` and real counters plus
-per-product diagnostics in `ImportJob`/`ImportJobItem`. Ranking-only changes do
-not alter the offer fingerprint. Affiliate URLs are validated centrally:
-HTTPS is required, local/private hosts are rejected, and Mercado Livre accepts
-only `meli.la`, `mercadolivre.com.br`, `mercadolibre.com`, and legitimate
-subdomains of those domains.
+Therefore the automatic flow is:
+
+```text
+discovered -> resolved -> persisted -> READY_FOR_AFFILIATE_LINK
+-> user imports meli.la -> new Offer version -> deterministic validation/score
+-> READY_TO_PUBLISH or a rejection status
+```
+
+Open `/ofertas/affiliate-links` to:
+
+- paste several links directly in the pending-offers table;
+- paste `externalId|affiliateUrl` or `productUrl|affiliateUrl` lines;
+- upload CSV with `externalId,productUrl,affiliateUrl`, using comma or semicolon.
+
+Only `affiliateUrl` plus one identifier is required. A preview separates valid, not found, duplicate, invalid and already-applied lines. Confirmation uses `ingestOffer`, preserves snapshots and metadata, creates the next Offer version when required and re-runs deterministic validation and scoring. A product URL not yet stored is resolved through the official OAuth connector before ingestion.
+
+Affiliate URLs must be absolute HTTPS URLs without embedded credentials. Mercado Livre accepts only `meli.la`, `mercadolivre.com.br`, `mercadolibre.com` and legitimate subdomains. The original URL and affiliate URL remain separate.
+
+The worker processes queued `AFFILIATE_LINK_BATCH` jobs and isolates expiration, discovery, refresh, scheduling, retries and publication as independent stages. A failed discovery produces `PARTIAL` while refresh and ready publications continue. Refresh records `selected`, `refreshed`, `unchanged`, `newVersions`, `notFound`, `failed` and `affiliateUrlsPreserved`; it never replaces an existing affiliate URL with `null`.
+
+Mercado Livre publications use `DIRECT_AFFILIATE_LINK`. A missing or invalid affiliate URL prevents scheduling and publication; there is no fallback to the original URL.
+
+See [docs/mercado-livre-supported-import.md](docs/mercado-livre-supported-import.md) for formats, validation and versioning details. A future automatic provider must use an officially documented link-generation API and implement `AffiliateLinkProvider`.
 
 ## Tracking
 
@@ -146,7 +151,7 @@ npm run worker:dev
 npm run worker:start
 ```
 
-`worker:once` runs one cycle. `worker:dev` and `worker:start` poll continuously using `WORKER_POLL_INTERVAL_MS`, defaulting to 60000 ms.
+`worker:once` runs one cycle. `worker:dev` and `worker:start` poll continuously using `WORKER_POLL_INTERVAL_MS`, defaulting to 60000 ms. Affiliate-link batches above `AFFILIATE_LINK_JOB_INLINE_LIMIT` are queued and processed independently by the worker.
 
 ## Quality Commands
 

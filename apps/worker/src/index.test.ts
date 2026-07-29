@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Channel, Offer, Prisma } from "@affiliate/database";
+import { createMercadoLivreDiscoveryMetrics } from "@affiliate/marketplace-discovery";
 import {
   createPublicationIdempotently,
   resolvePublicationUrl,
+  runWorkerCycle,
   scheduleReadyOffers,
 } from "./index";
 
@@ -40,19 +42,19 @@ describe("createPublicationIdempotently", () => {
     const offer = {
       marketplace: "MERCADO_LIVRE",
       trackingStrategy: "DIRECT_AFFILIATE_LINK",
-      affiliateUrl: "https://mercadolivre.com/sec/affiliate",
+      affiliateUrl: "https://www.mercadolivre.com.br/sec/affiliate",
       affiliateLinks: [
         {
           id: "link-1",
           slug: "mlb1",
-          destination: "https://mercadolivre.com/sec/affiliate",
+          destination: "https://www.mercadolivre.com.br/sec/affiliate",
           active: true,
         },
       ],
     };
 
     expect(resolvePublicationUrl(offer as never)).toEqual({
-      url: "https://mercadolivre.com/sec/affiliate",
+      url: "https://www.mercadolivre.com.br/sec/affiliate",
       affiliateLinkId: null,
     });
     expect(resolvePublicationUrl(offer as never)?.url).not.toContain("/go/");
@@ -117,6 +119,11 @@ describe("createPublicationIdempotently", () => {
       scoreCompletenessPercentage: 10,
       affiliateUrl: "https://example.com/affiliate",
       version: 1,
+      sourceCategoryId: "MLB123",
+      bestSellerPosition: 8,
+      sourceHighlightId: "MLBSPARSE",
+      sourceHighlightType: "ITEM",
+      resolutionStrategy: "ITEM_DIRECT",
       affiliateLinks: [
         {
           id: "link-1",
@@ -185,6 +192,11 @@ describe("createPublicationIdempotently", () => {
           originalPriceSnapshot: null,
           discountPercentageSnapshot: null,
           shippingStatusSnapshot: "UNKNOWN",
+          sourceCategoryIdSnapshot: "MLB123",
+          bestSellerPositionSnapshot: 8,
+          sourceHighlightIdSnapshot: "MLBSPARSE",
+          sourceHighlightTypeSnapshot: "ITEM",
+          resolutionStrategySnapshot: "ITEM_DIRECT",
         }),
       }),
     );
@@ -305,5 +317,243 @@ describe("createPublicationIdempotently", () => {
         where: { idempotencyKey: "publication:channel-1:offer-v2" },
       }),
     );
+  });
+});
+
+function workerJobMetrics(
+  overrides: Partial<{
+    readyOffersFound: number;
+    scheduled: number;
+    published: number;
+    exported: number;
+    failed: number;
+    retried: number;
+    expired: number;
+    skipped: number;
+  }> = {},
+) {
+  return {
+    readyOffersFound: 0,
+    scheduled: 0,
+    published: 0,
+    exported: 0,
+    failed: 0,
+    retried: 0,
+    expired: 0,
+    skipped: 0,
+    skipReasons: {},
+    ...overrides,
+  };
+}
+
+describe("runWorkerCycle", () => {
+  it("records a partial cycle and continues refresh, scheduling, retries and publishing after discovery fails", async () => {
+    const actual = await import("@affiliate/database");
+    const now = new Date("2026-07-28T20:00:00.000Z");
+    const automationRunUpdate = vi.fn().mockResolvedValue({});
+    const systemAlertCreate = vi.fn().mockResolvedValue({});
+    Object.assign(actual.prisma, {
+      automationRun: {
+        create: vi.fn().mockResolvedValue({ id: "worker-run-1" }),
+        update: automationRunUpdate,
+      },
+      systemAlert: { create: systemAlertCreate },
+    });
+    const discovery = vi.fn().mockResolvedValue({
+      ok: false,
+      status: "FAILED",
+      metrics: createMercadoLivreDiscoveryMetrics(),
+      errorCode: "MELI_API_UNAVAILABLE",
+      errorMessage: "Mercado Livre discovery failed with HTTP 503.",
+    });
+    const refresh = vi
+      .fn()
+      .mockResolvedValue({ ...workerJobMetrics(), selected: 2, refreshed: 2 });
+    const schedule = vi
+      .fn()
+      .mockResolvedValue(workerJobMetrics({ scheduled: 1 }));
+    const retry = vi.fn().mockResolvedValue(workerJobMetrics({ retried: 1 }));
+    const publish = vi
+      .fn()
+      .mockResolvedValue(workerJobMetrics({ published: 1 }));
+    const processLinkJobs = vi.fn().mockResolvedValue({
+      selected: 0,
+      processed: 0,
+      failed: 0,
+    });
+
+    const result = await runWorkerCycle(now, {
+      expireInvalidOffers: vi
+        .fn()
+        .mockResolvedValue(workerJobMetrics({ expired: 1 })),
+      collectMercadoLivreCandidates: discovery,
+      processAffiliateLinkJobs: processLinkJobs,
+      refreshMercadoLivreOffers: refresh,
+      scheduleReadyOffers: schedule,
+      retryFailedPublications: retry,
+      publishScheduledOffers: publish,
+    } as never);
+
+    expect(discovery).toHaveBeenCalledWith(now);
+    expect(processLinkJobs).toHaveBeenCalledWith({ limit: 10 });
+    expect(refresh).toHaveBeenCalledWith(now);
+    expect(schedule).toHaveBeenCalledWith(now);
+    expect(retry).toHaveBeenCalledWith(now);
+    expect(publish).toHaveBeenCalledWith(now);
+    expect(result).toMatchObject({
+      expired: 1,
+      scheduled: 1,
+      retried: 1,
+      published: 1,
+      stages: {
+        discovery: {
+          status: "FAILED",
+          errorCode: "MELI_API_UNAVAILABLE",
+        },
+        refresh: { status: "SUCCEEDED" },
+        schedule: { status: "SUCCEEDED" },
+        publish: { status: "SUCCEEDED" },
+      },
+    });
+    expect(automationRunUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "worker-run-1" },
+        data: expect.objectContaining({
+          status: "PARTIAL",
+          finishedAt: expect.any(Date),
+          errorMessage: expect.stringContaining("MELI_API_UNAVAILABLE"),
+        }),
+      }),
+    );
+    expect(systemAlertCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          source: "worker.discovery",
+          severity: "ERROR",
+          metadata: expect.objectContaining({
+            runId: "worker-run-1",
+            errorCode: "MELI_API_UNAVAILABLE",
+          }),
+        }),
+      }),
+    );
+  });
+
+  it("finishes a fully successful cycle as SUCCEEDED without an error message", async () => {
+    const actual = await import("@affiliate/database");
+    const automationRunUpdate = vi.fn().mockResolvedValue({});
+    const systemAlertCreate = vi.fn().mockResolvedValue({});
+    Object.assign(actual.prisma, {
+      automationRun: {
+        create: vi.fn().mockResolvedValue({ id: "worker-run-success" }),
+        update: automationRunUpdate,
+      },
+      systemAlert: { create: systemAlertCreate },
+    });
+    const now = new Date("2026-07-28T20:30:00.000Z");
+
+    const result = await runWorkerCycle(now, {
+      expireInvalidOffers: vi.fn().mockResolvedValue(workerJobMetrics()),
+      collectMercadoLivreCandidates: vi.fn().mockResolvedValue({
+        ok: true,
+        status: "SUCCEEDED",
+        importJobId: "import-success",
+        metrics: createMercadoLivreDiscoveryMetrics(),
+      }),
+      processAffiliateLinkJobs: vi.fn().mockResolvedValue({
+        selected: 0,
+        processed: 0,
+        failed: 0,
+      }),
+      refreshMercadoLivreOffers: vi.fn().mockResolvedValue({
+        ...workerJobMetrics(),
+        selected: 0,
+        refreshed: 0,
+        unchanged: 0,
+        newVersions: 0,
+        notFound: 0,
+        affiliateUrlsPreserved: 0,
+        itemsFetched: 0,
+        priceApiFetched: 0,
+        priceFallbackUsed: 0,
+        priceUnavailable: 0,
+        failures: [],
+      }),
+      scheduleReadyOffers: vi
+        .fn()
+        .mockResolvedValue(workerJobMetrics({ scheduled: 1 })),
+      retryFailedPublications: vi.fn().mockResolvedValue(workerJobMetrics()),
+      publishScheduledOffers: vi
+        .fn()
+        .mockResolvedValue(workerJobMetrics({ published: 1 })),
+    } as never);
+
+    expect(result).toMatchObject({
+      scheduled: 1,
+      published: 1,
+      stages: {
+        expire: { status: "SUCCEEDED" },
+        discovery: { status: "SUCCEEDED" },
+        "affiliate-links": { status: "SUCCEEDED" },
+        refresh: { status: "SUCCEEDED" },
+        schedule: { status: "SUCCEEDED" },
+        retry: { status: "SUCCEEDED" },
+        publish: { status: "SUCCEEDED" },
+      },
+    });
+    expect(automationRunUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "worker-run-success" },
+        data: expect.objectContaining({
+          status: "SUCCEEDED",
+          finishedAt: expect.any(Date),
+          errorMessage: null,
+        }),
+      }),
+    );
+    expect(systemAlertCreate).not.toHaveBeenCalled();
+  });
+
+  it("sanitizes a thrown stage error and still executes later independent stages", async () => {
+    const actual = await import("@affiliate/database");
+    const secret = "session-secret-value";
+    const automationRunUpdate = vi.fn().mockResolvedValue({});
+    const systemAlertCreate = vi.fn().mockResolvedValue({});
+    Object.assign(actual.prisma, {
+      automationRun: {
+        create: vi.fn().mockResolvedValue({ id: "worker-run-2" }),
+        update: automationRunUpdate,
+      },
+      systemAlert: { create: systemAlertCreate },
+    });
+    const publish = vi.fn().mockResolvedValue(workerJobMetrics());
+
+    await runWorkerCycle(new Date("2026-07-28T21:00:00.000Z"), {
+      expireInvalidOffers: vi.fn().mockResolvedValue(workerJobMetrics()),
+      collectMercadoLivreCandidates: vi
+        .fn()
+        .mockRejectedValue(new Error(`Cookie: sid=${secret}`)),
+      processAffiliateLinkJobs: vi.fn().mockResolvedValue({
+        selected: 0,
+        processed: 0,
+        failed: 0,
+      }),
+      refreshMercadoLivreOffers: vi.fn().mockResolvedValue({
+        ...workerJobMetrics(),
+        selected: 0,
+        refreshed: 0,
+      }),
+      scheduleReadyOffers: vi.fn().mockResolvedValue(workerJobMetrics()),
+      retryFailedPublications: vi.fn().mockResolvedValue(workerJobMetrics()),
+      publishScheduledOffers: publish,
+    } as never);
+
+    expect(publish).toHaveBeenCalled();
+    expect(
+      JSON.stringify([
+        automationRunUpdate.mock.calls,
+        systemAlertCreate.mock.calls,
+      ]),
+    ).not.toContain(secret);
   });
 });

@@ -31,6 +31,8 @@ A tela `/ofertas/affiliate-links` oferece:
 O preview separa válidos, não encontrados, duplicados, links inválidos e links
 já aplicados. A confirmação cria um `ImportJob` de fonte
 `AFFILIATE_LINK_BATCH` e um `ImportJobItem` por linha. Falhas são isoladas.
+Lotes acima de `AFFILIATE_LINK_JOB_INLINE_LIMIT` ficam em `QUEUED` e são
+processados pelo estágio independente de jobs do worker.
 
 Quando o produto já existe, o caso de uso reutiliza seus fatos e chama
 `ingestOffer`, criando uma nova versão apenas quando o fingerprint comercial
@@ -38,3 +40,15 @@ muda. Quando o lote contém uma URL de produto ainda desconhecida, o ID MLB é
 extraído da URL, o item é resolvido pela API oficial com OAuth e só então é
 ingerido. A restrição única `marketplace + externalProductId` impede produtos
 duplicados.
+
+## Limites
+
+```env
+MERCADOLIVRE_DISCOVERY_MAX_CONCURRENCY="4"
+AFFILIATE_LINK_BATCH_MAX_ROWS="1000"
+AFFILIATE_LINK_JOB_INLINE_LIMIT="50"
+```
+
+O worker executa discovery, refresh, jobs de links, scheduler, retry e
+publicação em blocos independentes. Se discovery falhar, as ofertas já prontas
+continuam sendo agendadas e publicadas, e o ciclo termina como `PARTIAL`.

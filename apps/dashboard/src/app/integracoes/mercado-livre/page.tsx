@@ -391,6 +391,8 @@ export default async function MercadoLivreIntegrationPage({
         totalIneligible: true,
         totalCreated: true,
         totalUpdated: true,
+        totalInvalidLinks: true,
+        totalNotFound: true,
         totalFailed: true,
         startedAt: true,
         finishedAt: true,
@@ -423,6 +425,10 @@ export default async function MercadoLivreIntegrationPage({
     (affiliateSession.status !== "NOT_CONFIGURED" ||
       affiliateSession.lastCookieUpdateAt),
   );
+  const selectedAffiliateTag = affiliateSession?.affiliateTag ?? "";
+  const affiliateLastValidatedAt = affiliateSession?.lastValidatedAt ?? null;
+  const affiliateLastCookieUpdateAt =
+    affiliateSession?.lastCookieUpdateAt ?? null;
   const categoryIds = jsonStringArray(config?.categoryIds);
   const metrics = lastRunMetrics(config?.lastRunSummary);
   const metricGroups = lastRunObjectMetrics(config?.lastRunSummary);
@@ -436,6 +442,8 @@ export default async function MercadoLivreIntegrationPage({
         ["Não elegíveis", latestImportJob.totalIneligible],
         ["Criados", latestImportJob.totalCreated],
         ["Atualizados", latestImportJob.totalUpdated],
+        ["Links inválidos", latestImportJob.totalInvalidLinks],
+        ["Não encontrados", latestImportJob.totalNotFound],
         ["Falhas", latestImportJob.totalFailed],
       ]
     : [];
@@ -472,6 +480,7 @@ export default async function MercadoLivreIntegrationPage({
     single(params?.message) === "category-tested" ? params : null;
   const categorySearchResult =
     single(params?.message) === "category-search-tested" ? params : null;
+  const showLegacyAffiliateSession: boolean = false;
 
   return (
     <AdminShell currentPath="/integracoes" title="Mercado Livre">
@@ -505,6 +514,7 @@ export default async function MercadoLivreIntegrationPage({
         </div>
       ) : null}
 
+      {showLegacyAffiliateSession ? (
       <Card>
         <CardHeader>
           <CardTitle>Sessão de afiliado Mercado Livre</CardTitle>
@@ -548,16 +558,16 @@ export default async function MercadoLivreIntegrationPage({
             <SessionResult
               label="Última validação"
               value={
-                affiliateSession?.lastValidatedAt
-                  ? formatDateTime(affiliateSession.lastValidatedAt)
+                affiliateLastValidatedAt
+                  ? formatDateTime(affiliateLastValidatedAt)
                   : "-"
               }
             />
             <SessionResult
               label="Última atualização do cookie"
               value={
-                affiliateSession?.lastCookieUpdateAt
-                  ? formatDateTime(affiliateSession.lastCookieUpdateAt)
+                affiliateLastCookieUpdateAt
+                  ? formatDateTime(affiliateLastCookieUpdateAt)
                   : "-"
               }
             />
@@ -600,15 +610,15 @@ export default async function MercadoLivreIntegrationPage({
               <Field label="Tag de afiliado">
                 <Select
                   name="affiliateTag"
-                  defaultValue={affiliateSession?.affiliateTag ?? ""}
+                  defaultValue={selectedAffiliateTag}
                 >
                   <option value="">Selecionar automaticamente</option>
-                  {affiliateSession?.affiliateTag &&
+                  {selectedAffiliateTag &&
                   !affiliateTags.some(
-                    (tag) => tag.value === affiliateSession.affiliateTag,
+                    (tag) => tag.value === selectedAffiliateTag,
                   ) ? (
-                    <option value={affiliateSession.affiliateTag}>
-                      {affiliateSession.affiliateTag}
+                    <option value={selectedAffiliateTag}>
+                      {selectedAffiliateTag}
                     </option>
                   ) : null}
                   {affiliateTags.map((tag) => (
@@ -691,6 +701,25 @@ export default async function MercadoLivreIntegrationPage({
           </div>
         </CardContent>
       </Card>
+      ) : (
+        <Card>
+          <CardHeader>
+            <CardTitle>Links de afiliado</CardTitle>
+          </CardHeader>
+          <CardContent className="grid gap-3 text-sm">
+            <p>
+              Gere os links no Portal oficial do Mercado Livre. O fluxo de
+              descoberta termina em READY_FOR_AFFILIATE_LINK e não usa a URL
+              original como fallback.
+            </p>
+            <Button asChild className="w-fit">
+              <Link href="/ofertas/affiliate-links">
+                Abrir ofertas pendentes de link
+              </Link>
+            </Button>
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardHeader>
@@ -702,18 +731,18 @@ export default async function MercadoLivreIntegrationPage({
               ["1", "Conectar OAuth", "Categorias, ranking e produtos."],
               [
                 "2",
-                "Configurar sessão de afiliado",
-                "Cookie e tag para gerar meli.la.",
+                "Selecionar categoria",
+                "Escolha uma categoria folha.",
               ],
               [
                 "3",
-                "Selecionar categoria",
-                "Escolha uma categoria folha abaixo.",
+                "Importar mais vendidos",
+                "Highlights oficiais resolvem ITEM, PRODUCT e USER_PRODUCT.",
               ],
               [
                 "4",
-                "Buscar e importar mais vendidos",
-                "O resultado usa somente métricas persistidas.",
+                "Importar links",
+                "Cole meli.la na tela de ofertas pendentes.",
               ],
             ].map(([step, title, description]) => (
               <li
