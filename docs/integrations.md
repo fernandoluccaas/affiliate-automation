@@ -37,6 +37,20 @@ Discovery is configured in `/integracoes/mercado-livre`. Dashboard and worker us
 
 A `PRODUCT` with `buy_box_winner: null` is not automatically an error. If it has children, the resolver attempts child resolution first. When no direct or child winner is usable, it calls the official `GET /products/{PRODUCT_ID}/items`, eliminates entries from another site, used or inactive listings, entries without a marketplace channel and entries without a positive price, and then loads the normal item details and prices. Selection is deterministic: stock, free shipping, official store, seller reputation, lowest final price, available quantity and stable item ID. Success is recorded as `PRODUCT_ITEMS_FALLBACK`; empty, unusable and API-error responses have separate skip reasons. The system never fabricates an item ID. After resolution, the worker deduplicates by final `resolvedItemId`, fetches item details and official prices, normalizes only available facts and passes candidates into `ingestOffer`.
 
+`/products/{PRODUCT_ID}/items` is parsed as a sparse catalog summary, not as a
+complete Item. Before hydration, only a valid MLB item ID and explicitly
+invalid summary facts are considered; omitted status, condition, price,
+quantity and channels remain neutral. The deduplicated IDs are then hydrated
+with bounded `/items?ids=...` calls. Both HTTP/row status 200 and 206 are
+usable, and a failed row does not cancel its siblings. Full commercial filters
+run only after hydration, with Price API, Item price and summary price used in
+that order.
+
+Product diagnostics distinguish an empty result, schema mismatch, hydration
+failure and hydrated-but-unusable items. They store counts, rejection reasons
+and at most three sanitized field-presence samples; raw responses, OAuth
+headers and affiliate-session secrets are never stored.
+
 `bestSellersEnabled=true` enables the highlights source. When it is false, discovery returns `DISCOVERY_SOURCE_DISABLED` and does not call highlights. No automatic category-search fallback exists yet.
 
 The manual category-search probe is available only for a validated leaf category and remains `EXPERIMENTAL`. It reports the logical endpoint and parameters, authentication mode, HTTP status, total results, usable item IDs and up to five ID/title samples. Non-2xx responses preserve only the sanitized Mercado Livre fields `error`, `code`, `message`, `cause` and `blocked_by`. Authorization headers, access tokens, refresh tokens and client secrets are never included in the result or logs.

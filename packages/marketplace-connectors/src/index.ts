@@ -66,7 +66,9 @@ export interface MarketplaceConnector {
   getCategoryChildren(categoryId: string): Promise<MercadoLivreCategoryChild[]>;
   getBestSellers(categoryId: string): Promise<MercadoLivreHighlightCandidate[]>;
   getProduct(productId: string): Promise<MercadoLivreProduct | null>;
-  getProductItems(productId: string): Promise<MercadoLivreProductItem[]>;
+  getProductItems(
+    productId: string,
+  ): Promise<MercadoLivreProductItemsResolution>;
   getUserProduct(
     userProductId: string,
   ): Promise<MercadoLivreUserProduct | null>;
@@ -243,17 +245,75 @@ export type MercadoLivreUserProduct = {
   userId: string | null;
 };
 
-export type MercadoLivreProductItem = {
+export type MercadoLivreCatalogProductItemSummary = {
   itemId: string;
-  siteId: string | null;
-  condition: string | null;
-  status: string | null;
-  price: number | null;
-  availableQuantity: number | null;
-  freeShipping: boolean | null;
-  officialStoreId: string | null;
-  sellerReputation: number | null;
-  channels: string[];
+  siteId?: string;
+  sellerId?: string;
+  price?: number;
+  condition?: string;
+  listingTypeId?: string;
+  availableQuantity?: number;
+  freeShipping?: boolean;
+  officialStoreId?: string;
+  sellerReputation?: number;
+  summaryFieldsPresent: string[];
+};
+
+export type MercadoLivreProductItem = MercadoLivreCatalogProductItemSummary;
+
+export type MercadoLivreItemCondition =
+  "new" | "used" | "refurbished" | "unknown";
+
+export type MercadoLivreProductItemRejectionReason =
+  | "PRODUCT_ITEM_INVALID_ID"
+  | "PRODUCT_ITEM_WRONG_SITE"
+  | "PRODUCT_ITEM_SUMMARY_INVALID_PRICE"
+  | "PRODUCT_ITEM_DETAIL_NOT_FOUND"
+  | "PRODUCT_ITEM_DETAIL_HTTP_ERROR"
+  | "PRODUCT_ITEM_INACTIVE"
+  | "PRODUCT_ITEM_USED"
+  | "PRODUCT_ITEM_REFURBISHED"
+  | "PRODUCT_ITEM_NO_STOCK"
+  | "PRODUCT_ITEM_NOT_MARKETPLACE"
+  | "PRODUCT_ITEM_NO_PERMALINK"
+  | "PRODUCT_ITEM_NO_PRICE"
+  | "PRODUCT_ITEM_SCHEMA_MISMATCH";
+
+export type MercadoLivreProductItemDiagnosticSample = {
+  itemId: string | null;
+  summaryFieldsPresent: string[];
+  hydrationHttpStatus: number | null;
+  hydratedStatus: string | null;
+  hydratedCondition: MercadoLivreItemCondition;
+  hydratedAvailableQuantity: number | null;
+  hydratedChannels: string[];
+  hasPermalink: boolean;
+  hasPrice: boolean;
+  rejectedReason: MercadoLivreProductItemRejectionReason | null;
+};
+
+export type MercadoLivreProductItemsDiagnostics = {
+  productItemsHttpStatus: number;
+  productItemsTotal: number;
+  productItemsResultsCount: number;
+  productItemsParsedCount: number;
+  productItemsUniqueIds: number;
+  productItemsHydrationRequested: number;
+  productItemsHydrated: number;
+  productItemsUsable: number;
+  priceApiFetched: number;
+  priceFallbackUsed: number;
+  priceUnavailable: number;
+  rejectionReasons: Partial<
+    Record<MercadoLivreProductItemRejectionReason, number>
+  >;
+  samples: MercadoLivreProductItemDiagnosticSample[];
+};
+
+export type MercadoLivreProductItemsResolution = {
+  summaries: MercadoLivreCatalogProductItemSummary[];
+  candidates: MarketplaceOfferCandidate[];
+  diagnostics: MercadoLivreProductItemsDiagnostics;
 };
 
 export type MercadoLivreHighlightSkipReason =
@@ -266,6 +326,8 @@ export type MercadoLivreHighlightSkipReason =
   | "PRODUCT_TREE_DEPTH_LIMIT"
   | "PRODUCT_TREE_SIZE_LIMIT"
   | "PRODUCT_ITEMS_EMPTY"
+  | "PRODUCT_ITEMS_SCHEMA_MISMATCH"
+  | "PRODUCT_ITEMS_HYDRATION_FAILED"
   | "PRODUCT_ITEMS_NO_USABLE_ITEM"
   | "PRODUCT_ITEMS_API_ERROR"
   | "USER_PRODUCT_NOT_FOUND"
@@ -291,6 +353,20 @@ export type MercadoLivreProductResolutionDiagnostics = {
   productItemsFetched: number;
   productItemsUsable: number;
   productItemsSkipped: number;
+  productItemsHttpStatus?: number;
+  productItemsTotal?: number;
+  productItemsResultsCount?: number;
+  productItemsParsedCount?: number;
+  productItemsUniqueIds?: number;
+  productItemsHydrationRequested?: number;
+  productItemsHydrated?: number;
+  productItemsPriceApiFetched?: number;
+  productItemsPriceFallbackUsed?: number;
+  productItemsPriceUnavailable?: number;
+  productItemRejectionReasons?: Partial<
+    Record<MercadoLivreProductItemRejectionReason, number>
+  >;
+  productItemSamples?: MercadoLivreProductItemDiagnosticSample[];
   productLeafWithoutWinner: number;
   productParentWithoutResolvableChild: number;
 };
@@ -744,6 +820,15 @@ export class MercadoLivreApiClient {
     init: RequestInit = {},
     requestOptions: { authentication?: "BEARER_TOKEN" | "PUBLIC" } = {},
   ) {
+    const result = await this.requestWithStatus(path, init, requestOptions);
+    return result.body;
+  }
+
+  async requestWithStatus(
+    path: string,
+    init: RequestInit = {},
+    requestOptions: { authentication?: "BEARER_TOKEN" | "PUBLIC" } = {},
+  ): Promise<{ body: unknown; httpStatus: number }> {
     const url = `${this.options.baseUrl ?? MERCADO_LIVRE_API_BASE_URL}${path}`;
     const retries = this.options.retries ?? 2;
     let lastError: unknown;
@@ -768,7 +853,10 @@ export class MercadoLivreApiClient {
 
         if (response.ok) {
           try {
-            return await response.json();
+            return {
+              body: await response.json(),
+              httpStatus: response.status,
+            };
           } catch {
             throw new MercadoLivreInvalidResponseError();
           }
@@ -1198,7 +1286,9 @@ export class MercadoLivreAffiliateEligibilityService {
 }
 
 function normalizeStock(item: Record<string, unknown>): StockStatus {
-  if (item.status !== "active") {
+  const status = asString(item.status);
+
+  if (status && status !== "active") {
     return "OUT_OF_STOCK";
   }
 
@@ -1223,6 +1313,138 @@ function normalizeShipping(item: Record<string, unknown>): ShippingStatus {
 
 function normalizeItemUrl(item: Record<string, unknown>) {
   return asString(item.permalink) ?? "";
+}
+
+function isMercadoLivreItemId(value: string | null) {
+  return Boolean(value && /^MLB\d+$/i.test(value));
+}
+
+function normalizedCondition(value: unknown): MercadoLivreItemCondition {
+  const condition = asString(value)?.toLowerCase();
+
+  if (condition === "new") return "new";
+  if (condition === "used") return "used";
+  if (condition === "refurbished") return "refurbished";
+  return "unknown";
+}
+
+export function resolveMercadoLivreItemCondition(
+  item: Record<string, unknown>,
+): MercadoLivreItemCondition {
+  const direct = normalizedCondition(item.item_condition);
+
+  if (direct !== "unknown") {
+    return direct;
+  }
+
+  const legacy = normalizedCondition(item.condition);
+
+  if (legacy !== "unknown") {
+    return legacy;
+  }
+
+  const attribute = asArray(item.attributes)
+    .map(asRecord)
+    .filter(isRecord)
+    .find(
+      (entry) =>
+        asString(entry.id)?.toUpperCase() === "ITEM_CONDITION" ||
+        asString(entry.attribute_group_id)?.toUpperCase() === "ITEM_CONDITION",
+    );
+  const attributeValue = asRecord(attribute?.value_struct);
+
+  return normalizedCondition(
+    attribute?.value_name ??
+      attribute?.value_id ??
+      attribute?.value ??
+      attributeValue?.name,
+  );
+}
+
+function isHttpsUrl(value: string) {
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function summaryFieldsPresent(item: Record<string, unknown>) {
+  const fields = [
+    "item_id",
+    "id",
+    "site_id",
+    "seller_id",
+    "price",
+    "condition",
+    "item_condition",
+    "listing_type_id",
+    "available_quantity",
+    "official_store_id",
+    "shipping",
+  ];
+  return fields.filter((field) => item[field] !== undefined);
+}
+
+export function parseMercadoLivreCatalogProductItemSummary(
+  value: unknown,
+): MercadoLivreCatalogProductItemSummary | null {
+  const item = asRecord(value);
+
+  if (!item) {
+    return null;
+  }
+
+  const preferredId = asStringId(item.item_id);
+  const fallbackId = asStringId(item.id);
+  const itemId = isMercadoLivreItemId(preferredId)
+    ? preferredId
+    : isMercadoLivreItemId(fallbackId)
+      ? fallbackId
+      : null;
+
+  if (!itemId) {
+    return null;
+  }
+
+  const shipping = asRecord(item.shipping);
+  const seller = asRecord(item.seller);
+  const reputation = asRecord(
+    item.seller_reputation ?? seller?.seller_reputation,
+  );
+  const transactions = asRecord(reputation?.transactions);
+  const completed = asNumber(transactions?.completed);
+  const total = asNumber(transactions?.total);
+  const sellerReputation =
+    completed !== null && total !== null && total > 0
+      ? completed / total
+      : asNumber(item.seller_reputation_score ?? seller?.reputation);
+  const result: MercadoLivreCatalogProductItemSummary = {
+    itemId,
+    summaryFieldsPresent: summaryFieldsPresent(item),
+  };
+  const siteId = asString(item.site_id);
+  const sellerId = asStringId(item.seller_id);
+  const price = asNumber(item.price);
+  const condition = asString(item.item_condition ?? item.condition);
+  const listingTypeId = asString(item.listing_type_id);
+  const availableQuantity = asNumber(item.available_quantity);
+  const officialStoreId = asStringId(item.official_store_id);
+
+  if (siteId) result.siteId = siteId;
+  if (sellerId) result.sellerId = sellerId;
+  if (price !== null) result.price = price;
+  if (condition) result.condition = condition;
+  if (listingTypeId) result.listingTypeId = listingTypeId;
+  if (availableQuantity !== null) {
+    result.availableQuantity = availableQuantity;
+  }
+  if (typeof shipping?.free_shipping === "boolean") {
+    result.freeShipping = shipping.free_shipping;
+  }
+  if (officialStoreId) result.officialStoreId = officialStoreId;
+  if (sellerReputation !== null) result.sellerReputation = sellerReputation;
+  return result;
 }
 
 export class MercadoLivreConnector implements MarketplaceConnector {
@@ -1413,54 +1635,357 @@ export class MercadoLivreConnector implements MarketplaceConnector {
   }
 
   async getProductItems(productId: string) {
-    const body = asRecord(
-      await this.options.client.request(
-        `/products/${encodeURIComponent(productId)}/items?limit=100&offset=0`,
-      ),
+    const productItemsResponse = await this.options.client.requestWithStatus(
+      `/products/${encodeURIComponent(productId)}/items?limit=100&offset=0`,
     );
+    const body = asRecord(productItemsResponse.body);
+    const results = asArray(body?.results);
+    const paging = asRecord(body?.paging);
+    const diagnostics: MercadoLivreProductItemsDiagnostics = {
+      productItemsHttpStatus: productItemsResponse.httpStatus,
+      productItemsTotal: asNumber(paging?.total) ?? results.length,
+      productItemsResultsCount: results.length,
+      productItemsParsedCount: 0,
+      productItemsUniqueIds: 0,
+      productItemsHydrationRequested: 0,
+      productItemsHydrated: 0,
+      productItemsUsable: 0,
+      priceApiFetched: 0,
+      priceFallbackUsed: 0,
+      priceUnavailable: 0,
+      rejectionReasons: {},
+      samples: [],
+    };
+    const reject = (
+      reason: MercadoLivreProductItemRejectionReason,
+      input: {
+        itemId?: string | null;
+        summaryFieldsPresent?: string[];
+        hydrationHttpStatus?: number | null;
+        hydratedStatus?: string | null;
+        hydratedCondition?: MercadoLivreItemCondition;
+        hydratedAvailableQuantity?: number | null;
+        hydratedChannels?: string[];
+        hasPermalink?: boolean;
+        hasPrice?: boolean;
+      } = {},
+    ) => {
+      diagnostics.rejectionReasons[reason] =
+        (diagnostics.rejectionReasons[reason] ?? 0) + 1;
 
-    return asArray(body?.results)
-      .map(asRecord)
-      .filter(isRecord)
-      .map((item): MercadoLivreProductItem | null => {
-        const itemId = asStringId(item.item_id ?? item.id);
+      if (diagnostics.samples.length < 3) {
+        diagnostics.samples.push({
+          itemId: input.itemId ?? null,
+          summaryFieldsPresent: input.summaryFieldsPresent ?? [],
+          hydrationHttpStatus: input.hydrationHttpStatus ?? null,
+          hydratedStatus: input.hydratedStatus ?? null,
+          hydratedCondition: input.hydratedCondition ?? "unknown",
+          hydratedAvailableQuantity: input.hydratedAvailableQuantity ?? null,
+          hydratedChannels: input.hydratedChannels ?? [],
+          hasPermalink: input.hasPermalink ?? false,
+          hasPrice: input.hasPrice ?? false,
+          rejectedReason: reason,
+        });
+      }
+    };
+    const parsedSummaries: MercadoLivreCatalogProductItemSummary[] = [];
 
-        if (!itemId) {
-          return null;
+    for (const result of results) {
+      const summary = parseMercadoLivreCatalogProductItemSummary(result);
+
+      if (!summary) {
+        reject("PRODUCT_ITEM_INVALID_ID", {
+          summaryFieldsPresent: summaryFieldsPresent(asRecord(result) ?? {}),
+        });
+        continue;
+      }
+
+      diagnostics.productItemsParsedCount += 1;
+
+      if (summary.siteId && summary.siteId.toUpperCase() !== "MLB") {
+        reject("PRODUCT_ITEM_WRONG_SITE", {
+          itemId: summary.itemId,
+          summaryFieldsPresent: summary.summaryFieldsPresent,
+        });
+        continue;
+      }
+
+      if (summary.price !== undefined && summary.price <= 0) {
+        reject("PRODUCT_ITEM_SUMMARY_INVALID_PRICE", {
+          itemId: summary.itemId,
+          summaryFieldsPresent: summary.summaryFieldsPresent,
+        });
+        continue;
+      }
+
+      const summaryCondition = normalizedCondition(summary.condition);
+
+      if (summaryCondition === "used") {
+        reject("PRODUCT_ITEM_USED", {
+          itemId: summary.itemId,
+          summaryFieldsPresent: summary.summaryFieldsPresent,
+          hydratedCondition: summaryCondition,
+        });
+        continue;
+      }
+
+      if (summaryCondition === "refurbished") {
+        reject("PRODUCT_ITEM_REFURBISHED", {
+          itemId: summary.itemId,
+          summaryFieldsPresent: summary.summaryFieldsPresent,
+          hydratedCondition: summaryCondition,
+        });
+        continue;
+      }
+
+      parsedSummaries.push(summary);
+    }
+
+    const summaries = [
+      ...new Map(
+        parsedSummaries.map((summary) => [summary.itemId, summary]),
+      ).values(),
+    ].slice(0, 100);
+    diagnostics.productItemsUniqueIds = summaries.length;
+    diagnostics.productItemsHydrationRequested = summaries.length;
+    const candidates: MarketplaceOfferCandidate[] = [];
+
+    for (let offset = 0; offset < summaries.length; offset += 20) {
+      const chunk = summaries.slice(offset, offset + 20);
+      let hydrationResponse: { body: unknown; httpStatus: number };
+
+      try {
+        hydrationResponse = await this.options.client.requestWithStatus(
+          `/items?ids=${chunk
+            .map((summary) => encodeURIComponent(summary.itemId))
+            .join(",")}`,
+        );
+      } catch (error) {
+        const httpStatus =
+          error instanceof MercadoLivreApiError ? error.status : null;
+
+        for (const summary of chunk) {
+          reject("PRODUCT_ITEM_DETAIL_HTTP_ERROR", {
+            itemId: summary.itemId,
+            summaryFieldsPresent: summary.summaryFieldsPresent,
+            hydrationHttpStatus: httpStatus,
+          });
+        }
+        continue;
+      }
+
+      const rows = Array.isArray(hydrationResponse.body)
+        ? hydrationResponse.body
+        : [];
+      const rowsById = new Map<string, { row: unknown; index: number }>();
+
+      rows.forEach((row, index) => {
+        const record = asRecord(row);
+        const detail = asRecord(record?.body ?? row);
+        const itemId = asStringId(detail?.id);
+
+        if (itemId) {
+          rowsById.set(itemId, { row, index });
+        }
+      });
+
+      for (const [index, summary] of chunk.entries()) {
+        const matched = rowsById.get(summary.itemId);
+        const row = matched?.row ?? rows[index];
+        const record = asRecord(row);
+        const detail = asRecord(record?.body ?? row);
+        const rowStatus =
+          asNumber(record?.code) ?? hydrationResponse.httpStatus;
+        const baseSample = {
+          itemId: summary.itemId,
+          summaryFieldsPresent: summary.summaryFieldsPresent,
+          hydrationHttpStatus: rowStatus,
+        };
+
+        if (!row) {
+          reject("PRODUCT_ITEM_DETAIL_NOT_FOUND", baseSample);
+          continue;
         }
 
-        const shipping = asRecord(item.shipping);
-        const seller = asRecord(item.seller);
-        const reputation = asRecord(
-          item.seller_reputation ?? seller?.seller_reputation,
-        );
-        const transactions = asRecord(reputation?.transactions);
-        const completed = asNumber(transactions?.completed);
-        const total = asNumber(transactions?.total);
-        const sellerReputation =
-          completed !== null && total !== null && total > 0
-            ? completed / total
-            : asNumber(item.seller_reputation_score ?? seller?.reputation);
+        if (![200, 206].includes(rowStatus)) {
+          reject("PRODUCT_ITEM_DETAIL_HTTP_ERROR", baseSample);
+          continue;
+        }
 
-        return {
-          itemId,
-          siteId: asString(item.site_id),
-          condition: asString(item.condition),
-          status: asString(item.status),
-          price: asNumber(item.price),
-          availableQuantity: asNumber(item.available_quantity),
-          freeShipping:
-            typeof shipping?.free_shipping === "boolean"
-              ? shipping.free_shipping
-              : null,
-          officialStoreId: asStringId(item.official_store_id),
-          sellerReputation,
-          channels: asArray(item.channels)
-            .map(asString)
-            .filter((channel): channel is string => Boolean(channel)),
+        if (!detail) {
+          reject("PRODUCT_ITEM_SCHEMA_MISMATCH", baseSample);
+          continue;
+        }
+
+        const detailId = asStringId(detail.id) ?? summary.itemId;
+
+        if (!isMercadoLivreItemId(detailId)) {
+          reject("PRODUCT_ITEM_INVALID_ID", baseSample);
+          continue;
+        }
+
+        diagnostics.productItemsHydrated += 1;
+        const siteId = asString(detail.site_id) ?? summary.siteId ?? null;
+        const status = asString(detail.status);
+        const conditionFromDetail = resolveMercadoLivreItemCondition(detail);
+        const condition =
+          conditionFromDetail === "unknown"
+            ? normalizedCondition(summary.condition)
+            : conditionFromDetail;
+        const availableQuantity =
+          asNumber(detail.available_quantity) ??
+          summary.availableQuantity ??
+          null;
+        const channelsPresent = Array.isArray(detail.channels);
+        const channels = asArray(detail.channels)
+          .map(asString)
+          .filter((channel): channel is string => Boolean(channel));
+        const productUrl = normalizeItemUrl(detail);
+        const commonSample = {
+          ...baseSample,
+          hydratedStatus: status,
+          hydratedCondition: condition,
+          hydratedAvailableQuantity: availableQuantity,
+          hydratedChannels: channels,
+          hasPermalink: Boolean(productUrl && isHttpsUrl(productUrl)),
         };
-      })
-      .filter((item): item is MercadoLivreProductItem => item !== null);
+
+        if (siteId && siteId.toUpperCase() !== "MLB") {
+          reject("PRODUCT_ITEM_WRONG_SITE", commonSample);
+          continue;
+        }
+
+        if (status && status !== "active") {
+          reject("PRODUCT_ITEM_INACTIVE", commonSample);
+          continue;
+        }
+
+        if (condition === "used") {
+          reject("PRODUCT_ITEM_USED", commonSample);
+          continue;
+        }
+
+        if (condition === "refurbished") {
+          reject("PRODUCT_ITEM_REFURBISHED", commonSample);
+          continue;
+        }
+
+        if (availableQuantity === 0) {
+          reject("PRODUCT_ITEM_NO_STOCK", commonSample);
+          continue;
+        }
+
+        if (
+          channelsPresent &&
+          !channels.some((channel) => channel.toLowerCase() === "marketplace")
+        ) {
+          reject("PRODUCT_ITEM_NOT_MARKETPLACE", commonSample);
+          continue;
+        }
+
+        if (!productUrl || !isHttpsUrl(productUrl)) {
+          reject("PRODUCT_ITEM_NO_PERMALINK", commonSample);
+          continue;
+        }
+
+        const title = asString(detail.title);
+
+        if (!title) {
+          reject("PRODUCT_ITEM_SCHEMA_MISMATCH", commonSample);
+          continue;
+        }
+
+        let price: MercadoLivrePrice;
+        let priceSource: MercadoLivrePriceSource;
+
+        try {
+          const apiPrice = await this.priceService.getPrice(detailId);
+
+          if (apiPrice.currentPrice === null || apiPrice.currentPrice <= 0) {
+            throw new Error("Price API returned no usable price.");
+          }
+
+          price = apiPrice;
+          priceSource = "PRICE_API";
+          diagnostics.priceApiFetched += 1;
+        } catch {
+          const fallbackPrice = asNumber(detail.price) ?? summary.price ?? null;
+
+          if (fallbackPrice === null || fallbackPrice <= 0) {
+            diagnostics.priceUnavailable += 1;
+            reject("PRODUCT_ITEM_NO_PRICE", {
+              ...commonSample,
+              hasPrice: false,
+            });
+            continue;
+          }
+
+          price = { currentPrice: fallbackPrice, originalPrice: null };
+          priceSource = "ITEM_FALLBACK";
+          diagnostics.priceFallbackUsed += 1;
+        }
+
+        const shippingStatus = normalizeShipping(detail);
+        const freeShipping =
+          shippingStatus === "UNKNOWN"
+            ? (summary.freeShipping ?? null)
+            : shippingStatus === "FREE";
+        const stockItem = {
+          ...detail,
+          ...(availableQuantity !== null
+            ? { available_quantity: availableQuantity }
+            : {}),
+        };
+        candidates.push({
+          marketplace: "MERCADO_LIVRE",
+          externalProductId: detailId,
+          title,
+          description: null,
+          category: asString(detail.category_id),
+          imageUrl: asString(detail.thumbnail),
+          productUrl,
+          affiliateUrl: null,
+          currentPrice: price.currentPrice as number,
+          originalPrice: price.originalPrice,
+          stockStatus: normalizeStock(stockItem),
+          shippingStatus,
+          freeShipping,
+          availableQuantity,
+          sellerReputation: summary.sellerReputation ?? null,
+          rating: null,
+          salesCount: asNumber(detail.sold_quantity),
+          sellerId: asStringId(detail.seller_id) ?? summary.sellerId ?? null,
+          officialStoreId:
+            asStringId(detail.official_store_id) ??
+            summary.officialStoreId ??
+            null,
+          affiliateEligibility: this.eligibility.evaluate(detail),
+          trackingStrategy: "DIRECT_AFFILIATE_LINK",
+          itemStatus: status,
+          channels,
+          priceSource,
+          collectedAt: new Date(),
+        });
+        diagnostics.productItemsUsable += 1;
+
+        if (diagnostics.samples.length < 3) {
+          diagnostics.samples.push({
+            itemId: detailId,
+            summaryFieldsPresent: summary.summaryFieldsPresent,
+            hydrationHttpStatus: rowStatus,
+            hydratedStatus: status,
+            hydratedCondition: condition,
+            hydratedAvailableQuantity: availableQuantity,
+            hydratedChannels: channels,
+            hasPermalink: true,
+            hasPrice: true,
+            rejectedReason: null,
+          });
+        }
+      }
+    }
+
+    return { summaries, candidates, diagnostics };
   }
 
   async getUserProduct(userProductId: string) {

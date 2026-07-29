@@ -61,7 +61,25 @@ function connector(overrides: Partial<MarketplaceConnector> = {}) {
     getCategoryChildren: vi.fn().mockResolvedValue([]),
     getBestSellers: vi.fn().mockResolvedValue([]),
     getProduct: vi.fn().mockResolvedValue(null),
-    getProductItems: vi.fn().mockResolvedValue([]),
+    getProductItems: vi.fn().mockResolvedValue({
+      summaries: [],
+      candidates: [],
+      diagnostics: {
+        productItemsHttpStatus: 200,
+        productItemsTotal: 0,
+        productItemsResultsCount: 0,
+        productItemsParsedCount: 0,
+        productItemsUniqueIds: 0,
+        productItemsHydrationRequested: 0,
+        productItemsHydrated: 0,
+        productItemsUsable: 0,
+        priceApiFetched: 0,
+        priceFallbackUsed: 0,
+        priceUnavailable: 0,
+        rejectionReasons: {},
+        samples: [],
+      },
+    }),
     getUserProduct: vi.fn().mockResolvedValue(null),
     getItemsByUserProduct: vi.fn().mockResolvedValue([]),
     probeCategorySearch: vi.fn(),
@@ -169,6 +187,46 @@ function offerCandidate(
     shippingStatus: "UNKNOWN" as const,
     stockStatus: "IN_STOCK" as const,
     ...values,
+  };
+}
+
+function productItemsResolution(
+  summaries: Array<{
+    itemId: string;
+    siteId?: string;
+    condition?: string;
+    price?: number;
+    availableQuantity?: number;
+    freeShipping?: boolean;
+    officialStoreId?: string;
+    sellerReputation?: number;
+    summaryFieldsPresent?: string[];
+  }>,
+  candidates: ReturnType<typeof offerCandidate>[],
+  overrides: Record<string, unknown> = {},
+) {
+  return {
+    summaries: summaries.map((summary) => ({
+      ...summary,
+      summaryFieldsPresent: summary.summaryFieldsPresent ?? ["item_id"],
+    })),
+    candidates,
+    diagnostics: {
+      productItemsHttpStatus: 200,
+      productItemsTotal: summaries.length,
+      productItemsResultsCount: summaries.length,
+      productItemsParsedCount: summaries.length,
+      productItemsUniqueIds: summaries.length,
+      productItemsHydrationRequested: summaries.length,
+      productItemsHydrated: candidates.length,
+      productItemsUsable: candidates.length,
+      priceApiFetched: candidates.length,
+      priceFallbackUsed: 0,
+      priceUnavailable: 0,
+      rejectionReasons: {},
+      samples: [],
+      ...overrides,
+    },
   };
 }
 
@@ -352,21 +410,22 @@ describe("MercadoLivreHighlightResolver", () => {
         .mockResolvedValue(
           catalogProduct({ id: "MLBPRODUCT", childrenIds: [] }),
         ),
-      getProductItems: vi.fn().mockResolvedValue([
-        {
-          itemId: "MLBITEM",
-          siteId: "MLB",
-          condition: "new",
-          status: "active",
-          price: 99,
-          availableQuantity: 4,
-          freeShipping: true,
-          officialStoreId: null,
-          sellerReputation: 0.9,
-          channels: ["marketplace"],
-        },
-      ]),
-      getItems: vi.fn().mockResolvedValue([offerCandidate("MLBITEM")]),
+      getProductItems: vi.fn().mockResolvedValue(
+        productItemsResolution(
+          [
+            {
+              itemId: "MLBITEM",
+              siteId: "MLB",
+              condition: "new",
+              price: 99,
+              availableQuantity: 4,
+              freeShipping: true,
+              sellerReputation: 0.9,
+            },
+          ],
+          [offerCandidate("MLBITEM")],
+        ),
+      ),
     });
 
     await expect(
@@ -393,39 +452,30 @@ describe("MercadoLivreHighlightResolver", () => {
   });
 
   it("selects a PRODUCT fallback item deterministically by business preferences", async () => {
-    const getProductItems = vi.fn().mockResolvedValue([
-      {
-        itemId: "MLBLOW",
-        siteId: "MLB",
-        condition: "new",
-        status: "active",
-        price: 90,
-        availableQuantity: 10,
-        freeShipping: false,
-        officialStoreId: null,
-        sellerReputation: 0.99,
-        channels: ["marketplace"],
-      },
-      {
-        itemId: "MLBOFFICIAL",
-        siteId: "MLB",
-        condition: "new",
-        status: "active",
-        price: 110,
-        availableQuantity: 2,
-        freeShipping: true,
-        officialStoreId: "55",
-        sellerReputation: 0.9,
-        channels: ["marketplace"],
-      },
-    ]);
-    const resolver = new MercadoLivreHighlightResolver(
-      connector({
-        getProduct: vi
-          .fn()
-          .mockResolvedValue(catalogProduct({ id: "MLBPRODUCT" })),
-        getProductItems,
-        getItems: vi.fn().mockResolvedValue([
+    const getProductItems = vi.fn().mockResolvedValue(
+      productItemsResolution(
+        [
+          {
+            itemId: "MLBLOW",
+            siteId: "MLB",
+            condition: "new",
+            price: 90,
+            availableQuantity: 10,
+            freeShipping: false,
+            sellerReputation: 0.99,
+          },
+          {
+            itemId: "MLBOFFICIAL",
+            siteId: "MLB",
+            condition: "new",
+            price: 110,
+            availableQuantity: 2,
+            freeShipping: true,
+            officialStoreId: "55",
+            sellerReputation: 0.9,
+          },
+        ],
+        [
           offerCandidate("MLBLOW", {
             currentPrice: 90,
             freeShipping: false,
@@ -436,7 +486,15 @@ describe("MercadoLivreHighlightResolver", () => {
             freeShipping: true,
             officialStoreId: "55",
           }),
-        ]),
+        ],
+      ),
+    );
+    const resolver = new MercadoLivreHighlightResolver(
+      connector({
+        getProduct: vi
+          .fn()
+          .mockResolvedValue(catalogProduct({ id: "MLBPRODUCT" })),
+        getProductItems,
       }),
     );
 
@@ -454,28 +512,28 @@ describe("MercadoLivreHighlightResolver", () => {
     });
   });
 
-  it("rejects unusable product items before requesting item details", async () => {
-    const getItems = vi.fn();
+  it("reports hydrated product items rejected by proven criteria", async () => {
     const resolver = new MercadoLivreHighlightResolver(
       connector({
         getProduct: vi
           .fn()
           .mockResolvedValue(catalogProduct({ id: "MLBPRODUCT" })),
-        getProductItems: vi.fn().mockResolvedValue([
-          {
-            itemId: "MLBINVALID",
-            siteId: "MLA",
-            condition: "used",
-            status: "inactive",
-            price: 0,
-            availableQuantity: 0,
-            freeShipping: false,
-            officialStoreId: null,
-            sellerReputation: null,
-            channels: ["marketplace"],
-          },
-        ]),
-        getItems,
+        getProductItems: vi.fn().mockResolvedValue(
+          productItemsResolution(
+            [
+              {
+                itemId: "MLBINVALID",
+                siteId: "MLB",
+              },
+            ],
+            [],
+            {
+              productItemsHydrated: 1,
+              productItemsUsable: 0,
+              rejectionReasons: { PRODUCT_ITEM_INACTIVE: 1 },
+            },
+          ),
+        ),
       }),
     );
 
@@ -492,7 +550,6 @@ describe("MercadoLivreHighlightResolver", () => {
       reason: "PRODUCT_ITEMS_NO_USABLE_ITEM",
       diagnostics: { productItemsFetched: 1, productItemsSkipped: 1 },
     });
-    expect(getItems).not.toHaveBeenCalled();
   });
 
   it("isolates product items API failures with a precise reason", async () => {
@@ -516,6 +573,59 @@ describe("MercadoLivreHighlightResolver", () => {
     ).resolves.toMatchObject({
       ok: false,
       reason: "PRODUCT_ITEMS_API_ERROR",
+    });
+  });
+
+  it("distinguishes product item schema mismatch from hydration failure", async () => {
+    const product = catalogProduct({ id: "MLBPRODUCT" });
+    const candidate = {
+      id: "MLBPRODUCT",
+      position: 1,
+      type: "PRODUCT" as const,
+      rawType: "PRODUCT",
+      categoryId: "MLB123",
+    };
+    const schemaResolver = new MercadoLivreHighlightResolver(
+      connector({
+        getProduct: vi.fn().mockResolvedValue(product),
+        getProductItems: vi.fn().mockResolvedValue({
+          ...productItemsResolution([], [], {
+            productItemsTotal: 1,
+            productItemsResultsCount: 1,
+            productItemsParsedCount: 0,
+            rejectionReasons: { PRODUCT_ITEM_INVALID_ID: 1 },
+          }),
+        }),
+      }),
+    );
+
+    await expect(
+      schemaResolver.resolveCandidate(candidate),
+    ).resolves.toMatchObject({
+      ok: false,
+      reason: "PRODUCT_ITEMS_SCHEMA_MISMATCH",
+    });
+
+    const hydrationResolver = new MercadoLivreHighlightResolver(
+      connector({
+        getProduct: vi.fn().mockResolvedValue(product),
+        getProductItems: vi.fn().mockResolvedValue({
+          ...productItemsResolution([{ itemId: "MLB123456" }], [], {
+            productItemsHydrationRequested: 1,
+            productItemsHydrated: 0,
+            rejectionReasons: {
+              PRODUCT_ITEM_DETAIL_HTTP_ERROR: 1,
+            },
+          }),
+        }),
+      }),
+    );
+
+    await expect(
+      hydrationResolver.resolveCandidate(candidate),
+    ).resolves.toMatchObject({
+      ok: false,
+      reason: "PRODUCT_ITEMS_HYDRATION_FAILED",
     });
   });
 });

@@ -1132,6 +1132,9 @@ function recordProductDiagnostics(
   metrics.productItemsFetched += diagnostics.productItemsFetched;
   metrics.productItemsUsable += diagnostics.productItemsUsable;
   metrics.productItemsSkipped += diagnostics.productItemsSkipped;
+  metrics.priceApiFetched += diagnostics.productItemsPriceApiFetched ?? 0;
+  metrics.priceFallbackUsed += diagnostics.productItemsPriceFallbackUsed ?? 0;
+  metrics.priceUnavailable += diagnostics.productItemsPriceUnavailable ?? 0;
   metrics.productLeafWithoutWinner += diagnostics.productLeafWithoutWinner;
   metrics.productParentWithoutResolvableChild +=
     diagnostics.productParentWithoutResolvableChild;
@@ -1303,20 +1306,6 @@ function chooseMarketplaceItem(
   return chosen ?? null;
 }
 
-function isUsableProductItem(item: MercadoLivreProductItem) {
-  const channels = item.channels.map((channel) => channel.toLowerCase());
-  const active = !item.status || item.status === "active";
-
-  return (
-    item.siteId === "MLB" &&
-    item.condition === "new" &&
-    active &&
-    item.price !== null &&
-    item.price > 0 &&
-    (channels.length === 0 || channels.includes("marketplace"))
-  );
-}
-
 type ProductChildCandidate = {
   product: MercadoLivreProduct;
   terminal: boolean;
@@ -1467,7 +1456,7 @@ export class MercadoLivreHighlightResolver {
     product: MercadoLivreProduct,
     diagnostics: MercadoLivreProductResolutionDiagnostics,
   ): Promise<MercadoLivreHighlightResolutionResult> {
-    let productItems: MercadoLivreProductItem[];
+    let productItems;
 
     try {
       productItems = await this.connector.getProductItems(product.id);
@@ -1479,42 +1468,66 @@ export class MercadoLivreHighlightResolver {
       );
     }
 
-    diagnostics.productItemsFetched += productItems.length;
+    const productItemDiagnostics = productItems.diagnostics;
+    diagnostics.productItemsFetched +=
+      productItemDiagnostics.productItemsResultsCount;
+    diagnostics.productItemsUsable += productItemDiagnostics.productItemsUsable;
+    diagnostics.productItemsSkipped +=
+      productItemDiagnostics.productItemsResultsCount -
+      productItemDiagnostics.productItemsUsable;
+    diagnostics.productItemsHttpStatus =
+      productItemDiagnostics.productItemsHttpStatus;
+    diagnostics.productItemsTotal = productItemDiagnostics.productItemsTotal;
+    diagnostics.productItemsResultsCount =
+      productItemDiagnostics.productItemsResultsCount;
+    diagnostics.productItemsParsedCount =
+      productItemDiagnostics.productItemsParsedCount;
+    diagnostics.productItemsUniqueIds =
+      productItemDiagnostics.productItemsUniqueIds;
+    diagnostics.productItemsHydrationRequested =
+      productItemDiagnostics.productItemsHydrationRequested;
+    diagnostics.productItemsHydrated =
+      productItemDiagnostics.productItemsHydrated;
+    diagnostics.productItemsPriceApiFetched =
+      productItemDiagnostics.priceApiFetched;
+    diagnostics.productItemsPriceFallbackUsed =
+      productItemDiagnostics.priceFallbackUsed;
+    diagnostics.productItemsPriceUnavailable =
+      productItemDiagnostics.priceUnavailable;
+    diagnostics.productItemRejectionReasons =
+      productItemDiagnostics.rejectionReasons;
+    diagnostics.productItemSamples = productItemDiagnostics.samples;
 
-    if (productItems.length === 0) {
+    if (productItemDiagnostics.productItemsResultsCount === 0) {
       return skippedHighlight(candidate, "PRODUCT_ITEMS_EMPTY", diagnostics);
     }
 
-    const usableItems = productItems.filter(isUsableProductItem);
-    diagnostics.productItemsUsable += usableItems.length;
-    diagnostics.productItemsSkipped += productItems.length - usableItems.length;
-
-    if (usableItems.length === 0) {
+    if (productItemDiagnostics.productItemsParsedCount === 0) {
       return skippedHighlight(
         candidate,
-        "PRODUCT_ITEMS_NO_USABLE_ITEM",
+        "PRODUCT_ITEMS_SCHEMA_MISMATCH",
         diagnostics,
       );
     }
 
-    let candidates: MarketplaceOfferCandidate[];
-
-    try {
-      candidates = await this.connector.getItems(
-        usableItems.map((item) => item.itemId),
-      );
-    } catch {
+    if (
+      productItemDiagnostics.productItemsUniqueIds > 0 &&
+      productItemDiagnostics.productItemsHydrated === 0
+    ) {
       return skippedHighlight(
         candidate,
-        "PRODUCT_ITEMS_API_ERROR",
+        "PRODUCT_ITEMS_HYDRATION_FAILED",
         diagnostics,
       );
     }
 
     const productItemById = new Map(
-      usableItems.map((item) => [item.itemId, item]),
+      productItems.summaries.map((item) => [item.itemId, item]),
     );
-    const chosen = chooseMarketplaceItem(candidates, productItemById);
+    const chosen = chooseMarketplaceItem(
+      productItems.candidates,
+      productItemById,
+    );
 
     if (!chosen) {
       return skippedHighlight(

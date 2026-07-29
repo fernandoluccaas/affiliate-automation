@@ -25,6 +25,8 @@ import {
   buildMercadoLivreAuthorizationUrl,
   decryptSecret,
   encryptSecret,
+  parseMercadoLivreCatalogProductItemSummary,
+  resolveMercadoLivreItemCondition,
   type ApiFetch,
 } from "./index";
 
@@ -190,11 +192,12 @@ describe("MercadoLivreApiClient", () => {
         blocked_by: "access policy",
       },
     });
-    expect(JSON.stringify(error.details)).not.toContain(accessToken);
-    expect(JSON.stringify(error.details)).not.toMatch(/authorization/i);
-    expect(JSON.stringify(error.details)).not.toContain("refresh-secret");
-    expect(JSON.stringify(error.details)).not.toContain("client-secret");
-    expect(error.details).not.toHaveProperty("Authorization");
+    const apiError = error as MercadoLivreApiError;
+    expect(JSON.stringify(apiError.details)).not.toContain(accessToken);
+    expect(JSON.stringify(apiError.details)).not.toMatch(/authorization/i);
+    expect(JSON.stringify(apiError.details)).not.toContain("refresh-secret");
+    expect(JSON.stringify(apiError.details)).not.toContain("client-secret");
+    expect(apiError.details).not.toHaveProperty("Authorization");
     expect(fetchFn).toHaveBeenCalledOnce();
   });
 
@@ -406,53 +409,282 @@ describe("MercadoLivreConnector", () => {
   });
 
   it("loads and normalizes official catalog product items", async () => {
-    let requestedUrl = "";
+    const requestedUrls: string[] = [];
     let requestedHeaders: Headers | undefined;
     const fetchFn: ApiFetch = vi.fn(async (url, init) => {
-      requestedUrl = String(url);
+      requestedUrls.push(String(url));
       requestedHeaders = init?.headers as Headers;
-      return jsonResponse({
-        paging: { total: 1, limit: 100, offset: 0 },
-        results: [
-          {
-            item_id: "MLB123",
-            site_id: "MLB",
-            condition: "new",
-            status: "active",
-            price: 199.9,
-            available_quantity: 8,
-            shipping: { free_shipping: true },
-            official_store_id: 42,
-            channels: ["marketplace"],
-            seller_reputation: {
-              transactions: { completed: 95, total: 100 },
-            },
-          },
-        ],
-      });
+      return requestedUrls.length === 1
+        ? jsonResponse({
+            paging: { total: 1, limit: 100, offset: 0 },
+            results: [
+              {
+                item_id: "MLB123",
+                site_id: "MLB",
+                price: 199.9,
+                condition: "new",
+                shipping: { free_shipping: true },
+                official_store_id: 42,
+              },
+            ],
+          })
+        : jsonResponse(
+            [
+              {
+                code: 206,
+                body: {
+                  id: "MLB123",
+                  site_id: "MLB",
+                  title: "Produto hidratado",
+                  status: "active",
+                  condition: "new",
+                  permalink:
+                    "https://produto.mercadolivre.com.br/MLB-123-produto",
+                  available_quantity: 8,
+                  channels: ["marketplace"],
+                  shipping: { free_shipping: true },
+                },
+              },
+            ],
+            206,
+          );
     });
+    const priceService = {
+      getPrice: vi
+        .fn()
+        .mockResolvedValue({ currentPrice: 199.9, originalPrice: 249.9 }),
+    } as unknown as MercadoLivrePriceService;
     const connector = new MercadoLivreConnector({
       client: new MercadoLivreApiClient({ accessToken: "token", fetchFn }),
+      priceService,
     });
 
-    await expect(connector.getProductItems("MLB-CATALOG")).resolves.toEqual([
-      {
-        itemId: "MLB123",
-        siteId: "MLB",
-        condition: "new",
-        status: "active",
-        price: 199.9,
-        availableQuantity: 8,
-        freeShipping: true,
-        officialStoreId: "42",
-        sellerReputation: 0.95,
-        channels: ["marketplace"],
+    await expect(
+      connector.getProductItems("MLB-CATALOG"),
+    ).resolves.toMatchObject({
+      summaries: [
+        {
+          itemId: "MLB123",
+          siteId: "MLB",
+          condition: "new",
+          price: 199.9,
+          freeShipping: true,
+          officialStoreId: "42",
+        },
+      ],
+      candidates: [
+        {
+          externalProductId: "MLB123",
+          itemStatus: "active",
+          currentPrice: 199.9,
+          originalPrice: 249.9,
+        },
+      ],
+      diagnostics: {
+        productItemsHttpStatus: 200,
+        productItemsResultsCount: 1,
+        productItemsParsedCount: 1,
+        productItemsHydrated: 1,
+        productItemsUsable: 1,
+        priceApiFetched: 1,
       },
-    ]);
-    expect(requestedUrl).toBe(
+    });
+    expect(requestedUrls[0]).toBe(
       "https://api.mercadolibre.com/products/MLB-CATALOG/items?limit=100&offset=0",
     );
+    expect(requestedUrls[1]).toBe(
+      "https://api.mercadolibre.com/items?ids=MLB123",
+    );
     expect(requestedHeaders?.get("authorization")).toBe("Bearer token");
+  });
+
+  it("parses sparse summaries and a valid id fallback without requiring detail fields", () => {
+    expect(
+      parseMercadoLivreCatalogProductItemSummary({
+        item_id: "MLB123456",
+      }),
+    ).toMatchObject({
+      itemId: "MLB123456",
+      summaryFieldsPresent: ["item_id"],
+    });
+    expect(
+      parseMercadoLivreCatalogProductItemSummary({
+        id: "MLB654321",
+      }),
+    ).toMatchObject({
+      itemId: "MLB654321",
+      summaryFieldsPresent: ["id"],
+    });
+    expect(
+      parseMercadoLivreCatalogProductItemSummary({ id: "PRODUCT123" }),
+    ).toBeNull();
+  });
+
+  it("resolves item_condition before condition and ITEM_CONDITION attributes", () => {
+    expect(
+      resolveMercadoLivreItemCondition({
+        item_condition: "new",
+        condition: "used",
+      }),
+    ).toBe("new");
+    expect(
+      resolveMercadoLivreItemCondition({
+        attributes: [{ id: "ITEM_CONDITION", value_name: "new" }],
+      }),
+    ).toBe("new");
+    expect(resolveMercadoLivreItemCondition({})).toBe("unknown");
+  });
+
+  it("hydrates sparse summaries and uses the summary price as the last fallback", async () => {
+    const fetchFn = vi
+      .fn<ApiFetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          paging: { total: 1 },
+          results: [{ item_id: "MLB123456", price: 89.9 }],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse([
+          {
+            code: 200,
+            body: {
+              id: "MLB123456",
+              site_id: "MLB",
+              title: "Produto sem campos opcionais",
+              permalink:
+                "https://produto.mercadolivre.com.br/MLB-123456-produto",
+              attributes: [{ id: "ITEM_CONDITION", value_name: "new" }],
+            },
+          },
+        ]),
+      );
+    const priceService = {
+      getPrice: vi.fn().mockRejectedValue(new Error("unavailable")),
+    } as unknown as MercadoLivrePriceService;
+    const connector = new MercadoLivreConnector({
+      client: new MercadoLivreApiClient({ accessToken: "token", fetchFn }),
+      priceService,
+    });
+
+    const result = await connector.getProductItems("MLBPRODUCT");
+
+    expect(result.candidates[0]).toMatchObject({
+      externalProductId: "MLB123456",
+      currentPrice: 89.9,
+      priceSource: "ITEM_FALLBACK",
+      availableQuantity: null,
+      channels: [],
+      stockStatus: "UNKNOWN",
+    });
+    expect(result.diagnostics).toMatchObject({
+      productItemsHydrated: 1,
+      productItemsUsable: 1,
+      priceFallbackUsed: 1,
+      rejectionReasons: {},
+    });
+  });
+
+  it("isolates invalid hydrated items and keeps a valid sibling", async () => {
+    const fetchFn = vi
+      .fn<ApiFetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          paging: { total: 2 },
+          results: [{ item_id: "MLB111111" }, { item_id: "MLB222222" }],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse([
+          {
+            code: 200,
+            body: {
+              id: "MLB111111",
+              site_id: "MLB",
+              title: "Inativo",
+              status: "paused",
+              condition: "new",
+              permalink:
+                "https://produto.mercadolivre.com.br/MLB-111111-inativo",
+              price: 10,
+            },
+          },
+          {
+            code: 206,
+            body: {
+              id: "MLB222222",
+              site_id: "MLB",
+              title: "Ativo",
+              status: "active",
+              condition: "new",
+              permalink: "https://produto.mercadolivre.com.br/MLB-222222-ativo",
+              price: 20,
+              available_quantity: 1,
+              channels: ["marketplace"],
+            },
+          },
+        ]),
+      );
+    const priceService = {
+      getPrice: vi
+        .fn()
+        .mockResolvedValue({ currentPrice: 20, originalPrice: null }),
+    } as unknown as MercadoLivrePriceService;
+    const connector = new MercadoLivreConnector({
+      client: new MercadoLivreApiClient({ accessToken: "token", fetchFn }),
+      priceService,
+    });
+
+    const result = await connector.getProductItems("MLBPRODUCT");
+
+    expect(result.candidates.map((item) => item.externalProductId)).toEqual([
+      "MLB222222",
+    ]);
+    expect(result.diagnostics).toMatchObject({
+      productItemsHydrated: 2,
+      productItemsUsable: 1,
+      rejectionReasons: { PRODUCT_ITEM_INACTIVE: 1 },
+    });
+  });
+
+  it("distinguishes summary schema mismatch from hydration failure", async () => {
+    const schemaConnector = new MercadoLivreConnector({
+      client: new MercadoLivreApiClient({
+        accessToken: "token",
+        fetchFn: vi.fn(async () =>
+          jsonResponse({ paging: { total: 1 }, results: [{ foo: "bar" }] }),
+        ),
+      }),
+    });
+    const schemaResult = await schemaConnector.getProductItems("MLBPRODUCT");
+
+    expect(schemaResult.diagnostics).toMatchObject({
+      productItemsResultsCount: 1,
+      productItemsParsedCount: 0,
+      rejectionReasons: { PRODUCT_ITEM_INVALID_ID: 1 },
+    });
+
+    const hydrationConnector = new MercadoLivreConnector({
+      client: new MercadoLivreApiClient({
+        accessToken: "token",
+        fetchFn: vi
+          .fn<ApiFetch>()
+          .mockResolvedValueOnce(
+            jsonResponse({ results: [{ item_id: "MLB123456" }] }),
+          )
+          .mockResolvedValueOnce(
+            jsonResponse([{ code: 404, body: { message: "not found" } }]),
+          ),
+      }),
+    });
+    const hydrationResult =
+      await hydrationConnector.getProductItems("MLBPRODUCT");
+
+    expect(hydrationResult.diagnostics).toMatchObject({
+      productItemsUniqueIds: 1,
+      productItemsHydrated: 0,
+      rejectionReasons: { PRODUCT_ITEM_DETAIL_HTTP_ERROR: 1 },
+    });
   });
 });
 
