@@ -1392,13 +1392,6 @@ export class MercadoLivreConnector implements MarketplaceConnector {
       buyBoxWinnerPrice: asNumber(buyBoxWinner?.price),
     };
 
-    console.info("[mercado-livre.product]", {
-      productId: parsedProduct.id,
-      status: parsedProduct.status,
-      childrenCount: parsedProduct.childrenIds.length,
-      hasBuyBoxWinner: Boolean(parsedProduct.buyBoxWinnerItemId),
-    });
-
     return parsedProduct;
   }
 
@@ -1705,6 +1698,12 @@ export {
   normalizeMercadoLivreAffiliateProductUrl,
   normalizeMercadoLivreGeneratedAffiliateUrl,
 } from "./mercadolivre/affiliate-link";
+export {
+  emitMercadoLivreOperationalMetric,
+  type MercadoLivreOperationalEvent,
+  type MercadoLivreOperationalMetricFields,
+  type MercadoLivreOperationalMetricWriter,
+} from "./mercadolivre/affiliate-observability";
 export {
   MercadoLivreAffiliateSessionService,
   type MercadoLivreAffiliateFetch,

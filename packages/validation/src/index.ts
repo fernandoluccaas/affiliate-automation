@@ -250,10 +250,13 @@ export type MarketplaceAffiliateUrlValidation =
       code:
         | "INVALID_URL"
         | "HTTPS_REQUIRED"
+        | "EMBEDDED_CREDENTIALS"
         | "LOCAL_OR_PRIVATE_HOST"
         | "HOST_NOT_ALLOWED";
       message: string;
     };
+
+export type AffiliateUrlValidationResult = MarketplaceAffiliateUrlValidation;
 
 const MERCADO_LIVRE_AFFILIATE_DOMAINS = [
   "meli.la",
@@ -265,10 +268,9 @@ function hostnameMatchesDomain(hostname: string, domain: string) {
   return hostname === domain || hostname.endsWith(`.${domain}`);
 }
 
-export function validateMarketplaceAffiliateUrl(
-  marketplace: string,
+export function validateAffiliateUrl(
   value: string,
-): MarketplaceAffiliateUrlValidation {
+): AffiliateUrlValidationResult {
   let url: URL;
 
   try {
@@ -286,6 +288,14 @@ export function validateMarketplaceAffiliateUrl(
       ok: false,
       code: "HTTPS_REQUIRED",
       message: "Affiliate URL must use HTTPS.",
+    };
+  }
+
+  if (url.username || url.password) {
+    return {
+      ok: false,
+      code: "EMBEDDED_CREDENTIALS",
+      message: "Affiliate URL cannot contain embedded credentials.",
     };
   }
 
@@ -307,7 +317,6 @@ export function validateMarketplaceAffiliateUrl(
   }
 
   if (
-    marketplace === "MERCADO_LIVRE" &&
     !MERCADO_LIVRE_AFFILIATE_DOMAINS.some((domain) =>
       hostnameMatchesDomain(hostname, domain),
     )
@@ -316,6 +325,62 @@ export function validateMarketplaceAffiliateUrl(
       ok: false,
       code: "HOST_NOT_ALLOWED",
       message: "Affiliate URL host is not allowed for Mercado Livre.",
+    };
+  }
+
+  return { ok: true, normalizedUrl: url.toString() };
+}
+
+export function validateMarketplaceAffiliateUrl(
+  marketplace: string,
+  value: string,
+): MarketplaceAffiliateUrlValidation {
+  if (marketplace === "MERCADO_LIVRE") {
+    return validateAffiliateUrl(value);
+  }
+
+  let url: URL;
+
+  try {
+    url = new URL(value);
+  } catch {
+    return {
+      ok: false,
+      code: "INVALID_URL",
+      message: "Affiliate URL is invalid.",
+    };
+  }
+
+  if (url.protocol !== "https:") {
+    return {
+      ok: false,
+      code: "HTTPS_REQUIRED",
+      message: "Affiliate URL must use HTTPS.",
+    };
+  }
+
+  if (url.username || url.password) {
+    return {
+      ok: false,
+      code: "EMBEDDED_CREDENTIALS",
+      message: "Affiliate URL cannot contain embedded credentials.",
+    };
+  }
+
+  const hostname = url.hostname.toLowerCase();
+
+  if (
+    !hostname ||
+    hostname === "localhost" ||
+    hostname.endsWith(".localhost") ||
+    hostname.endsWith(".local") ||
+    isPrivateIpv4(hostname) ||
+    isPrivateIpv6(hostname)
+  ) {
+    return {
+      ok: false,
+      code: "LOCAL_OR_PRIVATE_HOST",
+      message: "Affiliate URL cannot use a local or private host.",
     };
   }
 

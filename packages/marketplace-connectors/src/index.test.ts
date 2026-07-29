@@ -380,7 +380,7 @@ describe("MercadoLivreConnector", () => {
     expect(result.diagnostics.priceUnavailable).toBe(1);
   });
 
-  it("preserves catalog product metadata in sanitized logs", async () => {
+  it("preserves catalog product metadata without ad hoc logging", async () => {
     const log = vi.spyOn(console, "info").mockImplementation(() => undefined);
     const connector = new MercadoLivreConnector({
       client: new MercadoLivreApiClient({
@@ -403,12 +403,7 @@ describe("MercadoLivreConnector", () => {
       childrenIds: ["MLB101"],
       soldQuantity: 300,
     });
-    expect(log).toHaveBeenCalledWith("[mercado-livre.product]", {
-      productId: "MLB100",
-      status: "inactive",
-      childrenCount: 1,
-      hasBuyBoxWinner: false,
-    });
+    expect(log).not.toHaveBeenCalled();
     log.mockRestore();
   });
 });

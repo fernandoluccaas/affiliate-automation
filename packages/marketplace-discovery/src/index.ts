@@ -7,6 +7,7 @@ import {
   MercadoLivreInvalidResponseError,
   createMercadoLivreConnector,
   decryptSecret,
+  emitMercadoLivreOperationalMetric,
   encryptSecret,
   normalizeMercadoLivreCookie,
   parseMercadoLivreCookie,
@@ -18,6 +19,7 @@ import {
   type MercadoLivreHighlightCandidate,
   type MercadoLivreHighlightResolutionResult,
   type MercadoLivreHighlightSkipReason,
+  type MercadoLivreOperationalEvent,
   type MercadoLivreProduct,
   type MercadoLivreProductResolutionDiagnostics,
   type MercadoLivreResolutionStrategy,
@@ -25,6 +27,12 @@ import {
   type MercadoLivreUserProduct,
 } from "@affiliate/marketplace-connectors";
 import { acquireLock, type LockHandle } from "@affiliate/redis";
+
+export {
+  ManualAffiliateLinkProvider,
+  type AffiliateLinkGenerationResult,
+  type AffiliateLinkProvider,
+} from "./affiliate-link-provider";
 
 export type { MercadoLivreProductResolutionDiagnostics } from "@affiliate/marketplace-connectors";
 
@@ -103,6 +111,8 @@ type DiscoveryDependencies = {
   affiliateConcurrency: number;
   decryptCredential: typeof decryptSecret;
   encryptCredential: typeof encryptSecret;
+  emitOperationalMetric: typeof emitMercadoLivreOperationalMetric;
+  monotonicNow: () => number;
   ingest: typeof ingestOffer;
   lock: typeof acquireLock;
 };
@@ -207,6 +217,12 @@ function discoveryDependencies(
     ),
     decryptCredential: dependencies.decryptCredential ?? decryptSecret,
     encryptCredential: dependencies.encryptCredential ?? encryptSecret,
+    emitOperationalMetric:
+      dependencies.emitOperationalMetric ??
+      (process.env.NODE_ENV === "test"
+        ? () => undefined
+        : emitMercadoLivreOperationalMetric),
+    monotonicNow: dependencies.monotonicNow ?? Date.now,
     ingest: dependencies.ingest ?? ingestOffer,
     lock: dependencies.lock ?? acquireLock,
   };
@@ -214,6 +230,18 @@ function discoveryDependencies(
 
 function affiliateOperationLockKey(marketplaceAccountId: string) {
   return `${AFFILIATE_OPERATION_LOCK_PREFIX}:${marketplaceAccountId}`;
+}
+
+function emitOperationalMetric(
+  dependencies: DiscoveryDependencies,
+  event: MercadoLivreOperationalEvent,
+  fields: Parameters<typeof emitMercadoLivreOperationalMetric>[1],
+) {
+  try {
+    dependencies.emitOperationalMetric(event, fields);
+  } catch {
+    // Metrics must never change the result of discovery or ingestion.
+  }
 }
 
 function startLockHeartbeat(lock: LockHandle, ttlMs: number) {
@@ -602,10 +630,38 @@ async function persistAffiliateSessionAfterBatch(
   }
 }
 
+function emitAffiliateItemMetric(
+  dependencies: DiscoveryDependencies,
+  event: MercadoLivreOperationalEvent,
+  input: {
+    jobId: string;
+    marketplaceAccountId: string;
+    externalItemId: string;
+    stage: string;
+    startedAt: number;
+    status: string;
+    attempt: number;
+    errorCode?: string;
+  },
+) {
+  emitOperationalMetric(dependencies, event, {
+    jobId: input.jobId,
+    marketplaceAccountId: input.marketplaceAccountId,
+    externalItemId: input.externalItemId,
+    stage: input.stage,
+    durationMs: Math.max(0, dependencies.monotonicNow() - input.startedAt),
+    status: input.status,
+    attempt: input.attempt,
+    count: 1,
+    ...(input.errorCode ? { errorCode: input.errorCode } : {}),
+  });
+}
+
 async function enrichCandidatesWithAffiliateLinks(
   candidates: readonly MercadoLivreDiscoveredCandidate[],
   dependencies: DiscoveryDependencies,
   marketplaceAccountId: string,
+  importJobId: string,
   existingAffiliateLinks: ReadonlyMap<
     string,
     { affiliateUrl: string; affiliateLabel: string | null }
@@ -627,6 +683,24 @@ async function enrichCandidatesWithAffiliateLinks(
     candidates,
     dependencies.affiliateConcurrency,
     async (candidate): Promise<AffiliateEnrichmentResult> => {
+      const itemStartedAt = dependencies.monotonicNow();
+      const emitItem = (
+        event: MercadoLivreOperationalEvent,
+        status: string,
+        attempt: number,
+        errorCode?: string,
+        stage = "LINK_GENERATION",
+      ) =>
+        emitAffiliateItemMetric(dependencies, event, {
+          jobId: importJobId,
+          marketplaceAccountId,
+          externalItemId: candidate.externalProductId,
+          stage,
+          startedAt: itemStartedAt,
+          status,
+          attempt,
+          ...(errorCode ? { errorCode } : {}),
+        });
       const existing = existingAffiliateLinks.get(candidate.externalProductId);
 
       if (existing) {
@@ -646,6 +720,20 @@ async function enrichCandidatesWithAffiliateLinks(
       if (!session.ready) {
         metrics.affiliatePending += 1;
         metrics.errors += 1;
+        emitItem(
+          "mercadolivre_affiliate_link_failed",
+          "PENDING",
+          session.failure.attempts,
+          session.failure.code,
+          session.failure.stage,
+        );
+        emitItem(
+          "mercadolivre_discovery_items_pending_link",
+          "PENDING",
+          session.failure.attempts,
+          session.failure.code,
+          session.failure.stage,
+        );
         return {
           candidate,
           affiliateUrl: null,
@@ -659,15 +747,30 @@ async function enrichCandidatesWithAffiliateLinks(
       }
 
       if (stopNewLinkAttempts) {
+        const failure = pendingAfterExpiredFailure();
         metrics.affiliatePending += 1;
         metrics.affiliateSkippedAfterSessionExpired += 1;
         metrics.errors += 1;
+        emitItem(
+          "mercadolivre_affiliate_link_failed",
+          "SKIPPED",
+          failure.attempts,
+          failure.code,
+          failure.stage,
+        );
+        emitItem(
+          "mercadolivre_discovery_items_pending_link",
+          "PENDING",
+          failure.attempts,
+          failure.code,
+          failure.stage,
+        );
         return {
           candidate,
           affiliateUrl: null,
           affiliateEligibility: "UNKNOWN",
           affiliateLabel: session.affiliateTag,
-          affiliateFailure: pendingAfterExpiredFailure(),
+          affiliateFailure: failure,
           linkAttempted: false,
           linkGenerated: false,
           linkReused: false,
@@ -701,6 +804,7 @@ async function enrichCandidatesWithAffiliateLinks(
         }
 
         metrics.affiliateLinksGenerated += 1;
+        emitItem("mercadolivre_affiliate_link_generated", "SUCCEEDED", 1);
         return {
           candidate,
           affiliateUrl: result.affiliateUrl,
@@ -722,6 +826,20 @@ async function enrichCandidatesWithAffiliateLinks(
 
         if (failure.productIneligible) {
           metrics.affiliateIneligible += 1;
+          emitItem(
+            "mercadolivre_affiliate_link_failed",
+            "INELIGIBLE",
+            failure.attempts,
+            failure.code,
+            failure.stage,
+          );
+          emitItem(
+            "mercadolivre_discovery_items_ineligible",
+            "INELIGIBLE",
+            failure.attempts,
+            failure.code,
+            failure.stage,
+          );
           return {
             candidate,
             affiliateUrl: null,
@@ -735,10 +853,35 @@ async function enrichCandidatesWithAffiliateLinks(
         }
 
         if (failure.sessionExpired) {
+          const firstSessionExpiry = !stopNewLinkAttempts;
           stopNewLinkAttempts = true;
+
+          if (firstSessionExpiry) {
+            emitItem(
+              "mercadolivre_affiliate_session_expired",
+              "EXPIRED",
+              failure.attempts,
+              failure.code,
+              failure.stage,
+            );
+          }
         }
 
         metrics.affiliatePending += 1;
+        emitItem(
+          "mercadolivre_affiliate_link_failed",
+          "PENDING",
+          failure.attempts,
+          failure.code,
+          failure.stage,
+        );
+        emitItem(
+          "mercadolivre_discovery_items_pending_link",
+          "PENDING",
+          failure.attempts,
+          failure.code,
+          failure.stage,
+        );
         return {
           candidate,
           affiliateUrl: null,
@@ -1607,7 +1750,7 @@ function importJobTotals(metrics: MercadoLivreDiscoveryMetrics) {
     totalResolved: metrics.uniqueCandidates,
     totalLinksGenerated: metrics.affiliateLinksGenerated,
     totalReadyToPublish: metrics.readyToPublish,
-    totalPendingAffiliateLink: metrics.readyForAffiliateLink,
+    totalReadyForAffiliateLink: metrics.readyForAffiliateLink,
     totalIneligible: metrics.affiliateIneligible,
     totalCreated: metrics.newProducts,
     totalUpdated: metrics.updatedOffers,
@@ -1626,6 +1769,7 @@ export class MercadoLivreDiscoveryService {
     now = new Date(),
     options: MercadoLivreDiscoveryOptions = {},
   ): Promise<MercadoLivreDiscoveryResult> {
+    const operationStartedAt = this.dependencies.monotonicNow();
     const metrics = createMercadoLivreDiscoveryMetrics();
     const config =
       await this.dependencies.database.mercadoLivreDiscoveryConfig.findFirst({
@@ -1713,6 +1857,17 @@ export class MercadoLivreDiscoveryService {
         },
       });
       importJobId = importJob.id;
+      emitOperationalMetric(this.dependencies, "mercadolivre_import_created", {
+        jobId: importJob.id,
+        marketplaceAccountId: account.id,
+        stage: "DISCOVERY",
+        durationMs: Math.max(
+          0,
+          this.dependencies.monotonicNow() - operationStartedAt,
+        ),
+        status: "RUNNING",
+        count: 1,
+      });
       const connector = await this.dependencies.createConnector();
       const candidates = await discoverCandidatesFromLeafCategories(
         connector,
@@ -1748,6 +1903,34 @@ export class MercadoLivreDiscoveryService {
       const selectedCandidates = [...uniqueCandidates.values()].filter(
         (candidate) => candidatePassesDiscoveryPolicies(candidate, config),
       );
+      const discoveryDurationMs = Math.max(
+        0,
+        this.dependencies.monotonicNow() - operationStartedAt,
+      );
+      emitOperationalMetric(
+        this.dependencies,
+        "mercadolivre_discovery_items_found",
+        {
+          jobId: importJob.id,
+          marketplaceAccountId: account.id,
+          stage: "DISCOVERY",
+          durationMs: discoveryDurationMs,
+          status: "SUCCEEDED",
+          count: metrics.candidatesFound,
+        },
+      );
+      emitOperationalMetric(
+        this.dependencies,
+        "mercadolivre_discovery_items_resolved",
+        {
+          jobId: importJob.id,
+          marketplaceAccountId: account.id,
+          stage: "RESOLUTION",
+          durationMs: discoveryDurationMs,
+          status: "SUCCEEDED",
+          count: metrics.uniqueCandidates,
+        },
+      );
       const existingAffiliateLinks = await existingAffiliateLinksForCandidates(
         this.dependencies.database,
         selectedCandidates,
@@ -1759,6 +1942,7 @@ export class MercadoLivreDiscoveryService {
               selectedCandidates,
               this.dependencies,
               account.id,
+              importJob.id,
               existingAffiliateLinks,
               metrics,
               now,
@@ -1800,7 +1984,11 @@ export class MercadoLivreDiscoveryService {
         }),
         this.dependencies.database.automationRun.update({
           where: { id: run.id },
-          data: { status: "SUCCEEDED", finishedAt: new Date(), metrics },
+          data: {
+            status: hasPartialFailures ? "PARTIAL" : "SUCCEEDED",
+            finishedAt: new Date(),
+            metrics,
+          },
         }),
         this.dependencies.database.importJob.update({
           where: { id: importJob.id },
@@ -1813,6 +2001,17 @@ export class MercadoLivreDiscoveryService {
           },
         }),
       ]);
+      emitOperationalMetric(this.dependencies, "mercadolivre_import_updated", {
+        jobId: importJob.id,
+        marketplaceAccountId: account.id,
+        stage: "INGESTION",
+        durationMs: Math.max(
+          0,
+          this.dependencies.monotonicNow() - operationStartedAt,
+        ),
+        status: hasPartialFailures ? "SUCCEEDED_WITH_ERRORS" : "SUCCEEDED",
+        count: 1,
+      });
 
       return {
         ok: true,
@@ -1836,7 +2035,11 @@ export class MercadoLivreDiscoveryService {
             severity: "ERROR",
             source: "mercado-livre.discovery",
             message: errorCode,
-            metadata: { error: errorMessage },
+            metadata: {
+              stage: "DISCOVERY",
+              status: "FAILED",
+              errorCode,
+            },
           },
         }),
         ...(runId
@@ -1867,6 +2070,24 @@ export class MercadoLivreDiscoveryService {
             ]
           : []),
       ]);
+      if (importJobId) {
+        emitOperationalMetric(
+          this.dependencies,
+          "mercadolivre_import_updated",
+          {
+            jobId: importJobId,
+            marketplaceAccountId: account.id,
+            stage: "DISCOVERY",
+            durationMs: Math.max(
+              0,
+              this.dependencies.monotonicNow() - operationStartedAt,
+            ),
+            status: "FAILED",
+            count: 1,
+            errorCode,
+          },
+        );
+      }
 
       return {
         ok: false,
@@ -1963,6 +2184,7 @@ export async function generatePendingMercadoLivreAffiliateLinks(
   }
 
   const dependencies = discoveryDependencies(dependencyOverrides);
+  const operationStartedAt = dependencies.monotonicNow();
   const account = await dependencies.database.marketplaceAccount.findFirst({
     where: {
       marketplace: "MERCADO_LIVRE",
@@ -2140,6 +2362,14 @@ export async function generatePendingMercadoLivreAffiliateLinks(
       },
     });
     importJobId = importJob.id;
+    emitOperationalMetric(dependencies, "mercadolivre_import_created", {
+      jobId: importJob.id,
+      marketplaceAccountId: account.id,
+      stage: "AFFILIATE_LINK",
+      durationMs: Math.max(0, dependencies.monotonicNow() - operationStartedAt),
+      status: "RUNNING",
+      count: 1,
+    });
     const minimumScores = new Map<string, number>();
     const candidates: MercadoLivreDiscoveredCandidate[] = offers.map(
       (offer) => {
@@ -2201,6 +2431,7 @@ export async function generatePendingMercadoLivreAffiliateLinks(
       candidates,
       dependencies,
       account.id,
+      importJob.id,
       existingAffiliateLinks,
       metrics,
       now,
@@ -2234,6 +2465,14 @@ export async function generatePendingMercadoLivreAffiliateLinks(
         summary: metrics,
       },
     });
+    emitOperationalMetric(dependencies, "mercadolivre_import_updated", {
+      jobId: importJob.id,
+      marketplaceAccountId: account.id,
+      stage: "AFFILIATE_LINK",
+      durationMs: Math.max(0, dependencies.monotonicNow() - operationStartedAt),
+      status: hasFailures ? "SUCCEEDED_WITH_ERRORS" : "SUCCEEDED",
+      count: 1,
+    });
 
     return {
       ok: true,
@@ -2260,6 +2499,18 @@ export async function generatePendingMercadoLivreAffiliateLinks(
           errorMessage,
           summary: metrics,
         },
+      });
+      emitOperationalMetric(dependencies, "mercadolivre_import_updated", {
+        jobId: importJobId,
+        marketplaceAccountId: account.id,
+        stage: "AFFILIATE_LINK",
+        durationMs: Math.max(
+          0,
+          dependencies.monotonicNow() - operationStartedAt,
+        ),
+        status: "FAILED",
+        count: 1,
+        errorCode: "AFFILIATE_ENRICHMENT_FAILED",
       });
     }
 
@@ -2296,6 +2547,20 @@ export type MercadoLivreJobMetrics = {
   expired: number;
   skipped: number;
   skipReasons: Record<string, number>;
+  selected: number;
+  refreshed: number;
+  unchanged: number;
+  newVersions: number;
+  notFound: number;
+  affiliateUrlsPreserved: number;
+  itemsFetched: number;
+  priceApiFetched: number;
+  priceFallbackUsed: number;
+  priceUnavailable: number;
+  failures: Array<{
+    externalProductId: string;
+    errorMessage: string;
+  }>;
 };
 
 function emptyJobMetrics(): MercadoLivreJobMetrics {
@@ -2309,99 +2574,204 @@ function emptyJobMetrics(): MercadoLivreJobMetrics {
     expired: 0,
     skipped: 0,
     skipReasons: {},
+    selected: 0,
+    refreshed: 0,
+    unchanged: 0,
+    newVersions: 0,
+    notFound: 0,
+    affiliateUrlsPreserved: 0,
+    itemsFetched: 0,
+    priceApiFetched: 0,
+    priceFallbackUsed: 0,
+    priceUnavailable: 0,
+    failures: [],
   };
 }
 
-export async function refreshMercadoLivreOffers(now = new Date()) {
+type RefreshMercadoLivreOffersDependencies = {
+  database: typeof prisma;
+  createConnector: () => Promise<MarketplaceConnector>;
+  ingest: typeof ingestOffer;
+};
+
+export async function refreshMercadoLivreOffers(
+  now = new Date(),
+  dependencyOverrides: Partial<RefreshMercadoLivreOffersDependencies> = {},
+) {
+  const dependencies: RefreshMercadoLivreOffersDependencies = {
+    database: dependencyOverrides.database ?? prisma,
+    createConnector:
+      dependencyOverrides.createConnector ?? createMercadoLivreConnector,
+    ingest: dependencyOverrides.ingest ?? ingestOffer,
+  };
   const metrics = emptyJobMetrics();
-  const account = await prisma.marketplaceAccount.findFirst({
+  const account = await dependencies.database.marketplaceAccount.findFirst({
     where: { marketplace: "MERCADO_LIVRE", enabled: true, status: "CONNECTED" },
     orderBy: { updatedAt: "desc" },
   });
 
   if (!account) return metrics;
 
-  const offers = await prisma.offer.findMany({
+  const offers = await dependencies.database.offer.findMany({
     where: { marketplace: "MERCADO_LIVRE", status: { notIn: ["PUBLISHED"] } },
     distinct: ["externalProductId"],
     orderBy: { collectedAt: "desc" },
     take: 50,
   });
+  metrics.selected = offers.length;
 
   if (offers.length === 0) return metrics;
 
-  const runMetrics = createMercadoLivreDiscoveryMetrics();
-  const run = await prisma.automationRun.create({
+  const run = await dependencies.database.automationRun.create({
     data: {
       marketplaceAccountId: account.id,
       name: "mercado-livre-refresh",
       status: "RUNNING",
       idempotencyKey: `mercado-livre-refresh:${now.toISOString()}`,
       startedAt: now,
-      metrics: runMetrics,
+      metrics,
     },
   });
+  const terminalOfferIds = new Set<string>();
 
   try {
-    const connector = await createMercadoLivreConnector();
+    const connector = await dependencies.createConnector();
     const itemResult = await connector.getItemsWithDiagnostics(
       offers.map((offer) => offer.externalProductId),
     );
-    runMetrics.itemsFetched = itemResult.diagnostics.itemsFetched;
-    runMetrics.priceApiFetched = itemResult.diagnostics.priceApiFetched;
-    runMetrics.priceFallbackUsed = itemResult.diagnostics.priceFallbackUsed;
-    runMetrics.priceUnavailable = itemResult.diagnostics.priceUnavailable;
-    const offerByExternalId = new Map(
-      offers.map((offer) => [offer.externalProductId, offer]),
+    metrics.itemsFetched = itemResult.diagnostics.itemsFetched;
+    metrics.priceApiFetched = itemResult.diagnostics.priceApiFetched;
+    metrics.priceFallbackUsed = itemResult.diagnostics.priceFallbackUsed;
+    metrics.priceUnavailable = itemResult.diagnostics.priceUnavailable;
+    const candidateByExternalId = new Map(
+      itemResult.candidates.map((candidate) => [
+        candidate.externalProductId,
+        candidate,
+      ]),
     );
 
-    for (const candidate of itemResult.candidates) {
-      const currentOffer = offerByExternalId.get(candidate.externalProductId);
-      if (!currentOffer) continue;
+    await mapWithConcurrency(
+      offers,
+      AFFILIATE_BATCH_CONCURRENCY,
+      async (currentOffer) => {
+        const candidate = candidateByExternalId.get(
+          currentOffer.externalProductId,
+        );
 
-      const enrichedCandidate: MarketplaceOfferCandidate = {
-        ...candidate,
-        affiliateUrl: currentOffer.affiliateUrl,
-        affiliateLabel: currentOffer.affiliateLabel,
-        affiliateEligibility: currentOffer.affiliateEligibility,
-      };
-      const result = await ingestOffer(candidateInput(enrichedCandidate), {
-        now,
-        minScore: currentOffer.minimumScoreApplied,
-      });
-      recordIngestMetrics(runMetrics, result);
-    }
+        if (!candidate) {
+          metrics.notFound += 1;
+          terminalOfferIds.add(currentOffer.externalProductId);
+          return;
+        }
 
-    await prisma.automationRun.update({
+        const sourceHighlightType = highlightTypeFromStoredValue(
+          currentOffer.sourceHighlightType,
+        );
+        const resolutionStrategy = resolutionStrategyFromStoredValue(
+          currentOffer.resolutionStrategy,
+        );
+        const enrichedCandidate: MercadoLivreDiscoveredCandidate = {
+          ...candidate,
+          affiliateUrl: currentOffer.affiliateUrl,
+          affiliateLabel: currentOffer.affiliateLabel,
+          affiliateEligibility: currentOffer.affiliateEligibility,
+          affiliateFailure:
+            currentOffer.affiliateFailure as MercadoLivreAffiliateFailure | null,
+          trackingStrategy: currentOffer.trackingStrategy,
+          ...(currentOffer.sourceCategoryId
+            ? { sourceCategoryId: currentOffer.sourceCategoryId }
+            : {}),
+          ...(currentOffer.bestSellerPosition !== null
+            ? { bestSellerPosition: currentOffer.bestSellerPosition }
+            : {}),
+          ...(currentOffer.sourceHighlightId
+            ? { sourceHighlightId: currentOffer.sourceHighlightId }
+            : {}),
+          ...(sourceHighlightType ? { sourceHighlightType } : {}),
+          ...(resolutionStrategy ? { resolutionStrategy } : {}),
+        };
+
+        try {
+          const result = await dependencies.ingest(
+            candidateInput(enrichedCandidate),
+            {
+              now,
+              minScore: currentOffer.minimumScoreApplied,
+            },
+          );
+          metrics.refreshed += 1;
+
+          if (result.offerCreated) {
+            metrics.newVersions += 1;
+          } else if (result.offerReused) {
+            metrics.unchanged += 1;
+          }
+
+          if (currentOffer.affiliateUrl) {
+            metrics.affiliateUrlsPreserved += 1;
+          }
+        } catch (error) {
+          metrics.failed += 1;
+          metrics.failures.push({
+            externalProductId: currentOffer.externalProductId,
+            errorMessage: sanitizedError(error),
+          });
+        } finally {
+          terminalOfferIds.add(currentOffer.externalProductId);
+        }
+      },
+    );
+
+    await dependencies.database.automationRun.update({
       where: { id: run.id },
       data: {
-        status: "SUCCEEDED",
+        status: metrics.failed > 0 ? "PARTIAL" : "SUCCEEDED",
         finishedAt: new Date(),
-        metrics: runMetrics,
+        metrics,
+        errorMessage:
+          metrics.failed > 0
+            ? `Refresh completed with ${metrics.failed} offer failure(s).`
+            : null,
       },
     });
   } catch (error) {
-    runMetrics.errors += 1;
     const errorMessage = sanitizedError(error);
-    await prisma.$transaction([
-      prisma.marketplaceAccount.update({
+
+    for (const offer of offers) {
+      if (terminalOfferIds.has(offer.externalProductId)) {
+        continue;
+      }
+
+      metrics.failed += 1;
+      metrics.failures.push({
+        externalProductId: offer.externalProductId,
+        errorMessage,
+      });
+    }
+
+    await dependencies.database.$transaction([
+      dependencies.database.marketplaceAccount.update({
         where: { id: account.id },
         data: { lastErrorAt: new Date(), lastError: errorMessage },
       }),
-      prisma.systemAlert.create({
+      dependencies.database.systemAlert.create({
         data: {
           severity: "ERROR",
           source: "mercado-livre.refresh",
           message: alertCodeForMercadoLivreError(error),
-          metadata: { error: errorMessage },
+          metadata: {
+            stage: "REFRESH",
+            status: "FAILED",
+            errorCode: alertCodeForMercadoLivreError(error),
+          },
         },
       }),
-      prisma.automationRun.update({
+      dependencies.database.automationRun.update({
         where: { id: run.id },
         data: {
           status: "FAILED",
           finishedAt: new Date(),
-          metrics: runMetrics,
+          metrics,
           errorMessage,
         },
       }),

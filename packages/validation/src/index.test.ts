@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   calculateValidatedDiscount,
   sanitizeOperationalErrorMessage,
+  validateAffiliateUrl,
   validateMarketplaceAffiliateUrl,
   validateOfferFacts,
 } from "./index";
@@ -153,5 +154,43 @@ describe("validateMarketplaceAffiliateUrl", () => {
         "https://affiliate.example/link",
       ),
     ).toMatchObject({ ok: true });
+  });
+});
+
+describe("validateAffiliateUrl", () => {
+  it.each([
+    "https://meli.la/abc123",
+    "https://www.mercadolivre.com.br/MLB-123",
+    "https://ofertas.mercadolivre.com.br/MLB-123",
+    "https://mercadolibre.com/MLB-123",
+  ])("accepts an exact allowed domain or legitimate subdomain: %s", (url) => {
+    expect(validateAffiliateUrl(url)).toMatchObject({ ok: true });
+  });
+
+  it.each([
+    "https://meli.la.evil.example/abc",
+    "https://fakemercadolivre.com.br/MLB-123",
+    "https://mercadolivre.com.br.evil.example/MLB-123",
+  ])("rejects a lookalike domain: %s", (url) => {
+    expect(validateAffiliateUrl(url)).toMatchObject({
+      ok: false,
+      code: "HOST_NOT_ALLOWED",
+    });
+  });
+
+  it("rejects HTTP", () => {
+    expect(validateAffiliateUrl("http://meli.la/abc")).toMatchObject({
+      ok: false,
+      code: "HTTPS_REQUIRED",
+    });
+  });
+
+  it("rejects embedded credentials", () => {
+    expect(
+      validateAffiliateUrl("https://user:password@meli.la/abc"),
+    ).toMatchObject({
+      ok: false,
+      code: "EMBEDDED_CREDENTIALS",
+    });
   });
 });

@@ -119,6 +119,8 @@ enum ImportJobItemStage {
   DISCOVERY
   RESOLUTION
   AFFILIATE_LINK
+  AFFILIATE_LINK_VALIDATION
+  AFFILIATE_LINK_APPLICATION
   INGESTION
 }
 
@@ -135,6 +137,7 @@ enum ImportJobItemStatus {
 enum AutomationRunStatus {
   RUNNING
   SUCCEEDED
+  PARTIAL
   FAILED
 }
 
@@ -249,7 +252,8 @@ model Product {
   createdAt         DateTime    @default(now())
   updatedAt         DateTime    @updatedAt
 
-  offers Offer[]
+  offers         Offer[]
+  importJobItems ImportJobItem[]
 
   @@unique([marketplace, externalProductId])
   @@index([marketplace, category])
@@ -520,27 +524,29 @@ model Commission {
 }
 
 model ImportJob {
-  id                        String          @id @default(cuid())
-  marketplaceAccountId      String?
-  marketplace               Marketplace
-  categoryId                String?
-  status                    ImportJobStatus @default(QUEUED)
-  source                    String
-  totalFound                Int             @default(0)
-  totalResolved             Int             @default(0)
-  totalLinksGenerated       Int             @default(0)
-  totalReadyToPublish       Int             @default(0)
-  totalPendingAffiliateLink Int             @default(0)
-  totalIneligible           Int             @default(0)
-  totalCreated              Int             @default(0)
-  totalUpdated              Int             @default(0)
-  totalFailed               Int             @default(0)
-  startedAt                 DateTime?
-  finishedAt                DateTime?
-  errorMessage              String?         @db.Text
-  summary                   Json?           @map("rawSummary")
-  createdAt                 DateTime        @default(now())
-  updatedAt                 DateTime        @updatedAt
+  id                         String          @id @default(cuid())
+  marketplaceAccountId       String?
+  marketplace                Marketplace
+  categoryId                 String?
+  status                     ImportJobStatus @default(QUEUED)
+  source                     String
+  totalFound                 Int             @default(0)
+  totalResolved              Int             @default(0)
+  totalLinksGenerated        Int             @default(0)
+  totalReadyToPublish        Int             @default(0)
+  totalReadyForAffiliateLink Int             @default(0)
+  totalIneligible            Int             @default(0)
+  totalCreated               Int             @default(0)
+  totalUpdated               Int             @default(0)
+  totalInvalidLinks          Int             @default(0)
+  totalNotFound              Int             @default(0)
+  totalFailed                Int             @default(0)
+  startedAt                  DateTime?
+  finishedAt                 DateTime?
+  errorMessage               String?         @db.Text
+  summary                    Json?           @map("rawSummary")
+  createdAt                  DateTime        @default(now())
+  updatedAt                  DateTime        @updatedAt
 
   marketplaceAccount MarketplaceAccount? @relation(fields: [marketplaceAccountId], references: [id], onDelete: SetNull)
   items              ImportJobItem[]
@@ -558,6 +564,7 @@ model ImportJobItem {
   sourceType     String?
   position       Int?
   externalItemId String?
+  productId      String?
   offerId        String?
   stage          ImportJobItemStage
   status         ImportJobItemStatus @default(PENDING)
@@ -569,12 +576,14 @@ model ImportJobItem {
   updatedAt      DateTime            @updatedAt
 
   importJob ImportJob @relation(fields: [importJobId], references: [id], onDelete: Cascade)
+  product   Product?  @relation(fields: [productId], references: [id], onDelete: SetNull)
   offer     Offer?    @relation(fields: [offerId], references: [id], onDelete: SetNull)
 
   @@index([importJobId])
   @@index([importJobId, status])
   @@index([importJobId, stage])
   @@index([offerId])
+  @@index([productId])
   @@index([externalItemId])
 }
 

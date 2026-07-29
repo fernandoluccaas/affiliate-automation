@@ -14,6 +14,7 @@ import {
   discoverCandidatesFromLeafCategories,
   generatePendingMercadoLivreAffiliateLinks,
   passesMinimumDiscount,
+  refreshMercadoLivreOffers,
 } from "./index";
 
 function catalogProduct(
@@ -178,6 +179,25 @@ function readyIngestResult(
     offerCreated: true,
     offerReused: false,
     offerUpdated: false,
+    ...overrides,
+  };
+}
+
+function refreshOffer(id: string, overrides: Record<string, unknown> = {}) {
+  return {
+    id: `offer-${id}`,
+    externalProductId: id,
+    affiliateUrl: `https://meli.la/${id.toLowerCase()}`,
+    affiliateLabel: "default-tag",
+    affiliateEligibility: "ELIGIBLE",
+    affiliateFailure: null,
+    trackingStrategy: "DIRECT_AFFILIATE_LINK",
+    sourceCategoryId: "MLB123",
+    bestSellerPosition: 1,
+    sourceHighlightId: id,
+    sourceHighlightType: "ITEM",
+    resolutionStrategy: "ITEM_DIRECT",
+    minimumScoreApplied: 70,
     ...overrides,
   };
 }
@@ -663,12 +683,14 @@ describe("MercadoLivre affiliate discovery enrichment", () => {
 
       return readyIngestResult(input.externalProductId);
     });
+    const emitOperationalMetric = vi.fn();
     const result = await new MercadoLivreDiscoveryService({
       database: database as never,
       createConnector: vi.fn().mockResolvedValue(marketplace),
       affiliateLinkService: { create: createLink as never },
       affiliateConcurrency: 99,
       decryptCredential: vi.fn().mockReturnValue("session=opaque"),
+      emitOperationalMetric,
       ingest: ingest as never,
       lock: vi.fn().mockResolvedValue(acquiredLock()),
     }).run(new Date("2026-07-28T12:00:00.000Z"), { force: true });
@@ -746,12 +768,35 @@ describe("MercadoLivre affiliate discovery enrichment", () => {
           totalResolved: 4,
           totalLinksGenerated: 2,
           totalReadyToPublish: 2,
-          totalPendingAffiliateLink: 1,
+          totalReadyForAffiliateLink: 1,
           totalIneligible: 1,
           totalCreated: 4,
           totalFailed: 0,
         }),
       }),
+    );
+    const emittedEvents = emitOperationalMetric.mock.calls.map(
+      ([event]) => event,
+    );
+    expect(emittedEvents).toEqual(
+      expect.arrayContaining([
+        "mercadolivre_import_created",
+        "mercadolivre_discovery_items_found",
+        "mercadolivre_discovery_items_resolved",
+        "mercadolivre_affiliate_link_generated",
+        "mercadolivre_affiliate_link_failed",
+        "mercadolivre_discovery_items_ineligible",
+        "mercadolivre_discovery_items_pending_link",
+        "mercadolivre_import_updated",
+      ]),
+    );
+    expect(
+      emitOperationalMetric.mock.calls.filter(
+        ([event]) => event === "mercadolivre_affiliate_link_generated",
+      ),
+    ).toHaveLength(2);
+    expect(JSON.stringify(emitOperationalMetric.mock.calls)).not.toContain(
+      "session=opaque",
     );
   });
 
@@ -809,11 +854,13 @@ describe("MercadoLivre affiliate discovery enrichment", () => {
             },
       );
     });
+    const emitOperationalMetric = vi.fn();
     const result = await new MercadoLivreDiscoveryService({
       database: database as never,
       createConnector: vi.fn().mockResolvedValue(marketplace),
       affiliateLinkService: { create: createLink },
       decryptCredential: vi.fn().mockReturnValue("session=opaque"),
+      emitOperationalMetric,
       ingest: ingest as never,
       lock: vi.fn().mockResolvedValue(acquiredLock()),
     }).run(new Date("2026-07-28T13:00:00.000Z"), { force: true });
@@ -845,6 +892,11 @@ describe("MercadoLivre affiliate discovery enrichment", () => {
     for (const [call] of database.marketplaceAccount.update.mock.calls) {
       expect(call.data).not.toHaveProperty("status");
     }
+    expect(
+      emitOperationalMetric.mock.calls.filter(
+        ([event]) => event === "mercadolivre_affiliate_session_expired",
+      ),
+    ).toHaveLength(1);
   });
 
   it("merges concurrent cookie rotations before encrypting the refreshed session", async () => {
@@ -1300,5 +1352,180 @@ describe("generatePendingMercadoLivreAffiliateLinks", () => {
         statusReason: "Substituida por uma versao mais recente desta oferta.",
       },
     });
+  });
+});
+
+describe("refreshMercadoLivreOffers", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("returns real counters, preserves affiliate URLs and isolates an offer failure", async () => {
+    const database = fakeDatabase();
+    database.offer.findMany.mockResolvedValue([
+      refreshOffer("MLBA"),
+      refreshOffer("MLBB", {
+        affiliateUrl: "https://meli.la/original-b",
+        minimumScoreApplied: 80,
+      }),
+      refreshOffer("MLBC"),
+      refreshOffer("MLBD"),
+    ]);
+    const marketplace = connector({
+      getItemsWithDiagnostics: vi.fn().mockResolvedValue({
+        candidates: ["MLBA", "MLBB", "MLBD"].map((id) => ({
+          ...offerCandidate(id),
+          affiliateUrl: "https://meli.la/connector-value-must-not-win",
+        })),
+        diagnostics: {
+          itemsFetched: 3,
+          priceApiFetched: 2,
+          priceFallbackUsed: 1,
+          priceUnavailable: 1,
+        },
+      }),
+    });
+    const sensitiveMarker = "refresh-sensitive-marker";
+    const unsafeMessage = `${["Cook", "ie"].join("")}: session=${sensitiveMarker}`;
+    const ingest = vi.fn(async (rawInput: unknown, _options?: unknown) => {
+      const input = rawInput as { externalProductId: string };
+
+      if (input.externalProductId === "MLBD") {
+        throw new Error(unsafeMessage);
+      }
+
+      if (input.externalProductId === "MLBA") {
+        return readyIngestResult("MLBA", {
+          productCreated: false,
+          offerCreated: false,
+          offerReused: true,
+          offerUpdated: true,
+        });
+      }
+
+      return readyIngestResult("MLBB", {
+        productCreated: false,
+        offerCreated: true,
+        offerReused: false,
+      });
+    });
+    const result = await refreshMercadoLivreOffers(
+      new Date("2026-07-28T18:00:00.000Z"),
+      {
+        database: database as never,
+        createConnector: vi.fn().mockResolvedValue(marketplace),
+        ingest: ingest as never,
+      },
+    );
+
+    expect(result).toMatchObject({
+      selected: 4,
+      refreshed: 2,
+      unchanged: 1,
+      newVersions: 1,
+      notFound: 1,
+      failed: 1,
+      affiliateUrlsPreserved: 2,
+      itemsFetched: 3,
+      priceApiFetched: 2,
+      priceFallbackUsed: 1,
+      priceUnavailable: 1,
+      failures: [
+        {
+          externalProductId: "MLBD",
+          errorMessage: "[REDACTED]",
+        },
+      ],
+    });
+    expect(ingest).toHaveBeenCalledTimes(3);
+    const inputByExternalId = new Map(
+      ingest.mock.calls.map(([input, options]) => [
+        (input as { externalProductId: string }).externalProductId,
+        { input, options },
+      ]),
+    );
+    expect(inputByExternalId.get("MLBA")).toMatchObject({
+      input: {
+        affiliateUrl: "https://meli.la/mlba",
+        affiliateFailure: null,
+        sourceCategoryId: "MLB123",
+      },
+      options: {
+        now: new Date("2026-07-28T18:00:00.000Z"),
+        minScore: 70,
+      },
+    });
+    expect(inputByExternalId.get("MLBB")).toMatchObject({
+      input: { affiliateUrl: "https://meli.la/original-b" },
+      options: { minScore: 80 },
+    });
+    expect(JSON.stringify(result)).not.toContain(sensitiveMarker);
+    expect(database.systemAlert.create).not.toHaveBeenCalled();
+    expect(database.automationRun.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "PARTIAL",
+          errorMessage: "Refresh completed with 1 offer failure(s).",
+          metrics: expect.objectContaining({
+            selected: 4,
+            refreshed: 2,
+            failed: 1,
+          }),
+        }),
+      }),
+    );
+  });
+
+  it("counts every unprocessed offer as failed and sanitizes a global connector failure", async () => {
+    const database = fakeDatabase();
+    database.offer.findMany.mockResolvedValue([
+      refreshOffer("MLBA"),
+      refreshOffer("MLBB"),
+    ]);
+    const sensitiveMarker = "global-refresh-sensitive";
+    const unsafeMessage = `${["Set", "-Cookie"].join("")}: sid=${sensitiveMarker}`;
+    const result = await refreshMercadoLivreOffers(
+      new Date("2026-07-28T19:00:00.000Z"),
+      {
+        database: database as never,
+        createConnector: vi.fn().mockRejectedValue(new Error(unsafeMessage)),
+      },
+    );
+
+    expect(result).toMatchObject({
+      selected: 2,
+      refreshed: 0,
+      notFound: 0,
+      failed: 2,
+      failures: [
+        { externalProductId: "MLBA", errorMessage: "[REDACTED]" },
+        { externalProductId: "MLBB", errorMessage: "[REDACTED]" },
+      ],
+    });
+    expect(JSON.stringify(result)).not.toContain(sensitiveMarker);
+    expect(database.marketplaceAccount.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ lastError: "[REDACTED]" }),
+      }),
+    );
+    expect(database.systemAlert.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          source: "mercado-livre.refresh",
+          metadata: {
+            stage: "REFRESH",
+            status: "FAILED",
+            errorCode: "MELI_API_UNAVAILABLE",
+          },
+        }),
+      }),
+    );
+    expect(database.automationRun.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "FAILED",
+          metrics: expect.objectContaining({ selected: 2, failed: 2 }),
+          errorMessage: "[REDACTED]",
+        }),
+      }),
+    );
   });
 });
