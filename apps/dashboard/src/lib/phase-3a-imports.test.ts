@@ -133,9 +133,19 @@ describe("phase 3a imports", () => {
     diagnoseMercadoLivreProduct.mockResolvedValueOnce({
       productId: "MLB62081577",
       productFound: true,
+      productStatus: "active",
+      productName: "Smartphone de catalogo",
+      productPermalink:
+        "https://www.mercadolivre.com.br/smartphone/p/MLB62081577",
+      productPictureCount: 3,
       buyBoxWinnerPresent: false,
       buyBoxWinnerItemId: null,
       selectedItemId: "MLB1234567890",
+      selectedSellerId: "seller-1",
+      selectedPrice: 1999,
+      selectedFreeShipping: true,
+      itemHydrationAvailable: true,
+      pdpFallbackEligible: true,
       diagnostics: {
         productItemsHttpStatus: 200,
         productItemsTotal: 3,
@@ -178,6 +188,8 @@ describe("phase 3a imports", () => {
     expect(query.get("message")).toBe("product-diagnosed");
     expect(query.get("productItemsHydrated")).toBe("2");
     expect(query.get("selectedItemId")).toBe("MLB1234567890");
+    expect(query.get("productStatus")).toBe("active");
+    expect(query.get("pdpFallbackEligible")).toBe("true");
     expect(query.get("rejectionReasons")).toBe(
       JSON.stringify({ PRODUCT_ITEM_INACTIVE: 1 }),
     );

@@ -1454,9 +1454,18 @@ export function selectBestMercadoLivreProductItem(
 export type MercadoLivreProductProbeResult = {
   productId: string;
   productFound: boolean;
+  productStatus: string | null;
+  productName: string | null;
+  productPermalink: string | null;
+  productPictureCount: number;
   buyBoxWinnerPresent: boolean;
   buyBoxWinnerItemId: string | null;
   selectedItemId: string | null;
+  selectedSellerId: string | null;
+  selectedPrice: number | null;
+  selectedFreeShipping: boolean | null;
+  itemHydrationAvailable: boolean;
+  pdpFallbackEligible: boolean;
   diagnostics: Awaited<
     ReturnType<MarketplaceConnector["getProductItems"]>
   >["diagnostics"];
@@ -1482,13 +1491,45 @@ export async function diagnoseMercadoLivreProduct(
     productItems.candidates,
     summariesById,
   );
+  const selectedSummary = selectBestMercadoLivreCatalogProductSummary(
+    productItems.summaries,
+  );
+  const safePermalink =
+    product && isSafeMercadoLivreProductPermalink(product.permalink)
+      ? product.permalink
+      : null;
+  const pdpCandidate =
+    product && selectedSummary
+      ? catalogProductOfferCandidate(
+          {
+            id: productId,
+            position: 1,
+            type: "PRODUCT",
+            rawType: "PRODUCT",
+            categoryId: selectedSummary.categoryId ?? "",
+          },
+          product,
+          selectedSummary,
+        )
+      : null;
 
   return {
     productId,
     productFound: product !== null,
+    productStatus: product?.status ?? null,
+    productName: product ? (product.name ?? product.familyName) : null,
+    productPermalink: safePermalink,
+    productPictureCount: product?.pictureUrls.length ?? 0,
     buyBoxWinnerPresent: Boolean(product?.buyBoxWinnerItemId),
     buyBoxWinnerItemId: product?.buyBoxWinnerItemId ?? null,
-    selectedItemId: selected?.externalProductId ?? null,
+    selectedItemId:
+      selected?.externalProductId ?? selectedSummary?.itemId ?? null,
+    selectedSellerId: selected?.sellerId ?? selectedSummary?.sellerId ?? null,
+    selectedPrice: selected?.currentPrice ?? selectedSummary?.price ?? null,
+    selectedFreeShipping:
+      selected?.freeShipping ?? selectedSummary?.freeShipping ?? null,
+    itemHydrationAvailable: productItems.diagnostics.productItemsHydrated > 0,
+    pdpFallbackEligible: Boolean(pdpCandidate),
     diagnostics: productItems.diagnostics,
   };
 }

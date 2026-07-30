@@ -73,6 +73,14 @@ otherwise eligible catalog PDP. The selected ITEM and seller are retained in
 the import-job metadata, while offer fingerprinting remains based on material
 price, link, shipping and stock facts rather than seller/ranking churn.
 
+The PRODUCT diagnostic shows the sanitized PDP status/name, safe permalink,
+picture count, selected summary facts, ITEM hydration availability and PDP
+fallback eligibility. Its optional affiliate test submits only the exact safe
+PDP permalink to the existing server-side provider. It does not ingest data or
+create Product, Offer or ImportJob records, and its browser-visible result is
+limited to PRODUCT ID, endpoint mode, result host and whether the result uses
+`https://meli.la/`.
+
 `bestSellersEnabled=true` enables the highlights source. When it is false, discovery returns `DISCOVERY_SOURCE_DISABLED` and does not call highlights. No automatic category-search fallback exists yet.
 
 The manual category-search probe is available only for a validated leaf category and remains `EXPERIMENTAL`. It reports the logical endpoint and parameters, authentication mode, HTTP status, total results, usable item IDs and up to five ID/title samples. Non-2xx responses preserve only the sanitized Mercado Livre fields `error`, `code`, `message`, `cause` and `blocked_by`. Authorization headers, access tokens, refresh tokens and client secrets are never included in the result or logs.

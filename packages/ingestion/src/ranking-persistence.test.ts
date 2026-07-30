@@ -181,6 +181,30 @@ function rankedOffer(
   };
 }
 
+function catalogPdpOffer(currentPrice: number, sellerId = "seller-1") {
+  return {
+    marketplace: "MERCADO_LIVRE",
+    externalProductId: "MLB62081577",
+    title: "Smartphone de catalogo",
+    category: "MLB1055",
+    sourceCategoryId: "MLB1055",
+    bestSellerPosition: 1,
+    sourceHighlightId: "MLB62081577",
+    sourceHighlightType: "PRODUCT",
+    resolutionStrategy: "PRODUCT_CATALOG_PDP_FALLBACK",
+    productUrl: "https://www.mercadolivre.com.br/smartphone/p/MLB62081577",
+    affiliateUrl: "https://meli.la/catalog-pdp",
+    affiliateEligibility: "ELIGIBLE",
+    affiliateFailure: null,
+    affiliateLabel: "default-tag",
+    sellerId,
+    currentPrice,
+    trackingStrategy: "DIRECT_AFFILIATE_LINK",
+    shippingStatus: "FREE",
+    stockStatus: "UNKNOWN",
+  };
+}
+
 async function ingest(tx: FakeTransaction, input: unknown) {
   return ingestOfferInTransaction(
     tx as unknown as PrismaTypes.TransactionClient,
@@ -260,5 +284,41 @@ describe("ranking and affiliate failure persistence", () => {
     expect(tx.offers).toHaveLength(1);
     expect(historical.title).toBe("Titulo historico");
     expect(historical.bestSellerPosition).toBe(9);
+  });
+
+  it("keeps catalog PRODUCT identity idempotent when the selected seller changes", async () => {
+    const tx = new FakeTransaction();
+    const first = await ingest(tx, catalogPdpOffer(1429, "seller-1"));
+    const second = await ingest(tx, catalogPdpOffer(1429, "seller-2"));
+
+    expect(first).toMatchObject({
+      productCreated: true,
+      offerCreated: true,
+      version: 1,
+    });
+    expect(second).toMatchObject({
+      productCreated: false,
+      offerCreated: false,
+      offerReused: true,
+      version: 1,
+    });
+    expect(tx.products).toHaveLength(1);
+    expect(tx.offers).toHaveLength(1);
+  });
+
+  it("creates a new catalog offer version when the summary price changes", async () => {
+    const tx = new FakeTransaction();
+    const first = await ingest(tx, catalogPdpOffer(1429));
+    const second = await ingest(tx, catalogPdpOffer(1399));
+
+    expect(first.version).toBe(1);
+    expect(second).toMatchObject({
+      productCreated: false,
+      offerCreated: true,
+      offerReused: false,
+      version: 2,
+    });
+    expect(tx.products).toHaveLength(1);
+    expect(tx.offers).toHaveLength(2);
   });
 });

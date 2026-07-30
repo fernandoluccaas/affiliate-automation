@@ -4,6 +4,10 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
 import {
+  createMercadoLivreConnector,
+  isSafeMercadoLivreProductPermalink,
+} from "@affiliate/marketplace-connectors";
+import {
   generatePendingMercadoLivreAffiliateLinks,
   type GeneratePendingMercadoLivreAffiliateLinksResult,
 } from "@affiliate/marketplace-discovery";
@@ -48,6 +52,13 @@ const testLinkSchema = z.object({
     (value) => (value === "" || value === null ? undefined : value),
     z.string().trim().min(1).max(200).optional(),
   ),
+});
+
+const productPdpSchema = z.object({
+  productId: z
+    .string()
+    .trim()
+    .regex(/^MLB\d+$/i),
 });
 
 async function requireAffiliateSessionManager() {
@@ -169,6 +180,72 @@ export async function generateMercadoLivreAffiliateTestLinkAction(
     generatedAffiliateUrl: result.affiliateUrl,
     affiliateEndpointMode: result.provider ?? "stripe_v2",
     generatedAt: result.generatedAt?.toISOString() ?? new Date().toISOString(),
+  });
+  redirect(`/integracoes/mercado-livre?${query.toString()}`);
+}
+
+export async function testMercadoLivreProductPdpAffiliateLinkAction(
+  formData: FormData,
+) {
+  await requireAffiliateSessionManager();
+  const parsed = productPdpSchema.safeParse({
+    productId: formData.get("productId"),
+  });
+
+  if (!parsed.success) {
+    redirect("/integracoes/mercado-livre?message=product-diagnostic-invalid");
+  }
+
+  const productId = parsed.data.productId.toUpperCase();
+  let productUrl: string | null = null;
+
+  try {
+    const connector = await createMercadoLivreConnector();
+    const product = await connector.getProduct(productId);
+
+    if (product && isSafeMercadoLivreProductPermalink(product.permalink)) {
+      productUrl = product.permalink;
+    }
+  } catch {
+    redirect(
+      `/integracoes/mercado-livre?message=product-pdp-affiliate-error&productId=${encodeURIComponent(productId)}`,
+    );
+  }
+
+  if (!productUrl) {
+    redirect(
+      `/integracoes/mercado-livre?message=product-pdp-permalink-unavailable&productId=${encodeURIComponent(productId)}`,
+    );
+  }
+
+  const result = await safelyRunAffiliateOperation(() =>
+    generateMercadoLivreAffiliateTestLink({ productUrl }),
+  );
+
+  if (!result.ok || !result.affiliateUrl) {
+    redirect(
+      `/integracoes/mercado-livre?message=product-pdp-affiliate-unsupported&productId=${encodeURIComponent(productId)}`,
+    );
+  }
+
+  let affiliateHost = "";
+  let startsWithMeliLa = false;
+
+  try {
+    affiliateHost = new URL(result.affiliateUrl).hostname;
+    startsWithMeliLa = result.affiliateUrl.startsWith("https://meli.la/");
+  } catch {
+    redirect(
+      `/integracoes/mercado-livre?message=product-pdp-affiliate-unsupported&productId=${encodeURIComponent(productId)}`,
+    );
+  }
+
+  const query = new URLSearchParams({
+    message: "product-pdp-affiliate-tested",
+    productId,
+    pdpAffiliateEndpointMode: result.provider ?? "stripe_v2",
+    pdpAffiliateHost: affiliateHost,
+    pdpAffiliateMeliLa: String(startsWithMeliLa),
   });
   redirect(`/integracoes/mercado-livre?${query.toString()}`);
 }

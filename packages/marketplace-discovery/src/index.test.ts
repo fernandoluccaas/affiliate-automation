@@ -324,8 +324,16 @@ describe("diagnoseMercadoLivreProduct", () => {
     ).resolves.toMatchObject({
       productId: "MLB62081577",
       productFound: true,
+      productStatus: "active",
+      productName: null,
+      productPermalink: null,
+      productPictureCount: 0,
       buyBoxWinnerPresent: false,
       selectedItemId: "MLB2222222222",
+      selectedSellerId: null,
+      selectedPrice: 110,
+      itemHydrationAvailable: true,
+      pdpFallbackEligible: false,
       diagnostics: {
         productItemsResultsCount: 2,
         productItemsHydrated: 2,
@@ -1192,6 +1200,86 @@ describe("MercadoLivreDiscoveryService", () => {
         catalogProductPdpAffiliateRequested: 1,
         catalogProductPdpAffiliateGenerated: 1,
         catalogProductPdpAffiliateFailed: 0,
+      },
+    });
+  });
+
+  it("keeps an eligible catalog PRODUCT pending when PDP link generation fails", async () => {
+    const database = fakeDatabase();
+    const marketplace = connector({
+      getBestSellers: vi.fn().mockResolvedValue([
+        {
+          id: "MLB62081577",
+          position: 1,
+          type: "PRODUCT",
+          rawType: "PRODUCT",
+          categoryId: "MLB1055",
+        },
+      ]),
+      getProduct: vi.fn().mockResolvedValue(
+        catalogProduct({
+          id: "MLB62081577",
+          name: "Smartphone de catalogo",
+          permalink: "https://www.mercadolivre.com.br/smartphone/p/MLB62081577",
+          pictureUrls: ["https://http2.mlstatic.com/picture.jpg"],
+        }),
+      ),
+      getProductItems: vi.fn().mockResolvedValue(
+        productItemsResolution(
+          [
+            {
+              itemId: "MLB4827891325",
+              condition: "new",
+              price: 1429,
+            },
+          ],
+          [],
+          {
+            productItemsHydrated: 0,
+            productItemsUsable: 0,
+            rejectionReasons: { PRODUCT_ITEM_DETAIL_HTTP_ERROR: 1 },
+          },
+        ),
+      ),
+    });
+    const ingest = vi.fn().mockResolvedValue(
+      readyIngestResult("MLB62081577", {
+        ok: false,
+        status: "READY_FOR_AFFILIATE_LINK",
+        statusReason: "pending",
+      }),
+    );
+
+    const result = await new MercadoLivreDiscoveryService({
+      database: database as never,
+      createConnector: vi.fn().mockResolvedValue(marketplace),
+      affiliateLinkProvider: {
+        generate: vi.fn().mockResolvedValue({
+          status: "MANUAL_REQUIRED",
+          reason: "PDP rejected by provider",
+        }),
+      },
+      ingest,
+      lock: vi.fn().mockResolvedValue(acquiredLock()),
+    }).run(new Date("2026-07-30T12:00:00.000Z"), { force: true });
+
+    expect(ingest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        externalProductId: "MLB62081577",
+        affiliateUrl: undefined,
+        affiliateFailure: expect.objectContaining({
+          code: "PRODUCT_PDP_AFFILIATE_LINK_UNSUPPORTED",
+        }),
+      }),
+      expect.anything(),
+    );
+    expect(result).toMatchObject({
+      status: "SUCCEEDED",
+      metrics: {
+        readyForAffiliateLink: 1,
+        catalogProductPdpAffiliateRequested: 1,
+        catalogProductPdpAffiliateGenerated: 0,
+        catalogProductPdpAffiliateFailed: 1,
       },
     });
   });

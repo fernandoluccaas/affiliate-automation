@@ -30,6 +30,7 @@ import {
   generatePendingMercadoLivreAffiliateLinksAction,
   saveMercadoLivreAffiliateSessionAction,
   selectMercadoLivreAffiliateTagAction,
+  testMercadoLivreProductPdpAffiliateLinkAction,
   testMercadoLivreAffiliateSessionAction,
 } from "@/lib/mercadolivre-affiliate-actions";
 import { MercadoLivreImportButton } from "./mercado-livre-import-button";
@@ -74,6 +75,14 @@ function messageText(message?: string | string[]) {
     return "Informe um PRODUCT ID valido no formato MLB seguido de numeros.";
   if (value === "product-diagnostic-error")
     return "Nao foi possivel diagnosticar o PRODUCT na API oficial.";
+  if (value === "product-pdp-affiliate-tested")
+    return "O Portal de Afiliados aceitou o permalink oficial da PDP.";
+  if (value === "product-pdp-permalink-unavailable")
+    return "A API oficial nao forneceu um permalink PDP HTTPS; nenhum link foi solicitado.";
+  if (value === "product-pdp-affiliate-unsupported")
+    return "O Portal de Afiliados nao aceitou o permalink oficial da PDP.";
+  if (value === "product-pdp-affiliate-error")
+    return "Nao foi possivel testar o link afiliado da PDP.";
   if (value === "affiliate-session-saved")
     return "Sessão de afiliado salva e validada.";
   if (value === "affiliate-session-tested")
@@ -549,6 +558,8 @@ export default async function MercadoLivreIntegrationPage({
     single(params?.message) === "category-search-tested" ? params : null;
   const productProbeResult =
     single(params?.message) === "product-diagnosed" ? params : null;
+  const productPdpAffiliateResult =
+    single(params?.message) === "product-pdp-affiliate-tested" ? params : null;
   const productProbeReasons = productProbeRejectionReasons(
     productProbeResult?.rejectionReasons,
   );
@@ -1036,6 +1047,27 @@ export default async function MercadoLivreIntegrationPage({
                     }
                   />
                   <Result
+                    label="Product status"
+                    value={single(productProbeResult.productStatus) || "-"}
+                  />
+                  <Result
+                    label="Product name"
+                    value={single(productProbeResult.productName) || "-"}
+                  />
+                  <Result
+                    label="Product permalink"
+                    value={
+                      single(productProbeResult.productPermalink) ||
+                      "indisponivel"
+                    }
+                  />
+                  <Result
+                    label="Pictures"
+                    value={
+                      single(productProbeResult.productPictureCount) ?? "0"
+                    }
+                  />
+                  <Result
                     label="buy_box_winner"
                     value={
                       single(productProbeResult.buyBoxWinnerPresent) === "true"
@@ -1089,7 +1121,67 @@ export default async function MercadoLivreIntegrationPage({
                     label="Item selecionado"
                     value={single(productProbeResult.selectedItemId) || "-"}
                   />
+                  <Result
+                    label="Selected seller ID"
+                    value={single(productProbeResult.selectedSellerId) || "-"}
+                  />
+                  <Result
+                    label="Selected price"
+                    value={single(productProbeResult.selectedPrice) || "-"}
+                  />
+                  <Result
+                    label="Selected free shipping"
+                    value={
+                      single(productProbeResult.selectedFreeShipping) === ""
+                        ? "desconhecido"
+                        : single(productProbeResult.selectedFreeShipping) ===
+                            "true"
+                          ? "sim"
+                          : "nao"
+                    }
+                  />
+                  <Result
+                    label="Item hydration available"
+                    value={
+                      single(productProbeResult.itemHydrationAvailable) ===
+                      "true"
+                        ? "sim"
+                        : "nao"
+                    }
+                  />
+                  <Result
+                    label="PDP fallback eligible"
+                    value={
+                      single(productProbeResult.pdpFallbackEligible) === "true"
+                        ? "sim"
+                        : "nao"
+                    }
+                  />
                 </dl>
+
+                <form
+                  action={testMercadoLivreProductPdpAffiliateLinkAction}
+                  className="grid gap-2"
+                >
+                  <input
+                    name="productId"
+                    type="hidden"
+                    value={single(productProbeResult.productId) ?? ""}
+                  />
+                  <Button
+                    type="submit"
+                    variant="outline"
+                    disabled={
+                      single(productProbeResult.pdpFallbackEligible) !== "true"
+                    }
+                  >
+                    Testar link afiliado da PDP
+                  </Button>
+                  <p className="text-xs text-[var(--muted-foreground)]">
+                    Usa somente o permalink retornado pela API. Nao cria
+                    Product, Offer ou ImportJob.
+                  </p>
+                </form>
 
                 <div className="grid gap-2">
                   <div className="font-medium">Motivos de descarte</div>
@@ -1156,6 +1248,38 @@ export default async function MercadoLivreIntegrationPage({
                   )}
                 </div>
               </div>
+            ) : null}
+
+            {productPdpAffiliateResult ? (
+              <dl className="grid gap-2 rounded-md border bg-[var(--background)] p-3">
+                <Result
+                  label="PRODUCT"
+                  value={single(productPdpAffiliateResult.productId) ?? "-"}
+                />
+                <Result
+                  label="Endpoint mode"
+                  value={
+                    single(
+                      productPdpAffiliateResult.pdpAffiliateEndpointMode,
+                    ) ?? "-"
+                  }
+                />
+                <Result
+                  label="Host do resultado"
+                  value={
+                    single(productPdpAffiliateResult.pdpAffiliateHost) ?? "-"
+                  }
+                />
+                <Result
+                  label="Comeca com https://meli.la/"
+                  value={
+                    single(productPdpAffiliateResult.pdpAffiliateMeliLa) ===
+                    "true"
+                      ? "sim"
+                      : "nao"
+                  }
+                />
+              </dl>
             ) : null}
           </CardContent>
         </Card>

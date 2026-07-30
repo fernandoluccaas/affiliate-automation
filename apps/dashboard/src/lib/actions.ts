@@ -1020,6 +1020,10 @@ export async function diagnoseMercadoLivreProductAction(formData: FormData) {
       message: "product-diagnosed",
       productId: result.productId,
       productFound: String(result.productFound),
+      productStatus: result.productStatus ?? "",
+      productName: result.productName ?? "",
+      productPermalink: result.productPermalink ?? "",
+      productPictureCount: String(result.productPictureCount),
       buyBoxWinnerPresent: String(result.buyBoxWinnerPresent),
       buyBoxWinnerItemId: result.buyBoxWinnerItemId ?? "",
       productItemsHttpStatus:
@@ -1034,6 +1038,14 @@ export async function diagnoseMercadoLivreProductAction(formData: FormData) {
       productItemsHydrated: String(diagnostics.productItemsHydrated),
       productItemsUsable: String(diagnostics.productItemsUsable),
       selectedItemId: result.selectedItemId ?? "",
+      selectedSellerId: result.selectedSellerId ?? "",
+      selectedPrice: result.selectedPrice?.toString() ?? "",
+      selectedFreeShipping:
+        result.selectedFreeShipping === null
+          ? ""
+          : String(result.selectedFreeShipping),
+      itemHydrationAvailable: String(result.itemHydrationAvailable),
+      pdpFallbackEligible: String(result.pdpFallbackEligible),
       rejectionReasons: JSON.stringify(diagnostics.rejectionReasons),
       diagnosticSamples: JSON.stringify(diagnostics.samples),
     });
