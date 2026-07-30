@@ -47,7 +47,7 @@ export type WorkerOperationalStatus = {
     Record<
       WorkerComponent,
       {
-        status: "SUCCEEDED" | "FAILED" | "PAUSED";
+        status: "SUCCEEDED" | "PARTIAL" | "FAILED" | "PAUSED";
         at: string;
         durationMs: number;
       }
@@ -75,6 +75,7 @@ export type ContinuousWorkerOptions = {
   now?: () => Date;
   sleep?: (durationMs: number, signal: AbortSignal) => Promise<void>;
   processId?: number;
+  logger?: (entry: Record<string, unknown>) => void;
 };
 
 function positiveMinutes(value: string | undefined, fallback: number) {
@@ -244,6 +245,11 @@ export async function runContinuousWorker(options: ContinuousWorkerOptions) {
   const heartbeatIntervalMs =
     options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
   const startedAt = now();
+  const processId = options.processId ?? process.pid;
+  const runId = `continuous:${startedAt.toISOString()}:${processId}`;
+  const logger =
+    options.logger ??
+    ((entry: Record<string, unknown>) => console.log(JSON.stringify(entry)));
   const nextRuns = Object.fromEntries(
     COMPONENTS.map((component) => [component, startedAt]),
   ) as Record<WorkerComponent, Date>;
@@ -260,7 +266,7 @@ export async function runContinuousWorker(options: ContinuousWorkerOptions) {
     startedAt: startedAt.toISOString(),
     heartbeatAt: at.toISOString(),
     ...(state === "OFFLINE" ? { stoppedAt: at.toISOString() } : {}),
-    processId: options.processId ?? process.pid,
+    processId,
     nextRuns: Object.fromEntries(
       COMPONENTS.map((component) => [
         component,
@@ -287,10 +293,22 @@ export async function runContinuousWorker(options: ContinuousWorkerOptions) {
           at: tickAt.toISOString(),
           durationMs: 0,
         };
+        logger({
+          timestamp: tickAt.toISOString(),
+          component,
+          runId,
+          status: "PAUSED",
+          durationMs: 0,
+        });
       } else {
+        const activeHeartbeat = setInterval(() => {
+          void persistStatus(status("ONLINE", now())).catch(() => undefined);
+        }, heartbeatIntervalMs);
+
         try {
           const result = await options.dependencies[component](tickAt);
           mergeOperationalMetrics(metrics, result);
+          let componentStatus: "SUCCEEDED" | "PARTIAL" | "FAILED" = "SUCCEEDED";
           if (component === "discovery") {
             metrics.discoveryRuns += 1;
             const discoveryStatus =
@@ -299,17 +317,33 @@ export async function runContinuousWorker(options: ContinuousWorkerOptions) {
                 : null;
             if (discoveryStatus === "PARTIAL") {
               metrics.discoveryPartial += 1;
+              componentStatus = "PARTIAL";
             } else if (discoveryStatus === "FAILED") {
               metrics.discoveryFailed += 1;
+              componentStatus = "FAILED";
             } else {
               metrics.discoverySucceeded += 1;
             }
           }
           lastRuns[component] = {
-            status: "SUCCEEDED",
+            status: componentStatus,
             at: tickAt.toISOString(),
             durationMs: Math.max(0, Date.now() - componentStartedAt),
           };
+          if (componentStatus === "FAILED") {
+            lastError = {
+              component,
+              at: tickAt.toISOString(),
+              code: "WORKER_COMPONENT_FAILED",
+            };
+          }
+          logger({
+            timestamp: tickAt.toISOString(),
+            component,
+            runId,
+            status: componentStatus,
+            durationMs: lastRuns[component].durationMs,
+          });
         } catch {
           if (component === "discovery") {
             metrics.discoveryRuns += 1;
@@ -325,6 +359,16 @@ export async function runContinuousWorker(options: ContinuousWorkerOptions) {
             at: tickAt.toISOString(),
             code: "WORKER_COMPONENT_FAILED",
           };
+          logger({
+            timestamp: tickAt.toISOString(),
+            component,
+            runId,
+            status: "FAILED",
+            durationMs: lastRuns[component].durationMs,
+            errorCode: "WORKER_COMPONENT_FAILED",
+          });
+        } finally {
+          clearInterval(activeHeartbeat);
         }
       }
 

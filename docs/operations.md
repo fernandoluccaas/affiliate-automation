@@ -99,6 +99,11 @@ SIGINT and SIGTERM stop admission of new components, wait for the active
 component to settle, persist an `OFFLINE` heartbeat and only then disconnect
 Prisma.
 
+Long-running components refresh the heartbeat while their operation is active.
+Each component emits one bounded JSON event with timestamp, component, run ID,
+status and duration. Failure events use a fixed error code and never serialize
+the thrown error, cookies, tokens, headers or session values.
+
 ## Publication distribution
 
 Each publication cadence schedules at most one eligible Offer per Channel and

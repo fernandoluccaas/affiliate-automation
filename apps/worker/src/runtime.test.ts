@@ -141,6 +141,7 @@ describe("runContinuousWorker", () => {
         }
       },
       processId: 123,
+      logger: vi.fn(),
     });
 
     expect(jobs.discovery).toHaveBeenCalledTimes(2);
@@ -184,6 +185,7 @@ describe("runContinuousWorker", () => {
       },
       now: () => new Date("2026-07-30T12:00:00.000Z"),
       sleep: async () => controller.abort(),
+      logger: vi.fn(),
     });
 
     expect(jobs.discovery).not.toHaveBeenCalled();
@@ -208,6 +210,7 @@ describe("runContinuousWorker", () => {
       signal: controller.signal,
       now: () => new Date("2026-07-30T12:00:00.000Z"),
       sleep: async () => undefined,
+      logger: vi.fn(),
     });
 
     expect(completed).toBe(true);
@@ -219,6 +222,7 @@ describe("runContinuousWorker", () => {
     const { upsert } = await mockSettings();
     const controller = new AbortController();
     const jobs = dependencies();
+    const logger = vi.fn();
     jobs.discovery = vi
       .fn()
       .mockRejectedValue(new Error("Cookie: secret-session"));
@@ -228,12 +232,22 @@ describe("runContinuousWorker", () => {
       signal: controller.signal,
       now: () => new Date("2026-07-30T12:00:00.000Z"),
       sleep: async () => controller.abort(),
+      logger,
     });
 
     expect(jobs.publication).toHaveBeenCalled();
     expect(JSON.stringify(upsert.mock.calls)).not.toContain("secret-session");
     expect(JSON.stringify(upsert.mock.calls)).toContain(
       "WORKER_COMPONENT_FAILED",
+    );
+    expect(JSON.stringify(logger.mock.calls)).not.toContain("secret-session");
+    expect(logger).toHaveBeenCalledWith(
+      expect.objectContaining({
+        component: "discovery",
+        status: "FAILED",
+        errorCode: "WORKER_COMPONENT_FAILED",
+        durationMs: expect.any(Number),
+      }),
     );
   });
 });
