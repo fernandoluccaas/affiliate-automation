@@ -90,6 +90,34 @@ successful canonical flow remains `SUCCEEDED` when ITEM detail hydration alone
 returns 401/403. ImportJobItem metadata records the URL source, resolution
 strategy, selected commercial ITEM and seller, and affiliate-link status.
 
+Periodic refresh is source-aware and never infers identity type from the
+`MLB`-plus-digits shape. Persisted `sourceHighlightType` and
+`resolutionStrategy` select one of three paths:
+
+- ITEM-backed strategies continue through official ITEM multiget and Price API;
+- `PRODUCT_CATALOG_CANONICAL_PDP` and catalog-PDP fallback strategies call
+  `GET /products/{PRODUCT_ID}` and
+  `GET /products/{PRODUCT_ID}/items`, then reuse the same deterministic
+  commercial-summary selector as discovery;
+- `USER_PRODUCT_ACTIVE_ITEM` keeps the resolved active ITEM identity and uses
+  the ITEM refresh path while retaining separate metrics.
+
+For a canonical catalog PRODUCT, the stable URL remains
+`https://www.mercadolivre.com.br/p/{PRODUCT_ID}` even if the current product
+response contains a permalink. ITEM detail is optional enrichment: 401/403
+detail evidence increments `detailEnrichmentUnavailable`, while a valid
+summary price can complete the refresh and increments `priceFallbackUsed`.
+Existing valid `affiliateUrl` values are passed unchanged into ingestion and
+are not regenerated. A changed commercial fingerprint creates a new Offer
+version; an unchanged fingerprint reuses the current version.
+
+Refresh metrics distinguish selected and refreshed ITEM, catalog PRODUCT and
+USER_PRODUCT identities, true not-found responses, optional detail failures,
+price sources, preserved affiliate links, sanitized skip reasons and sanitized
+operational error reasons. If every selected identity fails operationally the
+AutomationRun is `FAILED`; mixed success is `PARTIAL`. Verified not-found
+responses remain a valid completed outcome and are reported separately.
+
 `bestSellersEnabled=true` enables the highlights source. When it is false, discovery returns `DISCOVERY_SOURCE_DISABLED` and does not call highlights. No automatic category-search fallback exists yet.
 
 The manual category-search probe is available only for a validated leaf category and remains `EXPERIMENTAL`. It reports the logical endpoint and parameters, authentication mode, HTTP status, total results, usable item IDs and up to five ID/title samples. Non-2xx responses preserve only the sanitized Mercado Livre fields `error`, `code`, `message`, `cause` and `blocked_by`. Authorization headers, access tokens, refresh tokens and client secrets are never included in the result or logs.

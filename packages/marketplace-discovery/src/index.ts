@@ -3494,7 +3494,14 @@ export type MercadoLivreJobMetrics = {
   skipped: number;
   skipReasons: Record<string, number>;
   selected: number;
+  itemBackedSelected: number;
+  catalogProductSelected: number;
+  userProductSelected: number;
   refreshed: number;
+  itemRefreshed: number;
+  catalogProductRefreshed: number;
+  userProductRefreshed: number;
+  detailEnrichmentUnavailable: number;
   unchanged: number;
   newVersions: number;
   notFound: number;
@@ -3503,6 +3510,7 @@ export type MercadoLivreJobMetrics = {
   priceApiFetched: number;
   priceFallbackUsed: number;
   priceUnavailable: number;
+  errorReasons: Record<string, number>;
   failures: Array<{
     externalProductId: string;
     errorMessage: string;
@@ -3521,7 +3529,14 @@ function emptyJobMetrics(): MercadoLivreJobMetrics {
     skipped: 0,
     skipReasons: {},
     selected: 0,
+    itemBackedSelected: 0,
+    catalogProductSelected: 0,
+    userProductSelected: 0,
     refreshed: 0,
+    itemRefreshed: 0,
+    catalogProductRefreshed: 0,
+    userProductRefreshed: 0,
+    detailEnrichmentUnavailable: 0,
     unchanged: 0,
     newVersions: 0,
     notFound: 0,
@@ -3530,8 +3545,59 @@ function emptyJobMetrics(): MercadoLivreJobMetrics {
     priceApiFetched: 0,
     priceFallbackUsed: 0,
     priceUnavailable: 0,
+    errorReasons: {},
     failures: [],
   };
+}
+
+export type MercadoLivreRefreshStrategy =
+  | "ITEM"
+  | "CATALOG_PRODUCT"
+  | "USER_PRODUCT";
+
+export function resolveMercadoLivreRefreshStrategy(input: {
+  sourceHighlightType: string | null | undefined;
+  resolutionStrategy: string | null | undefined;
+}): MercadoLivreRefreshStrategy {
+  if (
+    input.resolutionStrategy === "PRODUCT_CATALOG_CANONICAL_PDP" ||
+    input.resolutionStrategy === "PRODUCT_CATALOG_PDP_FALLBACK"
+  ) {
+    return "CATALOG_PRODUCT";
+  }
+
+  if (
+    input.resolutionStrategy === "USER_PRODUCT_ACTIVE_ITEM" ||
+    input.sourceHighlightType === "USER_PRODUCT"
+  ) {
+    return "USER_PRODUCT";
+  }
+
+  return "ITEM";
+}
+
+function incrementMetricReason(
+  reasons: Record<string, number>,
+  reason: string,
+) {
+  reasons[reason] = (reasons[reason] ?? 0) + 1;
+}
+
+function detailEnrichmentIsUnavailable(
+  diagnostics: Awaited<
+    ReturnType<MarketplaceConnector["getProductItems"]>
+  >["diagnostics"],
+) {
+  const detailFailureCount =
+    (diagnostics.rejectionReasons.PRODUCT_ITEM_DETAIL_HTTP_ERROR ?? 0) +
+    (diagnostics.rejectionReasons.PRODUCT_ITEM_DETAIL_NOT_FOUND ?? 0) +
+    (diagnostics.rejectionReasons.PRODUCT_ITEM_SCHEMA_MISMATCH ?? 0);
+
+  return (
+    diagnostics.productItemsUniqueIds > 0 &&
+    diagnostics.productItemsHydrated === 0 &&
+    detailFailureCount >= diagnostics.productItemsUniqueIds
+  );
 }
 
 type RefreshMercadoLivreOffersDependencies = {
@@ -3582,8 +3648,29 @@ export async function refreshMercadoLivreOffers(
 
   try {
     const connector = await dependencies.createConnector();
+    const refreshStrategyByOfferId = new Map(
+      offers.map((offer) => [
+        offer.id,
+        resolveMercadoLivreRefreshStrategy({
+          sourceHighlightType: offer.sourceHighlightType,
+          resolutionStrategy: offer.resolutionStrategy,
+        }),
+      ]),
+    );
+    const itemBackedOffers = offers.filter(
+      (offer) => refreshStrategyByOfferId.get(offer.id) !== "CATALOG_PRODUCT",
+    );
+    for (const strategy of refreshStrategyByOfferId.values()) {
+      if (strategy === "CATALOG_PRODUCT") {
+        metrics.catalogProductSelected += 1;
+      } else if (strategy === "USER_PRODUCT") {
+        metrics.userProductSelected += 1;
+      } else {
+        metrics.itemBackedSelected += 1;
+      }
+    }
     const itemResult = await connector.getItemsWithDiagnostics(
-      offers.map((offer) => offer.externalProductId),
+      itemBackedOffers.map((offer) => offer.externalProductId),
     );
     metrics.itemsFetched = itemResult.diagnostics.itemsFetched;
     metrics.priceApiFetched = itemResult.diagnostics.priceApiFetched;
@@ -3600,44 +3687,143 @@ export async function refreshMercadoLivreOffers(
       offers,
       AFFILIATE_BATCH_CONCURRENCY,
       async (currentOffer) => {
-        const candidate = candidateByExternalId.get(
-          currentOffer.externalProductId,
-        );
-
-        if (!candidate) {
-          metrics.notFound += 1;
-          terminalOfferIds.add(currentOffer.externalProductId);
-          return;
-        }
-
         const sourceHighlightType = highlightTypeFromStoredValue(
           currentOffer.sourceHighlightType,
         );
         const resolutionStrategy = resolutionStrategyFromStoredValue(
           currentOffer.resolutionStrategy,
         );
-        const enrichedCandidate: MercadoLivreDiscoveredCandidate = {
-          ...candidate,
-          affiliateUrl: currentOffer.affiliateUrl,
-          affiliateLabel: currentOffer.affiliateLabel,
-          affiliateEligibility: currentOffer.affiliateEligibility,
-          affiliateFailure:
-            currentOffer.affiliateFailure as MercadoLivreAffiliateFailure | null,
-          trackingStrategy: currentOffer.trackingStrategy,
-          ...(currentOffer.sourceCategoryId
-            ? { sourceCategoryId: currentOffer.sourceCategoryId }
-            : {}),
-          ...(currentOffer.bestSellerPosition !== null
-            ? { bestSellerPosition: currentOffer.bestSellerPosition }
-            : {}),
-          ...(currentOffer.sourceHighlightId
-            ? { sourceHighlightId: currentOffer.sourceHighlightId }
-            : {}),
-          ...(sourceHighlightType ? { sourceHighlightType } : {}),
-          ...(resolutionStrategy ? { resolutionStrategy } : {}),
-        };
+        const refreshStrategy = refreshStrategyByOfferId.get(currentOffer.id) ??
+          "ITEM";
 
         try {
+          let candidate = candidateByExternalId.get(
+            currentOffer.externalProductId,
+          );
+
+          if (refreshStrategy === "CATALOG_PRODUCT") {
+            let product: MercadoLivreProduct | null;
+
+            try {
+              product = await connector.getProduct(
+                currentOffer.externalProductId,
+              );
+            } catch (error) {
+              if (isNotFound(error)) {
+                metrics.notFound += 1;
+                incrementMetricReason(
+                  metrics.skipReasons,
+                  "CATALOG_PRODUCT_NOT_FOUND",
+                );
+                return;
+              }
+              throw error;
+            }
+
+            if (!product) {
+              metrics.notFound += 1;
+              incrementMetricReason(
+                metrics.skipReasons,
+                "CATALOG_PRODUCT_NOT_FOUND",
+              );
+              return;
+            }
+
+            const productItems = await connector.getProductItems(product.id);
+            const diagnostics = productItems.diagnostics;
+            metrics.itemsFetched += diagnostics.productItemsHydrated;
+            metrics.priceApiFetched += diagnostics.priceApiFetched;
+            metrics.priceFallbackUsed += diagnostics.priceFallbackUsed;
+            metrics.priceUnavailable += diagnostics.priceUnavailable;
+            if (detailEnrichmentIsUnavailable(diagnostics)) {
+              metrics.detailEnrichmentUnavailable += 1;
+            }
+
+            const selectedSummary =
+              selectBestMercadoLivreCatalogProductSummary(
+                productItems.summaries,
+              );
+            if (!selectedSummary) {
+              metrics.priceUnavailable += 1;
+              throw new Error(
+                "CATALOG_PRODUCT_COMMERCIAL_SUMMARY_UNAVAILABLE",
+              );
+            }
+
+            const productUrl = resolveMercadoLivreCatalogProductUrl({
+              productId: product.id,
+              productPermalink:
+                resolutionStrategy === "PRODUCT_CATALOG_CANONICAL_PDP"
+                  ? null
+                  : product.permalink,
+              productStatus: product.status,
+            });
+            if (!productUrl) {
+              throw new Error("CATALOG_PRODUCT_URL_UNAVAILABLE");
+            }
+
+            const selectedEnrichment =
+              productItems.candidates.find(
+                (item) =>
+                  item.externalProductId === selectedSummary.itemId,
+              ) ?? null;
+            if (!selectedEnrichment) {
+              metrics.priceFallbackUsed += 1;
+            }
+            candidate =
+              catalogProductOfferCandidate(
+                {
+                  id:
+                    currentOffer.sourceHighlightId ??
+                    currentOffer.externalProductId,
+                  position: currentOffer.bestSellerPosition ?? 1,
+                  type: sourceHighlightType ?? "PRODUCT",
+                  rawType: sourceHighlightType ?? "PRODUCT",
+                  categoryId:
+                    currentOffer.sourceCategoryId ??
+                    selectedSummary.categoryId ??
+                    "",
+                },
+                product,
+                selectedSummary,
+                productUrl,
+                selectedEnrichment,
+              ) ?? undefined;
+
+            if (!candidate) {
+              throw new Error("CATALOG_PRODUCT_CANDIDATE_UNAVAILABLE");
+            }
+          }
+
+          if (!candidate) {
+            metrics.notFound += 1;
+            incrementMetricReason(
+              metrics.skipReasons,
+              `${refreshStrategy}_NOT_FOUND`,
+            );
+            return;
+          }
+
+          const enrichedCandidate: MercadoLivreDiscoveredCandidate = {
+            ...candidate,
+            affiliateUrl: currentOffer.affiliateUrl,
+            affiliateLabel: currentOffer.affiliateLabel,
+            affiliateEligibility: currentOffer.affiliateEligibility,
+            affiliateFailure:
+              currentOffer.affiliateFailure as MercadoLivreAffiliateFailure | null,
+            trackingStrategy: currentOffer.trackingStrategy,
+            ...(currentOffer.sourceCategoryId
+              ? { sourceCategoryId: currentOffer.sourceCategoryId }
+              : {}),
+            ...(currentOffer.bestSellerPosition !== null
+              ? { bestSellerPosition: currentOffer.bestSellerPosition }
+              : {}),
+            ...(currentOffer.sourceHighlightId
+              ? { sourceHighlightId: currentOffer.sourceHighlightId }
+              : {}),
+            ...(sourceHighlightType ? { sourceHighlightType } : {}),
+            ...(resolutionStrategy ? { resolutionStrategy } : {}),
+          };
           const result = await dependencies.ingest(
             candidateInput(enrichedCandidate),
             {
@@ -3646,6 +3832,13 @@ export async function refreshMercadoLivreOffers(
             },
           );
           metrics.refreshed += 1;
+          if (refreshStrategy === "CATALOG_PRODUCT") {
+            metrics.catalogProductRefreshed += 1;
+          } else if (refreshStrategy === "USER_PRODUCT") {
+            metrics.userProductRefreshed += 1;
+          } else {
+            metrics.itemRefreshed += 1;
+          }
 
           if (result.offerCreated) {
             metrics.newVersions += 1;
@@ -3658,6 +3851,12 @@ export async function refreshMercadoLivreOffers(
           }
         } catch (error) {
           metrics.failed += 1;
+          const reason =
+            error instanceof Error &&
+            /^[A-Z][A-Z0-9_]+$/.test(error.message)
+              ? error.message
+              : `${refreshStrategy}_REFRESH_FAILED`;
+          incrementMetricReason(metrics.errorReasons, reason);
           metrics.failures.push({
             externalProductId: currentOffer.externalProductId,
             errorMessage: sanitizedError(error),
@@ -3671,7 +3870,12 @@ export async function refreshMercadoLivreOffers(
     await dependencies.database.automationRun.update({
       where: { id: run.id },
       data: {
-        status: metrics.failed > 0 ? "PARTIAL" : "SUCCEEDED",
+        status:
+          metrics.failed === 0
+            ? "SUCCEEDED"
+            : metrics.refreshed > 0 || metrics.notFound > 0
+              ? "PARTIAL"
+              : "FAILED",
         finishedAt: new Date(),
         metrics,
         errorMessage:
@@ -3682,6 +3886,7 @@ export async function refreshMercadoLivreOffers(
     });
   } catch (error) {
     const errorMessage = sanitizedError(error);
+    incrementMetricReason(metrics.errorReasons, "REFRESH_PIPELINE_FAILED");
 
     for (const offer of offers) {
       if (terminalOfferIds.has(offer.externalProductId)) {

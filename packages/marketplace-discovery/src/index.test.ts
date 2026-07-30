@@ -16,6 +16,7 @@ import {
   generatePendingMercadoLivreAffiliateLinks,
   passesMinimumDiscount,
   refreshMercadoLivreOffers,
+  resolveMercadoLivreRefreshStrategy,
   selectBestMercadoLivreProductItem,
 } from "./index";
 
@@ -2274,6 +2275,33 @@ describe("generatePendingMercadoLivreAffiliateLinks", () => {
 describe("refreshMercadoLivreOffers", () => {
   beforeEach(() => vi.clearAllMocks());
 
+  it("classifies refresh identity from persisted metadata, not the MLB prefix", () => {
+    expect(
+      resolveMercadoLivreRefreshStrategy({
+        sourceHighlightType: "ITEM",
+        resolutionStrategy: "HIGHLIGHT_ITEM_DIRECT",
+      }),
+    ).toBe("ITEM");
+    expect(
+      resolveMercadoLivreRefreshStrategy({
+        sourceHighlightType: "PRODUCT",
+        resolutionStrategy: "PRODUCT_CATALOG_CANONICAL_PDP",
+      }),
+    ).toBe("CATALOG_PRODUCT");
+    expect(
+      resolveMercadoLivreRefreshStrategy({
+        sourceHighlightType: "PRODUCT",
+        resolutionStrategy: "PRODUCT_CHILD_BUY_BOX",
+      }),
+    ).toBe("ITEM");
+    expect(
+      resolveMercadoLivreRefreshStrategy({
+        sourceHighlightType: "USER_PRODUCT",
+        resolutionStrategy: "USER_PRODUCT_ACTIVE_ITEM",
+      }),
+    ).toBe("USER_PRODUCT");
+  });
+
   it("returns real counters, preserves affiliate URLs and isolates an offer failure", async () => {
     const database = fakeDatabase();
     database.offer.findMany.mockResolvedValue([
@@ -2334,7 +2362,11 @@ describe("refreshMercadoLivreOffers", () => {
 
     expect(result).toMatchObject({
       selected: 4,
+      itemBackedSelected: 4,
+      catalogProductSelected: 0,
+      userProductSelected: 0,
       refreshed: 2,
+      itemRefreshed: 2,
       unchanged: 1,
       newVersions: 1,
       notFound: 1,
@@ -2386,6 +2418,290 @@ describe("refreshMercadoLivreOffers", () => {
             failed: 1,
           }),
         }),
+      }),
+    );
+  });
+
+  it("keeps USER_PRODUCT refresh item-backed while reporting its own metrics", async () => {
+    const database = fakeDatabase();
+    database.offer.findMany.mockResolvedValue([
+      refreshOffer("MLB1234567890", {
+        sourceHighlightType: "USER_PRODUCT",
+        resolutionStrategy: "USER_PRODUCT_ACTIVE_ITEM",
+      }),
+    ]);
+    const getItemsWithDiagnostics = vi.fn().mockResolvedValue({
+      candidates: [offerCandidate("MLB1234567890")],
+      diagnostics: {
+        itemsFetched: 1,
+        priceApiFetched: 0,
+        priceFallbackUsed: 1,
+        priceUnavailable: 0,
+      },
+    });
+    const getProduct = vi.fn();
+    const result = await refreshMercadoLivreOffers(new Date(), {
+      database: database as never,
+      createConnector: vi.fn().mockResolvedValue(
+        connector({ getItemsWithDiagnostics, getProduct }),
+      ),
+      ingest: vi.fn().mockResolvedValue(
+        readyIngestResult("MLB1234567890", {
+          productCreated: false,
+          offerCreated: false,
+          offerReused: true,
+        }),
+      ) as never,
+    });
+
+    expect(getItemsWithDiagnostics).toHaveBeenCalledWith(["MLB1234567890"]);
+    expect(getProduct).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      selected: 1,
+      userProductSelected: 1,
+      userProductRefreshed: 1,
+      itemBackedSelected: 0,
+      catalogProductSelected: 0,
+      refreshed: 1,
+      unchanged: 1,
+      affiliateUrlsPreserved: 1,
+    });
+  });
+
+  it.each([401, 403])(
+    "refreshes a canonical catalog PRODUCT from summary when item detail returns %i",
+    async (httpStatus) => {
+      const database = fakeDatabase();
+      database.offer.findMany.mockResolvedValue([
+        refreshOffer("MLB67295462", {
+          sourceHighlightType: "PRODUCT",
+          sourceHighlightId: "MLB67295462",
+          resolutionStrategy: "PRODUCT_CATALOG_CANONICAL_PDP",
+          affiliateUrl: "https://meli.la/catalog-link",
+        }),
+      ]);
+      const getItemsWithDiagnostics = vi.fn().mockResolvedValue({
+        candidates: [],
+        diagnostics: {
+          itemsFetched: 0,
+          priceApiFetched: 0,
+          priceFallbackUsed: 0,
+          priceUnavailable: 0,
+        },
+      });
+      const getProduct = vi.fn().mockResolvedValue(
+        catalogProduct({
+          id: "MLB67295462",
+          name: "Produto catalogo",
+          permalink: "https://produto.mercadolivre.com.br/slug",
+          pictureUrls: ["https://http2.mlstatic.com/product.jpg"],
+          soldQuantity: 120,
+        }),
+      );
+      const getProductItems = vi.fn().mockResolvedValue(
+        productItemsResolution(
+          [
+            {
+              itemId: "MLB1234567890",
+              price: 149.9,
+              originalPrice: 199.9,
+              condition: "new",
+              categoryId: "MLB123",
+              freeShipping: true,
+              sellerId: "seller-1",
+            },
+          ],
+          [],
+          {
+            productItemsHydrated: 0,
+            productItemsUsable: 0,
+            priceApiFetched: 0,
+            rejectionReasons: {
+              PRODUCT_ITEM_DETAIL_HTTP_ERROR: 1,
+            },
+            samples: [
+              {
+                itemId: "MLB1234567890",
+                summaryFieldsPresent: ["item_id", "price"],
+                hydrationHttpStatus: httpStatus,
+                hydratedStatus: null,
+                hydratedCondition: "unknown",
+                hydratedAvailableQuantity: null,
+                hydratedChannels: [],
+                hasPermalink: false,
+                hasPrice: false,
+                rejectedReason: "PRODUCT_ITEM_DETAIL_HTTP_ERROR",
+              },
+            ],
+          },
+        ),
+      );
+      const ingest = vi.fn().mockResolvedValue(
+        readyIngestResult("MLB67295462", {
+          productCreated: false,
+          offerCreated: false,
+          offerReused: true,
+        }),
+      );
+
+      const result = await refreshMercadoLivreOffers(
+        new Date("2026-07-30T15:00:00.000Z"),
+        {
+          database: database as never,
+          createConnector: vi.fn().mockResolvedValue(
+            connector({
+              getItemsWithDiagnostics,
+              getProduct,
+              getProductItems,
+            }),
+          ),
+          ingest: ingest as never,
+        },
+      );
+
+      expect(getItemsWithDiagnostics).toHaveBeenCalledWith([]);
+      expect(getProduct).toHaveBeenCalledWith("MLB67295462");
+      expect(getProductItems).toHaveBeenCalledWith("MLB67295462");
+      expect(ingest).toHaveBeenCalledWith(
+        expect.objectContaining({
+          externalProductId: "MLB67295462",
+          productUrl: "https://www.mercadolivre.com.br/p/MLB67295462",
+          currentPrice: 149.9,
+          originalPrice: 199.9,
+          affiliateUrl: "https://meli.la/catalog-link",
+          resolutionStrategy: "PRODUCT_CATALOG_CANONICAL_PDP",
+        }),
+        expect.objectContaining({ minScore: 70 }),
+      );
+      expect(result).toMatchObject({
+        selected: 1,
+        itemBackedSelected: 0,
+        catalogProductSelected: 1,
+        catalogProductRefreshed: 1,
+        refreshed: 1,
+        unchanged: 1,
+        newVersions: 0,
+        notFound: 0,
+        failed: 0,
+        detailEnrichmentUnavailable: 1,
+        priceApiFetched: 0,
+        priceFallbackUsed: 1,
+        affiliateUrlsPreserved: 1,
+      });
+      expect(database.automationRun.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ status: "SUCCEEDED" }),
+        }),
+      );
+    },
+  );
+
+  it("creates a new catalog offer version when the commercial price changes", async () => {
+    const database = fakeDatabase();
+    database.offer.findMany.mockResolvedValue([
+      refreshOffer("MLB67295462", {
+        sourceHighlightType: "PRODUCT",
+        resolutionStrategy: "PRODUCT_CATALOG_CANONICAL_PDP",
+      }),
+    ]);
+    const ingest = vi.fn().mockResolvedValue(
+      readyIngestResult("MLB67295462", {
+        productCreated: false,
+        offerCreated: true,
+        offerReused: false,
+      }),
+    );
+
+    const result = await refreshMercadoLivreOffers(new Date(), {
+      database: database as never,
+      createConnector: vi.fn().mockResolvedValue(
+        connector({
+          getProduct: vi.fn().mockResolvedValue(
+            catalogProduct({
+              id: "MLB67295462",
+              name: "Produto catalogo",
+              pictureUrls: ["https://http2.mlstatic.com/product.jpg"],
+            }),
+          ),
+          getProductItems: vi.fn().mockResolvedValue(
+            productItemsResolution(
+              [{ itemId: "MLB1234567890", price: 89.9 }],
+              [],
+            ),
+          ),
+        }),
+      ),
+      ingest: ingest as never,
+    });
+
+    expect(result).toMatchObject({
+      catalogProductRefreshed: 1,
+      newVersions: 1,
+      unchanged: 0,
+      affiliateUrlsPreserved: 1,
+    });
+  });
+
+  it("counts a genuinely missing catalog product as not found", async () => {
+    const database = fakeDatabase();
+    database.offer.findMany.mockResolvedValue([
+      refreshOffer("MLB67295462", {
+        sourceHighlightType: "PRODUCT",
+        resolutionStrategy: "PRODUCT_CATALOG_CANONICAL_PDP",
+      }),
+    ]);
+    const ingest = vi.fn();
+    const result = await refreshMercadoLivreOffers(new Date(), {
+      database: database as never,
+      createConnector: vi.fn().mockResolvedValue(
+        connector({ getProduct: vi.fn().mockResolvedValue(null) }),
+      ),
+      ingest: ingest as never,
+    });
+
+    expect(result).toMatchObject({
+      selected: 1,
+      catalogProductSelected: 1,
+      refreshed: 0,
+      notFound: 1,
+      failed: 0,
+      skipReasons: { CATALOG_PRODUCT_NOT_FOUND: 1 },
+    });
+    expect(ingest).not.toHaveBeenCalled();
+    expect(database.automationRun.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "SUCCEEDED" }),
+      }),
+    );
+  });
+
+  it("reports an all-strategy operational failure as FAILED", async () => {
+    const database = fakeDatabase();
+    database.offer.findMany.mockResolvedValue([
+      refreshOffer("MLB67295462", {
+        sourceHighlightType: "PRODUCT",
+        resolutionStrategy: "PRODUCT_CATALOG_CANONICAL_PDP",
+      }),
+    ]);
+    const result = await refreshMercadoLivreOffers(new Date(), {
+      database: database as never,
+      createConnector: vi.fn().mockResolvedValue(
+        connector({
+          getProduct: vi.fn().mockRejectedValue(new Error("temporary failure")),
+        }),
+      ),
+    });
+
+    expect(result).toMatchObject({
+      selected: 1,
+      refreshed: 0,
+      notFound: 0,
+      failed: 1,
+      errorReasons: { CATALOG_PRODUCT_REFRESH_FAILED: 1 },
+    });
+    expect(database.automationRun.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "FAILED" }),
       }),
     );
   });

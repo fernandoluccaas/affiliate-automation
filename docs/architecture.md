@@ -49,6 +49,13 @@ Worker ────┘                 │
 
 Mercado Livre highlight `PRODUCT` entries can be catalog parents. A parent catalog product is not necessarily a purchasable item. Product resolution preserves the source highlight identity, resolves direct buy-box winners when present, and otherwise traverses bounded `children_ids` to find a terminal child with `buy_box_winner.item_id`. Terminal products without a winner are skipped with an explicit reason instead of fabricating an item.
 
+Mercado Livre periodic refresh follows the persisted resolution metadata.
+ITEM-backed and USER_PRODUCT-resolved Offers refresh the final ITEM identity.
+Catalog-PDP Offers keep the PRODUCT identity, reload `/products/{id}` and
+`/products/{id}/items`, and reuse discovery's deterministic summary selection.
+The optional ITEM detail and Price API enrich summary facts when available;
+their absence does not turn a valid catalog PRODUCT into a false not-found.
+
 Mercado Livre affiliate URLs are not generated automatically. Valid offers without a link become `READY_FOR_AFFILIATE_LINK` and are enriched manually in `/ofertas/affiliate-links`. Mercado Livre uses `TrackingStrategy.DIRECT_AFFILIATE_LINK`, so publication receives the official affiliate URL directly. Other marketplaces keep the internal `/go/[slug]` tracking strategy.
 
 ## Historical Immutability
