@@ -1,8 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Channel, Offer, Prisma } from "@affiliate/database";
 import { createMercadoLivreDiscoveryMetrics } from "@affiliate/marketplace-discovery";
+import { generateMessageForOffer } from "@affiliate/ai-copywriter";
 import {
   createPublicationIdempotently,
+  getChannelMessageFooter,
+  headlineFromMessagePayload,
   resolvePublicationUrl,
   runWorkerCycle,
   scheduleReadyOffers,
@@ -21,7 +24,7 @@ vi.mock("@affiliate/database", async () => {
 vi.mock("@affiliate/ai-copywriter", () => ({
   generateMessageForOffer: vi.fn().mockResolvedValue({
     message:
-      "\u{1F525} Produto teste\n\nPor R$ 345,99\n\n\u{1F6D2} Confira:\nhttps://example.com/go/slug\n\n#publi - link de afiliado",
+      "ACHADINHO DO DIA\n\nProduto teste\n\nPor: R$ 345,99\n\nCompre aqui:\nhttps://example.com/go/slug",
     source: "DETERMINISTIC_FALLBACK",
     aiProvider: "DETERMINISTIC",
     aiValidationPassed: false,
@@ -29,6 +32,23 @@ vi.mock("@affiliate/ai-copywriter", () => ({
     generatedAt: new Date("2026-07-24T12:00:00.000Z"),
   }),
 }));
+
+describe("promotional message channel context", () => {
+  it("reads only an explicitly configured footer", () => {
+    expect(getChannelMessageFooter({ messageFooter: "Siga o canal" })).toBe(
+      "Siga o canal",
+    );
+    expect(getChannelMessageFooter({ footer: "  Rodapé  " })).toBe("Rodapé");
+    expect(getChannelMessageFooter({ chatId: "123" })).toBeNull();
+  });
+
+  it("extracts the first non-empty line as the headline", () => {
+    expect(
+      headlineFromMessagePayload({ message: "\n  PROMO DO DIA  \n\nProduto" }),
+    ).toBe("PROMO DO DIA");
+    expect(headlineFromMessagePayload({ message: 123 })).toBeNull();
+  });
+});
 
 vi.mock("@affiliate/redis", () => ({
   acquireLock: vi.fn().mockResolvedValue({
@@ -168,6 +188,13 @@ describe("createPublicationIdempotently", () => {
       publication: {
         count: vi.fn().mockResolvedValue(0),
         findFirst: vi.fn().mockResolvedValue(null),
+        findMany: vi.fn().mockResolvedValue([
+          {
+            messagePayload: {
+              message: "HEADLINE RECENTE\n\nProduto anterior",
+            },
+          },
+        ]),
         upsert,
       },
       $transaction: vi.fn(async (callback: (tx: unknown) => unknown) =>
@@ -183,6 +210,13 @@ describe("createPublicationIdempotently", () => {
       skipped: 0,
       skipReasons: {},
     });
+    expect(vi.mocked(generateMessageForOffer)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        seed: "channel-1:offer-sparse",
+        recentHeadlines: ["HEADLINE RECENTE"],
+        footer: null,
+      }),
+    );
     expect(upsert).toHaveBeenCalledWith(
       expect.objectContaining({
         create: expect.objectContaining({

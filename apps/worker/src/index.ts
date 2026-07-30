@@ -197,6 +197,7 @@ async function messagePayloadFor(
     return null;
   }
 
+  const recentHeadlines = await recentChannelHeadlines(channel.id);
   const generated = await generateMessageForOffer({
     title: offer.title,
     marketplace: offer.marketplace,
@@ -211,6 +212,9 @@ async function messagePayloadFor(
     rating: offer.rating?.toString() ?? null,
     salesCount: offer.salesCount,
     trackingUrl: publicationUrl.url,
+    footer: getChannelMessageFooter(channel.configuration),
+    seed: `${channel.id}:${offer.id}`,
+    recentHeadlines,
   });
 
   return {
@@ -227,6 +231,66 @@ async function messagePayloadFor(
     aiValidationReasons: generated.aiValidationReasons,
     generatedAt: generated.generatedAt.toISOString(),
   };
+}
+
+export function getChannelMessageFooter(
+  configuration: Channel["configuration"],
+) {
+  if (
+    !configuration ||
+    typeof configuration !== "object" ||
+    Array.isArray(configuration)
+  ) {
+    return null;
+  }
+
+  const record = configuration as Record<string, unknown>;
+  const value =
+    typeof record.messageFooter === "string"
+      ? record.messageFooter
+      : typeof record.footer === "string"
+        ? record.footer
+        : null;
+
+  return value?.trim() || null;
+}
+
+export function headlineFromMessagePayload(payload: unknown) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+
+  const message = (payload as Record<string, unknown>).message;
+  if (typeof message !== "string") return null;
+
+  return (
+    message
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find(Boolean) ?? null
+  );
+}
+
+async function recentChannelHeadlines(channelId: string) {
+  // Some isolated unit-test Prisma doubles intentionally implement only upsert.
+  if (typeof prisma.publication.findMany !== "function") return [];
+
+  const publications = await prisma.publication.findMany({
+    where: {
+      channelId,
+      status: { in: ["PUBLISHED", "EXPORTED", "SCHEDULED"] },
+    },
+    orderBy: { scheduledAt: "desc" },
+    take: 5,
+    select: { messagePayload: true },
+  });
+
+  return publications
+    .map((publication) =>
+      headlineFromMessagePayload(publication.messagePayload),
+    )
+    .filter((headline): headline is string => Boolean(headline))
+    .slice(0, 5);
 }
 
 function getTelegramChatId(channel: Channel) {

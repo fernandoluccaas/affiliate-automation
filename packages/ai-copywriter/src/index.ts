@@ -1,8 +1,8 @@
 import OpenAI from "openai";
 import {
-  deterministicMessageComposer,
-  formatBRLCurrency,
-  type MessageOffer,
+  buildPromoMessage,
+  selectPromotionalHeadline,
+  type PromoMessageInput,
 } from "@affiliate/publication";
 import { z } from "zod";
 
@@ -15,10 +15,7 @@ const DEFAULT_OPENAI_MAX_RETRIES = 1;
 export const promotionalCopySchema = z
   .object({
     headline: z.string().trim().min(1).max(100),
-    body: z.string().trim().min(1).max(700),
-    callToAction: z.string().trim().min(1).max(180),
-    disclosure: z.string().trim().min(1).max(120),
-    hashtags: z.array(z.string().trim().regex(/^#[A-Za-z0-9_]+$/)).max(8),
+    optionalHook: z.string().trim().min(1).max(140).nullable().optional(),
   })
   .strict();
 
@@ -30,23 +27,30 @@ export const messageGenerationInputSchema = z.object({
   currentPrice: z.union([z.number(), z.string()]),
   discountPercentage: z.union([z.number(), z.string()]).optional().nullable(),
   couponCode: z.string().trim().optional().nullable(),
+  couponUrl: z.string().url().optional().nullable(),
+  couponDescription: z.string().trim().optional().nullable(),
   couponExpiration: z.union([z.date(), z.string()]).optional().nullable(),
   freeShipping: z.boolean().optional().nullable(),
   shippingStatus: z.enum(["FREE", "NOT_FREE", "UNKNOWN"]).default("UNKNOWN"),
   rating: z.union([z.number(), z.string()]).optional().nullable(),
   salesCount: z.number().int().optional().nullable(),
   trackingUrl: z.string().url(),
+  footer: z.string().trim().optional().nullable(),
+  seed: z.string().optional(),
+  recentHeadlines: z.array(z.string().trim().min(1)).max(5).default([]),
 });
 
 export type PromotionalCopy = z.infer<typeof promotionalCopySchema>;
-export type MessageGenerationInput = z.input<typeof messageGenerationInputSchema>;
+export type MessageGenerationInput = z.input<
+  typeof messageGenerationInputSchema
+>;
+type ParsedMessageGenerationInput = z.output<
+  typeof messageGenerationInputSchema
+>;
 export type MessageSource = "AI_GENERATED" | "DETERMINISTIC_FALLBACK";
 export type AiProviderName = "OLLAMA" | "OPENAI" | "DETERMINISTIC";
 
-export type ValidationResult = {
-  valid: boolean;
-  reasons: string[];
-};
+export type ValidationResult = { valid: boolean; reasons: string[] };
 
 export type MessageGenerationResult = {
   message: string;
@@ -61,14 +65,14 @@ export type MessageGenerationResult = {
 
 export type AiCopywriterEnv = {
   [key: string]: string | undefined;
-  AI_PROVIDER?: string | undefined;
-  AI_COPY_ENABLED?: string | undefined;
-  AI_COPY_TIMEOUT_MS?: string | undefined;
-  OLLAMA_BASE_URL?: string | undefined;
-  OLLAMA_MODEL?: string | undefined;
-  OPENAI_API_KEY?: string | undefined;
-  OPENAI_MODEL?: string | undefined;
-  OPENAI_TIMEOUT_MS?: string | undefined;
+  AI_PROVIDER?: string;
+  AI_COPY_ENABLED?: string;
+  AI_COPY_TIMEOUT_MS?: string;
+  OLLAMA_BASE_URL?: string;
+  OLLAMA_MODEL?: string;
+  OPENAI_API_KEY?: string;
+  OPENAI_MODEL?: string;
+  OPENAI_TIMEOUT_MS?: string;
 };
 
 export type AiProvider = {
@@ -83,7 +87,7 @@ export type AiProviderHealth = {
   available: boolean;
   provider: AiProviderName;
   model: string;
-  baseUrl?: string | undefined;
+  baseUrl?: string;
   status: string;
 };
 
@@ -130,13 +134,17 @@ export function isAiCopyEnabled(env: AiCopywriterEnv = process.env) {
 }
 
 export function getAiProviderName(env: AiCopywriterEnv = process.env) {
-  const provider = env.AI_PROVIDER?.trim().toLowerCase() || DEFAULT_AI_PROVIDER;
-  return provider === "openai" ? "openai" : "ollama";
+  return (env.AI_PROVIDER?.trim().toLowerCase() || DEFAULT_AI_PROVIDER) ===
+    "openai"
+    ? "openai"
+    : "ollama";
 }
 
 export function getAiCopyTimeoutMs(env: AiCopywriterEnv = process.env) {
   const parsed = Number(env.AI_COPY_TIMEOUT_MS ?? env.OPENAI_TIMEOUT_MS);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_AI_COPY_TIMEOUT_MS;
+  return Number.isFinite(parsed) && parsed > 0
+    ? parsed
+    : DEFAULT_AI_COPY_TIMEOUT_MS;
 }
 
 export function getOllamaBaseUrl(env: AiCopywriterEnv = process.env) {
@@ -178,56 +186,6 @@ export function getOllamaIntegrationStatus(env: AiCopywriterEnv = process.env) {
   };
 }
 
-function asNumber(value: number | string | null | undefined) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function normalizedNumber(value: number) {
-  return value.toLocaleString("pt-BR", {
-    minimumFractionDigits: Number.isInteger(value) ? 0 : 2,
-    maximumFractionDigits: 2,
-  });
-}
-
-function normalizeComparable(value: string) {
-  return value
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
-}
-
-function allCopyText(copy: PromotionalCopy) {
-  return [
-    copy.headline,
-    copy.body,
-    copy.callToAction,
-    copy.disclosure,
-    copy.hashtags.join(" "),
-  ].join("\n");
-}
-
-function dateSummary(value: Date | string | null | undefined) {
-  if (!value) {
-    return null;
-  }
-
-  return new Intl.DateTimeFormat("pt-BR", {
-    dateStyle: "short",
-    timeStyle: "short",
-  }).format(new Date(value));
-}
-
-function optionalCurrency(value: number | string | null | undefined) {
-  return value === null || value === undefined ? null : formatBRLCurrency(value);
-}
-
-function optionalPercentage(value: number | string | null | undefined) {
-  return value === null || value === undefined ? null : `${normalizedNumber(asNumber(value))}%`;
-}
-
 function sanitizeBaseUrl(value: string) {
   return value.trim().replace(/\/+$/, "");
 }
@@ -235,11 +193,7 @@ function sanitizeBaseUrl(value: string) {
 function withTimeout(timeoutMs: number) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
-
-  return {
-    signal: controller.signal,
-    clear: () => clearTimeout(timeout),
-  };
+  return { signal: controller.signal, clear: () => clearTimeout(timeout) };
 }
 
 function schemaForStructuredOutput() {
@@ -248,45 +202,29 @@ function schemaForStructuredOutput() {
     additionalProperties: false,
     properties: {
       headline: { type: "string", maxLength: 100 },
-      body: { type: "string", maxLength: 700 },
-      callToAction: { type: "string", maxLength: 180 },
-      disclosure: { type: "string", maxLength: 120 },
-      hashtags: {
-        type: "array",
-        maxItems: 8,
-        items: { type: "string", pattern: "^#[A-Za-z0-9_]+$" },
+      optionalHook: {
+        anyOf: [{ type: "string", maxLength: 140 }, { type: "null" }],
       },
     },
-    required: ["headline", "body", "callToAction", "disclosure", "hashtags"],
+    required: ["headline", "optionalHook"],
   };
 }
 
 export function buildPrompt(input: MessageGenerationInput) {
   return JSON.stringify(
     {
-      task: "Generate promotional affiliate copy in Brazilian Portuguese.",
+      task: "Choose one short promotional headline in Brazilian Portuguese. Do not write the offer body.",
       rules: [
-        "Use only the facts supplied in offer.",
-        "Do not invent price, discount, coupon, shipping, stock, rating, urgency or guarantees.",
-        "The only URL allowed is offer.trackingUrl, and it must appear exactly once.",
-        "Include a clear affiliate disclosure.",
         "Return only JSON matching the requested schema.",
+        "Do not mention or invent prices, discounts, coupons, shipping, stock, URLs, urgency or guarantees.",
+        "Respect the marketplace style.",
+        "The headline must be selected from the application's allowed local pool.",
       ],
       schema: schemaForStructuredOutput(),
-      offer: {
-        title: input.title,
+      context: {
         marketplace: input.marketplace,
         category: input.category ?? null,
-        originalPrice: optionalCurrency(input.originalPrice),
-        currentPrice: formatBRLCurrency(input.currentPrice),
-        discountPercentage: optionalPercentage(input.discountPercentage),
-        couponCode: input.couponCode ?? null,
-        couponExpiration: dateSummary(input.couponExpiration),
-        shippingStatus: input.shippingStatus ?? "UNKNOWN",
-        freeShipping: input.shippingStatus === "FREE" || input.freeShipping === true,
-        rating: input.rating ?? null,
-        salesCount: input.salesCount ?? null,
-        trackingUrl: input.trackingUrl,
+        recentHeadlines: (input.recentHeadlines ?? []).slice(0, 5),
       },
     },
     null,
@@ -297,7 +235,6 @@ export function buildPrompt(input: MessageGenerationInput) {
 export class AiMessageValidator {
   validate(copy: unknown, input: MessageGenerationInput): ValidationResult {
     const parsed = promotionalCopySchema.safeParse(copy);
-
     if (!parsed.success) {
       return {
         valid: false,
@@ -305,127 +242,59 @@ export class AiMessageValidator {
       };
     }
 
-    const reasons: string[] = [];
-    const text = allCopyText(parsed.data);
-    const normalizedText = normalizeComparable(text);
-    const allowedPrices = new Set([normalizeComparable(formatBRLCurrency(input.currentPrice))]);
+    const selected = selectPromotionalHeadline({
+      marketplace: input.marketplace,
+      seed:
+        input.seed ??
+        `${input.marketplace}:${input.title}:${input.trackingUrl}`,
+      recentHeadlines: input.recentHeadlines ?? [],
+      suggestion: parsed.data.headline,
+    });
 
-    if (input.originalPrice !== null && input.originalPrice !== undefined) {
-      allowedPrices.add(normalizeComparable(formatBRLCurrency(input.originalPrice)));
-    }
-
-    const moneyMentions = text.match(/R\$\s*\d[\d.\s]*(?:,\d{2})?/g) ?? [];
-    for (const mention of moneyMentions) {
-      if (!allowedPrices.has(normalizeComparable(mention))) {
-        reasons.push(`Preco nao confirmado: ${mention}.`);
-      }
-    }
-
-    const percentageMentions = text.match(/\d+(?:[,.]\d+)?\s*%/g) ?? [];
-
-    if (input.discountPercentage === null || input.discountPercentage === undefined) {
-      if (percentageMentions.length > 0) {
-        reasons.push("Desconto foi mencionado sem desconto confirmado.");
-      }
-    } else {
-      const allowedDiscount = Math.round(asNumber(input.discountPercentage) * 100) / 100;
-
-      for (const mention of percentageMentions) {
-        const value = Number(mention.replace("%", "").replace(",", ".").trim());
-
-        if (Math.abs(value - allowedDiscount) > 0.01) {
-          reasons.push(`Desconto nao confirmado: ${mention}.`);
-        }
-      }
-    }
-
-    const urls = text.match(/https?:\/\/[^\s)]+/g) ?? [];
-    const uniqueUrls = new Set(urls.map((url) => url.replace(/[.,;]+$/, "")));
-    const trackingUrlCount = urls.filter((url) => url.replace(/[.,;]+$/, "") === input.trackingUrl).length;
-
-    if (!uniqueUrls.has(input.trackingUrl)) {
-      reasons.push("URL de rastreamento ausente ou alterada.");
-    }
-
-    if (trackingUrlCount !== 1) {
-      reasons.push("URL de rastreamento deve aparecer exatamente uma vez.");
-    }
-
-    for (const url of uniqueUrls) {
-      if (url !== input.trackingUrl) {
-        reasons.push(`URL nao permitida: ${url}.`);
-      }
-    }
-
-    if ((input.couponCode?.trim() ?? "") === "") {
-      if (/\b(cupom|coupon|codigo|código)\b/i.test(text)) {
-        reasons.push("Cupom foi mencionado sem cupom confirmado.");
-      }
-    } else if (!normalizedText.includes(normalizeComparable(input.couponCode ?? ""))) {
-      reasons.push("Cupom confirmado nao foi preservado.");
-    }
-
-    if (
-      (input.shippingStatus ?? "UNKNOWN") !== "FREE" &&
-      input.freeShipping !== true &&
-      /(frete|envio)\s+gr[aá]tis/i.test(text)
-    ) {
-      reasons.push("Frete gratis foi mencionado sem confirmacao.");
-    }
-
-    if (!/(afiliad|#publi|publicidade|publ)/i.test(normalizedText)) {
-      reasons.push("Divulgacao de afiliado ausente.");
-    }
-
-    if (
-      /(menor preco|melhor preco|ultimas unidades|estoque limitado|so hoje|garantid[ao]|imperdivel)/i.test(
-        normalizedText,
-      )
-    ) {
-      reasons.push("Texto contem promessa ou urgencia nao confirmada.");
-    }
-
-    return {
-      valid: reasons.length === 0,
-      reasons,
-    };
+    return selected === parsed.data.headline
+      ? { valid: true, reasons: [] }
+      : {
+          valid: false,
+          reasons: [
+            "AI headline is outside the allowed marketplace pool or was used recently.",
+          ],
+        };
   }
 }
 
 export class PromotionalCopyValidator extends AiMessageValidator {}
 
-export function copyToMessage(copy: PromotionalCopy, input: MessageGenerationInput) {
-  const lines = [
-    copy.headline,
-    "",
-    copy.body,
-    "",
-    copy.callToAction.includes(input.trackingUrl)
-      ? copy.callToAction
-      : `${copy.callToAction} ${input.trackingUrl}`,
-    "",
-    copy.disclosure,
-  ];
+function promoInput(
+  input: MessageGenerationInput,
+  headlineSuggestion?: string,
+): PromoMessageInput {
+  return {
+    ...input,
+    ...(headlineSuggestion ? { headlineSuggestion } : {}),
+  } as PromoMessageInput;
+}
 
-  if (copy.hashtags.length > 0) {
-    lines.push(copy.hashtags.join(" "));
-  }
-
-  return lines.join("\n").trim();
+export function copyToMessage(
+  copy: PromotionalCopy,
+  input: MessageGenerationInput,
+) {
+  return buildPromoMessage(promoInput(input, copy.headline)).message;
 }
 
 function deterministicFallback(input: MessageGenerationInput) {
-  return deterministicMessageComposer(input as MessageOffer);
+  return buildPromoMessage(promoInput(input)).message;
 }
 
 function parseGeneratedJson(value: string) {
   const trimmed = value.trim();
-
-  if (trimmed.startsWith("```")) {
-    return JSON.parse(trimmed.replace(/^```(?:json)?/i, "").replace(/```$/, "").trim()) as unknown;
-  }
-
-  return JSON.parse(trimmed) as unknown;
+  return JSON.parse(
+    trimmed.startsWith("```")
+      ? trimmed
+          .replace(/^```(?:json)?/i, "")
+          .replace(/```$/, "")
+          .trim()
+      : trimmed,
+  ) as unknown;
 }
 
 export class OllamaAiProvider implements AiProvider {
@@ -453,7 +322,6 @@ export class OllamaAiProvider implements AiProvider {
 
   async generate(input: MessageGenerationInput): Promise<PromotionalCopy> {
     const timeout = withTimeout(this.timeoutMs);
-
     try {
       const response = await this.fetchFn(`${this.baseUrl}/api/generate`, {
         method: "POST",
@@ -462,37 +330,35 @@ export class OllamaAiProvider implements AiProvider {
         body: JSON.stringify({
           model: this.model,
           system:
-            "You are a careful affiliate copywriter. You must preserve factual accuracy and output strict JSON.",
+            "You only suggest a short promotional headline. Output strict JSON and never rewrite offer facts.",
           prompt: buildPrompt(input),
           stream: false,
           format: schemaForStructuredOutput(),
           options: { temperature: 0 },
         }),
       });
-
       if (!response.ok) {
-        throw new Error(`Ollama HTTP ${response.status}: ${response.statusText}`);
+        throw new Error(
+          `Ollama HTTP ${response.status}: ${response.statusText}`,
+        );
       }
-
       const body = (await response.json()) as { response?: unknown };
-
       if (typeof body.response !== "string") {
         throw new Error("Ollama returned an invalid response.");
       }
-
-      const parsedJson = parseGeneratedJson(body.response);
-      const parsed = promotionalCopySchema.safeParse(parsedJson);
-
+      const parsed = promotionalCopySchema.safeParse(
+        parseGeneratedJson(body.response),
+      );
       if (!parsed.success) {
-        throw new Error(parsed.error.issues[0]?.message ?? "Generated copy is invalid.");
+        throw new Error(
+          parsed.error.issues[0]?.message ?? "Generated headline is invalid.",
+        );
       }
-
       return parsed.data;
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
         throw new Error("Ollama request timed out.");
       }
-
       throw error;
     } finally {
       timeout.clear();
@@ -501,13 +367,11 @@ export class OllamaAiProvider implements AiProvider {
 
   async healthCheck(): Promise<AiProviderHealth> {
     const timeout = withTimeout(Math.min(this.timeoutMs, 3_000));
-
     try {
       const response = await this.fetchFn(`${this.baseUrl}/api/tags`, {
         method: "GET",
         signal: timeout.signal,
       });
-
       return {
         configured: Boolean(this.baseUrl && this.model),
         available: response.ok,
@@ -550,12 +414,11 @@ export class OpenAiProvider implements AiProvider {
   ) {
     const env = options.env ?? process.env;
     const apiKey = options.apiKey ?? env.OPENAI_API_KEY;
-
     if (!options.client && !apiKey) {
       throw new Error("OPENAI_API_KEY is not configured.");
     }
-
-    this.client = options.client ?? (new OpenAI({ apiKey }) as unknown as ResponsesClient);
+    this.client =
+      options.client ?? (new OpenAI({ apiKey }) as unknown as ResponsesClient);
     this.model = options.model ?? getOpenAiModel(env);
     this.timeoutMs = options.timeoutMs ?? getAiCopyTimeoutMs(env);
     this.maxRetries = options.maxRetries ?? DEFAULT_OPENAI_MAX_RETRIES;
@@ -563,24 +426,25 @@ export class OpenAiProvider implements AiProvider {
 
   async generate(input: MessageGenerationInput): Promise<PromotionalCopy> {
     let lastError: unknown;
-
     for (let attempt = 0; attempt <= this.maxRetries; attempt += 1) {
       try {
         const response = await this.requestOnce(input);
-        const parsedJson = parseGeneratedJson(response.output_text);
-        const parsed = promotionalCopySchema.safeParse(parsedJson);
-
+        const parsed = promotionalCopySchema.safeParse(
+          parseGeneratedJson(response.output_text),
+        );
         if (!parsed.success) {
-          throw new Error(parsed.error.issues[0]?.message ?? "Generated copy is invalid.");
+          throw new Error(
+            parsed.error.issues[0]?.message ?? "Generated headline is invalid.",
+          );
         }
-
         return parsed.data;
       } catch (error) {
         lastError = error;
       }
     }
-
-    throw lastError instanceof Error ? lastError : new Error("AI generation failed.");
+    throw lastError instanceof Error
+      ? lastError
+      : new Error("AI generation failed.");
   }
 
   private requestOnce(input: MessageGenerationInput) {
@@ -588,15 +452,15 @@ export class OpenAiProvider implements AiProvider {
       {
         model: this.model,
         instructions:
-          "You are a careful affiliate copywriter. You must preserve factual accuracy and output strict JSON.",
+          "Suggest only a short promotional headline. Never rewrite offer facts.",
         input: buildPrompt(input),
         temperature: 0.2,
-        max_output_tokens: 500,
+        max_output_tokens: 100,
         store: false,
         text: {
           format: {
             type: "json_schema",
-            name: "affiliate_promotional_copy",
+            name: "affiliate_promotional_headline",
             strict: true,
             schema: schemaForStructuredOutput(),
           },
@@ -609,14 +473,12 @@ export class OpenAiProvider implements AiProvider {
 
 export class AiCopywriter extends OpenAiProvider {}
 
-export function createAiProvider(env: AiCopywriterEnv = process.env): AiProvider {
-  const provider = getAiProviderName(env);
-
-  if (provider === "openai") {
-    return new OpenAiProvider({ env });
-  }
-
-  return new OllamaAiProvider({ env });
+export function createAiProvider(
+  env: AiCopywriterEnv = process.env,
+): AiProvider {
+  return getAiProviderName(env) === "openai"
+    ? new OpenAiProvider({ env })
+    : new OllamaAiProvider({ env });
 }
 
 export class MessageGenerationService {
@@ -632,27 +494,35 @@ export class MessageGenerationService {
     } = {},
   ) {}
 
-  async generate(input: MessageGenerationInput): Promise<MessageGenerationResult> {
+  async generate(
+    input: MessageGenerationInput,
+  ): Promise<MessageGenerationResult> {
     const parsed = messageGenerationInputSchema.parse(input);
     const env = this.options.env ?? process.env;
-
     if (!isAiCopyEnabled(env)) {
-      return this.fallback(parsed, "DETERMINISTIC", undefined, ["AI copy generation is disabled."]);
+      return this.fallback(parsed, "DETERMINISTIC", undefined, [
+        "AI copy generation is disabled.",
+      ]);
     }
 
-    const provider = this.options.provider ?? this.options.writer ?? createAiProvider(env);
+    const provider =
+      this.options.provider ?? this.options.writer ?? createAiProvider(env);
     const generatedAt = new Date();
     const started = Date.now();
-
     try {
       const copy = await provider.generate(parsed);
       const validation = this.validator.validate(copy, parsed);
       const duration = Date.now() - started;
-
       if (!validation.valid) {
-        return this.fallback(parsed, provider.provider, provider.model, validation.reasons, duration, generatedAt);
+        return this.fallback(
+          parsed,
+          provider.provider,
+          provider.model,
+          validation.reasons,
+          duration,
+          generatedAt,
+        );
       }
-
       return {
         message: copyToMessage(copy, parsed),
         source: "AI_GENERATED",
@@ -676,7 +546,7 @@ export class MessageGenerationService {
   }
 
   private fallback(
-    input: MessageGenerationInput,
+    input: ParsedMessageGenerationInput,
     provider: AiProviderName,
     model: string | undefined,
     reasons: string[],
@@ -686,7 +556,7 @@ export class MessageGenerationService {
     return {
       message: deterministicFallback(input),
       source: "DETERMINISTIC_FALLBACK",
-      aiProvider: provider === "DETERMINISTIC" ? "DETERMINISTIC" : provider,
+      aiProvider: provider,
       aiModel: model,
       aiGenerationDurationMs: durationMs,
       aiValidationPassed: false,
