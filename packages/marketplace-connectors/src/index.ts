@@ -50,6 +50,8 @@ export type MarketplaceOfferCandidate = {
   sourceHighlightType?: MercadoLivreHighlightCandidate["type"];
   resolvedProductId?: string;
   resolvedItemId?: string;
+  candidateKind?: MercadoLivreResolvedCandidateKind;
+  selectedCatalogItemId?: string;
   resolutionStrategy?: MercadoLivreResolutionStrategy;
   priceSource?: MercadoLivrePriceSource;
   collectedAt?: Date;
@@ -120,7 +122,8 @@ export type MercadoLivrePrice = {
   originalPrice: number | null;
 };
 
-export type MercadoLivrePriceSource = "PRICE_API" | "ITEM_FALLBACK";
+export type MercadoLivrePriceSource =
+  "PRICE_API" | "ITEM_FALLBACK" | "CATALOG_SUMMARY";
 
 export type MercadoLivreItemFetchDiagnostics = {
   itemsFetched: number;
@@ -228,7 +231,15 @@ export type MercadoLivreBestSeller = MercadoLivreHighlightCandidate;
 export type MercadoLivreProduct = {
   id: string;
   name: string | null;
+  familyName: string | null;
   status: string | null;
+  permalink: string | null;
+  pictureUrls: string[];
+  attributes: Array<{
+    id: string;
+    valueName: string | null;
+  }>;
+  domainId: string | null;
   parentId: string | null;
   childrenIds: string[];
   soldQuantity: number | null;
@@ -251,6 +262,9 @@ export type MercadoLivreCatalogProductItemSummary = {
   siteId?: string;
   sellerId?: string;
   price?: number;
+  originalPrice?: number;
+  categoryId?: string;
+  currencyId?: string;
   condition?: string;
   listingTypeId?: string;
   availableQuantity?: number;
@@ -331,6 +345,8 @@ export type MercadoLivreHighlightSkipReason =
   | "PRODUCT_ITEMS_HYDRATION_FAILED"
   | "PRODUCT_ITEMS_NO_USABLE_ITEM"
   | "PRODUCT_ITEMS_API_ERROR"
+  | "PRODUCT_PDP_PERMALINK_MISSING"
+  | "PRODUCT_PDP_FALLBACK_INELIGIBLE"
   | "USER_PRODUCT_NOT_FOUND"
   | "USER_PRODUCT_NO_USER"
   | "USER_PRODUCT_NO_ACTIVE_ITEM"
@@ -342,6 +358,7 @@ export type MercadoLivreResolutionStrategy =
   | "PRODUCT_DIRECT_BUY_BOX"
   | "PRODUCT_CHILD_BUY_BOX"
   | "PRODUCT_ITEMS_FALLBACK"
+  | "PRODUCT_CATALOG_PDP_FALLBACK"
   | "USER_PRODUCT_ACTIVE_ITEM";
 
 export type MercadoLivreProductResolutionDiagnostics = {
@@ -351,6 +368,9 @@ export type MercadoLivreProductResolutionDiagnostics = {
   productResolvedDirectly: number;
   productResolvedViaChild: number;
   productResolvedViaItems: number;
+  productResolvedViaCatalogPdp: number;
+  productDetailEnrichmentUnavailable: boolean;
+  productPdpFallbackEligible: boolean;
   productItemsFetched: number;
   productItemsUsable: number;
   productItemsSkipped: number;
@@ -372,15 +392,26 @@ export type MercadoLivreProductResolutionDiagnostics = {
   productParentWithoutResolvableChild: number;
 };
 
-export type MercadoLivreResolvedHighlightCandidate = {
+export type MercadoLivreResolvedCandidateKind =
+  "ITEM" | "CATALOG_PRODUCT" | "USER_PRODUCT";
+
+export type MercadoLivreResolvedCandidate = {
+  kind: MercadoLivreResolvedCandidateKind;
+  marketplaceExternalId: string;
   sourceHighlightId: string;
   sourceHighlightType: MercadoLivreHighlightCandidate["type"];
   resolvedProductId?: string;
-  resolvedItemId: string;
+  resolvedItemId?: string;
+  selectedItemId?: string;
+  selectedSellerId?: string;
+  offerCandidate?: MarketplaceOfferCandidate;
   resolutionStrategy: MercadoLivreResolutionStrategy;
   position: number;
   categoryId: string;
 };
+
+export type MercadoLivreResolvedHighlightCandidate =
+  MercadoLivreResolvedCandidate;
 
 export type MercadoLivreHighlightResolutionResult =
   | {
@@ -1370,6 +1401,27 @@ function isHttpsUrl(value: string) {
   }
 }
 
+export function isSafeMercadoLivreProductPermalink(value: string | null) {
+  if (!value) return false;
+
+  try {
+    const url = new URL(value);
+    const allowedDomains = ["mercadolivre.com.br", "mercadolibre.com"];
+
+    return (
+      url.protocol === "https:" &&
+      !url.username &&
+      !url.password &&
+      allowedDomains.some(
+        (domain) =>
+          url.hostname === domain || url.hostname.endsWith(`.${domain}`),
+      )
+    );
+  } catch {
+    return false;
+  }
+}
+
 function summaryFieldsPresent(item: Record<string, unknown>) {
   const fields = [
     "item_id",
@@ -1377,6 +1429,9 @@ function summaryFieldsPresent(item: Record<string, unknown>) {
     "site_id",
     "seller_id",
     "price",
+    "original_price",
+    "category_id",
+    "currency_id",
     "condition",
     "item_condition",
     "listing_type_id",
@@ -1427,6 +1482,9 @@ export function parseMercadoLivreCatalogProductItemSummary(
   const siteId = asString(item.site_id);
   const sellerId = asStringId(item.seller_id);
   const price = asNumber(item.price);
+  const originalPrice = asNumber(item.original_price);
+  const categoryId = asString(item.category_id);
+  const currencyId = asString(item.currency_id);
   const condition = asString(item.item_condition ?? item.condition);
   const listingTypeId = asString(item.listing_type_id);
   const availableQuantity = asNumber(item.available_quantity);
@@ -1435,6 +1493,9 @@ export function parseMercadoLivreCatalogProductItemSummary(
   if (siteId) result.siteId = siteId;
   if (sellerId) result.sellerId = sellerId;
   if (price !== null) result.price = price;
+  if (originalPrice !== null) result.originalPrice = originalPrice;
+  if (categoryId) result.categoryId = categoryId;
+  if (currencyId) result.currencyId = currencyId;
   if (condition) result.condition = condition;
   if (listingTypeId) result.listingTypeId = listingTypeId;
   if (availableQuantity !== null) {
@@ -1446,6 +1507,72 @@ export function parseMercadoLivreCatalogProductItemSummary(
   if (officialStoreId) result.officialStoreId = officialStoreId;
   if (sellerReputation !== null) result.sellerReputation = sellerReputation;
   return result;
+}
+
+export function selectBestMercadoLivreCatalogProductSummary(
+  summaries: readonly MercadoLivreCatalogProductItemSummary[],
+) {
+  const valid = summaries.filter((summary) => {
+    const condition = normalizedCondition(summary.condition);
+
+    return (
+      isMercadoLivreItemId(summary.itemId) &&
+      (!summary.siteId || summary.siteId.toUpperCase() === "MLB") &&
+      condition !== "used" &&
+      condition !== "refurbished" &&
+      summary.price !== undefined &&
+      summary.price > 0
+    );
+  });
+
+  const [selected] = [...valid].sort((left, right) => {
+    const condition =
+      Number(normalizedCondition(right.condition) === "new") -
+      Number(normalizedCondition(left.condition) === "new");
+    if (condition !== 0) return condition;
+
+    const freeShipping =
+      Number(right.freeShipping === true) - Number(left.freeShipping === true);
+    if (freeShipping !== 0) return freeShipping;
+
+    const officialStore =
+      Number(Boolean(right.officialStoreId)) -
+      Number(Boolean(left.officialStoreId));
+    if (officialStore !== 0) return officialStore;
+
+    const leftReputation = left.sellerReputation ?? null;
+    const rightReputation = right.sellerReputation ?? null;
+
+    if (
+      leftReputation !== null &&
+      rightReputation !== null &&
+      leftReputation !== rightReputation
+    ) {
+      return rightReputation - leftReputation;
+    }
+    if (leftReputation !== null && rightReputation === null) return -1;
+    if (leftReputation === null && rightReputation !== null) return 1;
+
+    if (left.price !== right.price) {
+      return (left.price as number) - (right.price as number);
+    }
+
+    const leftQuantity = left.availableQuantity ?? null;
+    const rightQuantity = right.availableQuantity ?? null;
+
+    if (
+      leftQuantity !== null &&
+      rightQuantity !== null &&
+      leftQuantity !== rightQuantity
+    ) {
+      return rightQuantity - leftQuantity;
+    }
+    if (leftQuantity !== null && rightQuantity === null) return -1;
+    if (leftQuantity === null && rightQuantity !== null) return 1;
+    return left.itemId.localeCompare(right.itemId);
+  });
+
+  return selected ?? null;
 }
 
 export class MercadoLivreConnector implements MarketplaceConnector {
@@ -1613,11 +1740,33 @@ export class MercadoLivreConnector implements MarketplaceConnector {
     const childrenIds = asArray(product.children_ids)
       .map(asStringId)
       .filter((item): item is string => Boolean(item));
+    const pictureUrls = asArray(product.pictures)
+      .map(asRecord)
+      .filter(isRecord)
+      .map((picture) => asString(picture.secure_url ?? picture.url))
+      .filter((pictureUrl): pictureUrl is string =>
+        Boolean(pictureUrl && isHttpsUrl(pictureUrl)),
+      );
+    const attributes = asArray(product.attributes)
+      .map(asRecord)
+      .filter(isRecord)
+      .map((attribute) => ({
+        id: asString(attribute.id) ?? "",
+        valueName: asString(
+          attribute.value_name ?? attribute.value_id ?? attribute.value,
+        ),
+      }))
+      .filter((attribute) => Boolean(attribute.id));
     const buyBoxWinnerItemId = asStringId(buyBoxWinner?.item_id);
     const parsedProduct = {
       id: asString(product.id) ?? productId,
       name: asString(product.name),
+      familyName: asString(product.family_name),
       status: asString(product.status),
+      permalink: asString(product.permalink),
+      pictureUrls,
+      attributes,
+      domainId: asString(product.domain_id),
       parentId: asStringId(product.parent_id),
       childrenIds,
       soldQuantity: asNumber(product.sold_quantity),

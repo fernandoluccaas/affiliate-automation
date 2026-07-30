@@ -64,6 +64,15 @@ item URL, invent a slug, or treat a catalog ID as an item permalink. Affiliate
 link testing and automatic ingestion stay disabled until the exact API-provided
 PDP URL passes the official affiliate provider.
 
+When that gate is satisfied, `PRODUCT_CATALOG_PDP_FALLBACK` keeps the catalog
+PRODUCT ID as the marketplace identity and uses the selected product-item
+summary only for commercial facts such as price, seller and shipping. ITEM
+detail hydration remains the preferred enrichment path; a per-item 401/403 can
+be recorded as `DETAIL_ENRICHMENT_UNAVAILABLE` without invalidating an
+otherwise eligible catalog PDP. The selected ITEM and seller are retained in
+the import-job metadata, while offer fingerprinting remains based on material
+price, link, shipping and stock facts rather than seller/ranking churn.
+
 `bestSellersEnabled=true` enables the highlights source. When it is false, discovery returns `DISCOVERY_SOURCE_DISABLED` and does not call highlights. No automatic category-search fallback exists yet.
 
 The manual category-search probe is available only for a validated leaf category and remains `EXPERIMENTAL`. It reports the logical endpoint and parameters, authentication mode, HTTP status, total results, usable item IDs and up to five ID/title samples. Non-2xx responses preserve only the sanitized Mercado Livre fields `error`, `code`, `message`, `cause` and `blocked_by`. Authorization headers, access tokens, refresh tokens and client secrets are never included in the result or logs.

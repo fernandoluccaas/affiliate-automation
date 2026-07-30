@@ -366,6 +366,9 @@ function emptyProductDiagnostics(): MercadoLivreProductResolutionDiagnostics {
     productResolvedDirectly: 0,
     productResolvedViaChild: 0,
     productResolvedViaItems: 0,
+    productResolvedViaCatalogPdp: 0,
+    productDetailEnrichmentUnavailable: false,
+    productPdpFallbackEligible: false,
     productItemsFetched: 0,
     productItemsUsable: 0,
     productItemsSkipped: 0,
@@ -388,6 +391,10 @@ function addProductDiagnostics(
   target.productResolvedDirectly += source.productResolvedDirectly;
   target.productResolvedViaChild += source.productResolvedViaChild;
   target.productResolvedViaItems += source.productResolvedViaItems;
+  target.productResolvedViaCatalogPdp += source.productResolvedViaCatalogPdp;
+  target.productDetailEnrichmentUnavailable ||=
+    source.productDetailEnrichmentUnavailable;
+  target.productPdpFallbackEligible ||= source.productPdpFallbackEligible;
   target.productItemsFetched += source.productItemsFetched;
   target.productItemsUsable += source.productItemsUsable;
   target.productItemsSkipped += source.productItemsSkipped;

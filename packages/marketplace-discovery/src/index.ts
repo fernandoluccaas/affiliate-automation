@@ -9,9 +9,11 @@ import {
   decryptSecret,
   emitMercadoLivreOperationalMetric,
   encryptSecret,
+  isSafeMercadoLivreProductPermalink,
   normalizeMercadoLivreCookie,
   parseMercadoLivreCookie,
   sanitizeMercadoLivreAffiliateError,
+  selectBestMercadoLivreCatalogProductSummary,
   type CreateMercadoLivreAffiliateLinkInput,
   type CreateMercadoLivreAffiliateLinkResult,
   type MarketplaceConnector,
@@ -21,6 +23,7 @@ import {
   type MercadoLivreHighlightSkipReason,
   type MercadoLivreOperationalEvent,
   type MercadoLivreProduct,
+  type MercadoLivreCatalogProductItemSummary,
   type MercadoLivreProductItem,
   type MercadoLivreProductResolutionDiagnostics,
   type MercadoLivreResolutionStrategy,
@@ -95,6 +98,10 @@ export type MercadoLivreDiscoveryMetrics = {
   productLeafWithoutWinner: number;
   productParentWithoutResolvableChild: number;
   resolvedItemCandidates: number;
+  resolvedItems: number;
+  resolvedCatalogProducts: number;
+  resolvedCatalogProductsViaSummary: number;
+  resolvedUserProducts: number;
   unresolvedCandidates: number;
   uniqueCandidates: number;
   itemsFetched: number;
@@ -108,6 +115,9 @@ export type MercadoLivreDiscoveryMetrics = {
   readyToPublish: number;
   readyForAffiliateLink: number;
   affiliateLinkAttempts: number;
+  catalogProductPdpAffiliateRequested: number;
+  catalogProductPdpAffiliateGenerated: number;
+  catalogProductPdpAffiliateFailed: number;
   affiliateLinksGenerated: number;
   affiliateLinksReused: number;
   affiliateIneligible: number;
@@ -355,6 +365,10 @@ export function createMercadoLivreDiscoveryMetrics(): MercadoLivreDiscoveryMetri
     productLeafWithoutWinner: 0,
     productParentWithoutResolvableChild: 0,
     resolvedItemCandidates: 0,
+    resolvedItems: 0,
+    resolvedCatalogProducts: 0,
+    resolvedCatalogProductsViaSummary: 0,
+    resolvedUserProducts: 0,
     unresolvedCandidates: 0,
     uniqueCandidates: 0,
     itemsFetched: 0,
@@ -368,6 +382,9 @@ export function createMercadoLivreDiscoveryMetrics(): MercadoLivreDiscoveryMetri
     readyToPublish: 0,
     readyForAffiliateLink: 0,
     affiliateLinkAttempts: 0,
+    catalogProductPdpAffiliateRequested: 0,
+    catalogProductPdpAffiliateGenerated: 0,
+    catalogProductPdpAffiliateFailed: 0,
     affiliateLinksGenerated: 0,
     affiliateLinksReused: 0,
     affiliateIneligible: 0,
@@ -925,6 +942,9 @@ async function enrichCandidatesWithAffiliateLinks(
       }
 
       metrics.affiliateLinkAttempts += 1;
+      if (candidate.candidateKind === "CATALOG_PRODUCT") {
+        metrics.catalogProductPdpAffiliateRequested += 1;
+      }
 
       try {
         const generated = await provider.generate({
@@ -945,6 +965,9 @@ async function enrichCandidatesWithAffiliateLinks(
         }
 
         metrics.affiliateLinksGenerated += 1;
+        if (candidate.candidateKind === "CATALOG_PRODUCT") {
+          metrics.catalogProductPdpAffiliateGenerated += 1;
+        }
         emitItem("mercadolivre_affiliate_link_generated", "SUCCEEDED", 1);
         return {
           candidate,
@@ -964,6 +987,12 @@ async function enrichCandidatesWithAffiliateLinks(
         );
 
         metrics.errors += 1;
+        if (candidate.candidateKind === "CATALOG_PRODUCT") {
+          metrics.catalogProductPdpAffiliateFailed += 1;
+          if (!failure.sessionExpired) {
+            failure.code = "PRODUCT_PDP_AFFILIATE_LINK_UNSUPPORTED";
+          }
+        }
 
         if (failure.productIneligible) {
           metrics.affiliateIneligible += 1;
@@ -1129,6 +1158,8 @@ function recordProductDiagnostics(
   metrics.productResolvedDirectly += diagnostics.productResolvedDirectly;
   metrics.productResolvedViaChild += diagnostics.productResolvedViaChild;
   metrics.productResolvedViaItems += diagnostics.productResolvedViaItems;
+  metrics.resolvedCatalogProductsViaSummary +=
+    diagnostics.productResolvedViaCatalogPdp;
   metrics.productItemsFetched += diagnostics.productItemsFetched;
   metrics.productItemsUsable += diagnostics.productItemsUsable;
   metrics.productItemsSkipped += diagnostics.productItemsSkipped;
@@ -1156,6 +1187,9 @@ function emptyProductDiagnostics(): MercadoLivreProductResolutionDiagnostics {
     productResolvedDirectly: 0,
     productResolvedViaChild: 0,
     productResolvedViaItems: 0,
+    productResolvedViaCatalogPdp: 0,
+    productDetailEnrichmentUnavailable: false,
+    productPdpFallbackEligible: false,
     productItemsFetched: 0,
     productItemsUsable: 0,
     productItemsSkipped: 0,
@@ -1189,6 +1223,8 @@ function resolvedHighlight(
   return {
     ok: true,
     candidate: {
+      kind: strategy === "USER_PRODUCT_ACTIVE_ITEM" ? "USER_PRODUCT" : "ITEM",
+      marketplaceExternalId: resolvedItemId,
       sourceHighlightId: candidate.id,
       sourceHighlightType: candidate.type,
       ...(metadata.resolvedProductId
@@ -1200,6 +1236,103 @@ function resolvedHighlight(
       categoryId: candidate.categoryId,
     },
     ...(diagnostics ? { diagnostics } : {}),
+  };
+}
+
+function catalogProductOfferCandidate(
+  highlight: MercadoLivreHighlightCandidate,
+  product: MercadoLivreProduct,
+  summary: MercadoLivreCatalogProductItemSummary,
+): MarketplaceOfferCandidate | null {
+  const title = (product.name ?? product.familyName)?.trim() ?? "";
+
+  if (
+    product.childrenIds.length > 0 ||
+    product.status !== "active" ||
+    title.length < 3 ||
+    !isSafeMercadoLivreProductPermalink(product.permalink) ||
+    product.pictureUrls.length === 0 ||
+    summary.price === undefined ||
+    summary.price <= 0
+  ) {
+    return null;
+  }
+
+  const originalPrice =
+    summary.originalPrice !== undefined && summary.originalPrice > summary.price
+      ? summary.originalPrice
+      : null;
+  const stockStatus =
+    summary.availableQuantity === undefined
+      ? ("UNKNOWN" as const)
+      : summary.availableQuantity > 0
+        ? ("IN_STOCK" as const)
+        : ("OUT_OF_STOCK" as const);
+  const shippingStatus =
+    summary.freeShipping === undefined
+      ? ("UNKNOWN" as const)
+      : summary.freeShipping
+        ? ("FREE" as const)
+        : ("NOT_FREE" as const);
+
+  return {
+    marketplace: "MERCADO_LIVRE",
+    externalProductId: product.id,
+    title,
+    description: null,
+    category: summary.categoryId ?? highlight.categoryId,
+    imageUrl: product.pictureUrls[0] as string,
+    productUrl: product.permalink as string,
+    affiliateUrl: null,
+    currentPrice: summary.price,
+    originalPrice,
+    stockStatus,
+    shippingStatus,
+    freeShipping: summary.freeShipping ?? null,
+    availableQuantity: summary.availableQuantity ?? null,
+    sellerReputation: summary.sellerReputation ?? null,
+    rating: null,
+    salesCount: product.soldQuantity,
+    sellerId: summary.sellerId ?? null,
+    officialStoreId: summary.officialStoreId ?? null,
+    affiliateEligibility: "UNKNOWN",
+    trackingStrategy: "DIRECT_AFFILIATE_LINK",
+    itemCondition: summary.condition === "new" ? "new" : ("unknown" as const),
+    channels: [],
+    resolvedProductId: product.id,
+    resolvedItemId: summary.itemId,
+    candidateKind: "CATALOG_PRODUCT",
+    selectedCatalogItemId: summary.itemId,
+    resolutionStrategy: "PRODUCT_CATALOG_PDP_FALLBACK",
+    priceSource: "CATALOG_SUMMARY",
+    collectedAt: new Date(),
+  };
+}
+
+function resolvedCatalogProduct(
+  candidate: MercadoLivreHighlightCandidate,
+  product: MercadoLivreProduct,
+  summary: MercadoLivreCatalogProductItemSummary,
+  offerCandidate: MarketplaceOfferCandidate,
+  diagnostics: MercadoLivreProductResolutionDiagnostics,
+): MercadoLivreHighlightResolutionResult {
+  return {
+    ok: true,
+    candidate: {
+      kind: "CATALOG_PRODUCT",
+      marketplaceExternalId: product.id,
+      sourceHighlightId: candidate.id,
+      sourceHighlightType: candidate.type,
+      resolvedProductId: product.id,
+      resolvedItemId: summary.itemId,
+      selectedItemId: summary.itemId,
+      ...(summary.sellerId ? { selectedSellerId: summary.sellerId } : {}),
+      offerCandidate,
+      resolutionStrategy: "PRODUCT_CATALOG_PDP_FALLBACK",
+      position: candidate.position,
+      categoryId: candidate.categoryId,
+    },
+    diagnostics,
   };
 }
 
@@ -1564,17 +1697,6 @@ export class MercadoLivreHighlightResolver {
       );
     }
 
-    if (
-      productItemDiagnostics.productItemsUniqueIds > 0 &&
-      productItemDiagnostics.productItemsHydrated === 0
-    ) {
-      return skippedHighlight(
-        candidate,
-        "PRODUCT_ITEMS_HYDRATION_FAILED",
-        diagnostics,
-      );
-    }
-
     const productItemById = new Map(
       productItems.summaries.map((item) => [item.itemId, item]),
     );
@@ -1584,6 +1706,66 @@ export class MercadoLivreHighlightResolver {
     );
 
     if (!chosen) {
+      const detailFailureCount =
+        (productItemDiagnostics.rejectionReasons
+          .PRODUCT_ITEM_DETAIL_HTTP_ERROR ?? 0) +
+        (productItemDiagnostics.rejectionReasons
+          .PRODUCT_ITEM_DETAIL_NOT_FOUND ?? 0) +
+        (productItemDiagnostics.rejectionReasons.PRODUCT_ITEM_SCHEMA_MISMATCH ??
+          0);
+      const detailEnrichmentUnavailable =
+        productItemDiagnostics.productItemsUniqueIds > 0 &&
+        productItemDiagnostics.productItemsHydrated === 0 &&
+        detailFailureCount >= productItemDiagnostics.productItemsUniqueIds;
+      diagnostics.productDetailEnrichmentUnavailable =
+        detailEnrichmentUnavailable;
+
+      if (detailEnrichmentUnavailable) {
+        const selectedSummary = selectBestMercadoLivreCatalogProductSummary(
+          productItems.summaries,
+        );
+
+        if (selectedSummary) {
+          const offerCandidate = catalogProductOfferCandidate(
+            candidate,
+            product,
+            selectedSummary,
+          );
+          diagnostics.productPdpFallbackEligible = Boolean(offerCandidate);
+
+          if (offerCandidate) {
+            diagnostics.productResolvedViaCatalogPdp += 1;
+            return resolvedCatalogProduct(
+              candidate,
+              product,
+              selectedSummary,
+              offerCandidate,
+              diagnostics,
+            );
+          }
+
+          if (!isSafeMercadoLivreProductPermalink(product.permalink)) {
+            return skippedHighlight(
+              candidate,
+              "PRODUCT_PDP_PERMALINK_MISSING",
+              diagnostics,
+            );
+          }
+
+          return skippedHighlight(
+            candidate,
+            "PRODUCT_PDP_FALLBACK_INELIGIBLE",
+            diagnostics,
+          );
+        }
+
+        return skippedHighlight(
+          candidate,
+          "PRODUCT_ITEMS_HYDRATION_FAILED",
+          diagnostics,
+        );
+      }
+
       return skippedHighlight(
         candidate,
         "PRODUCT_ITEMS_NO_USABLE_ITEM",
@@ -1779,28 +1961,45 @@ export async function discoverCandidatesFromLeafCategories(
       }
 
       metrics.resolvedItemCandidates += 1;
-      const existing = resolvedCandidates.get(result.candidate.resolvedItemId);
+      if (result.candidate.kind === "CATALOG_PRODUCT") {
+        metrics.resolvedCatalogProducts += 1;
+      } else if (result.candidate.kind === "USER_PRODUCT") {
+        metrics.resolvedUserProducts += 1;
+      } else {
+        metrics.resolvedItems += 1;
+      }
+      const candidateKey = `${result.candidate.kind}:${result.candidate.marketplaceExternalId}`;
+      const existing = resolvedCandidates.get(candidateKey);
 
       if (!existing || result.candidate.position < existing.position) {
-        resolvedCandidates.set(
-          result.candidate.resolvedItemId,
-          result.candidate,
-        );
+        resolvedCandidates.set(candidateKey, result.candidate);
       }
     }
   }
 
   metrics.uniqueCandidates = resolvedCandidates.size;
-  const itemResult = await connector.getItemsWithDiagnostics([
-    ...resolvedCandidates.keys(),
-  ]);
+  const itemResolutions = [...resolvedCandidates.values()].filter(
+    (candidate) => candidate.kind !== "CATALOG_PRODUCT",
+  );
+  const itemResult = await connector.getItemsWithDiagnostics(
+    itemResolutions.flatMap((candidate) =>
+      candidate.resolvedItemId ? [candidate.resolvedItemId] : [],
+    ),
+  );
   metrics.itemsFetched += itemResult.diagnostics.itemsFetched;
   metrics.priceApiFetched += itemResult.diagnostics.priceApiFetched;
   metrics.priceFallbackUsed += itemResult.diagnostics.priceFallbackUsed;
   metrics.priceUnavailable += itemResult.diagnostics.priceUnavailable;
 
-  return itemResult.candidates.map((item) => {
-    const source = resolvedCandidates.get(item.externalProductId);
+  const itemResolutionById = new Map(
+    itemResolutions.flatMap((candidate) =>
+      candidate.resolvedItemId
+        ? ([[candidate.resolvedItemId, candidate]] as const)
+        : [],
+    ),
+  );
+  const resolvedItems = itemResult.candidates.map((item) => {
+    const source = itemResolutionById.get(item.externalProductId);
 
     if (!source) return item;
 
@@ -1813,10 +2012,40 @@ export async function discoverCandidatesFromLeafCategories(
       ...(source.resolvedProductId
         ? { resolvedProductId: source.resolvedProductId }
         : {}),
-      resolvedItemId: source.resolvedItemId,
+      resolvedItemId: item.externalProductId,
       resolutionStrategy: source.resolutionStrategy,
     };
   });
+  const resolvedCatalogProducts = [...resolvedCandidates.values()].flatMap(
+    (source) => {
+      if (source.kind !== "CATALOG_PRODUCT" || !source.offerCandidate) {
+        return [];
+      }
+
+      return [
+        {
+          ...source.offerCandidate,
+          sourceHighlightId: source.sourceHighlightId,
+          sourceHighlightType: source.sourceHighlightType,
+          sourceCategoryId: source.categoryId,
+          bestSellerPosition: source.position,
+          ...(source.resolvedProductId
+            ? { resolvedProductId: source.resolvedProductId }
+            : {}),
+          ...(source.selectedItemId
+            ? {
+                resolvedItemId: source.selectedItemId,
+                selectedCatalogItemId: source.selectedItemId,
+              }
+            : {}),
+          candidateKind: source.kind,
+          resolutionStrategy: source.resolutionStrategy,
+        },
+      ];
+    },
+  );
+
+  return [...resolvedItems, ...resolvedCatalogProducts];
 }
 
 function alertCodeForMercadoLivreError(error: unknown) {
@@ -1969,7 +2198,8 @@ function itemSourceData(candidate: MercadoLivreDiscoveredCandidate) {
     sourceId: candidate.sourceHighlightId ?? candidate.externalProductId,
     sourceType: candidate.sourceHighlightType ?? "ITEM",
     bestSellerPosition: candidate.bestSellerPosition,
-    externalItemId: candidate.externalProductId,
+    externalItemId:
+      candidate.selectedCatalogItemId ?? candidate.externalProductId,
   };
 }
 
@@ -2023,6 +2253,10 @@ async function persistIngestionResultItem(
       ...(errorMessage ? { errorMessage } : {}),
       metadata: {
         resolutionStrategy: enrichment.candidate.resolutionStrategy ?? null,
+        candidateKind: enrichment.candidate.candidateKind ?? "ITEM",
+        selectedCatalogItemId:
+          enrichment.candidate.selectedCatalogItemId ?? null,
+        selectedSellerId: enrichment.candidate.sellerId ?? null,
         linkGenerated: enrichment.linkGenerated,
         linkReused: enrichment.linkReused,
         ingestionStatus: result.status,
@@ -2092,6 +2326,10 @@ async function ingestAffiliateEnrichments(
             metadata: {
               resolutionStrategy:
                 enrichment.candidate.resolutionStrategy ?? null,
+              candidateKind: enrichment.candidate.candidateKind ?? "ITEM",
+              selectedCatalogItemId:
+                enrichment.candidate.selectedCatalogItemId ?? null,
+              selectedSellerId: enrichment.candidate.sellerId ?? null,
             },
           },
         });
@@ -2130,6 +2368,9 @@ async function enrichCandidatesWithProvider(
       }
 
       metrics.affiliateLinkAttempts += 1;
+      if (candidate.candidateKind === "CATALOG_PRODUCT") {
+        metrics.catalogProductPdpAffiliateRequested += 1;
+      }
       const generated = await dependencies.affiliateLinkProvider.generate({
         marketplace: candidate.marketplace,
         productUrl: candidate.productUrl,
@@ -2138,6 +2379,9 @@ async function enrichCandidatesWithProvider(
 
       if (generated.status === "GENERATED") {
         metrics.affiliateLinksGenerated += 1;
+        if (candidate.candidateKind === "CATALOG_PRODUCT") {
+          metrics.catalogProductPdpAffiliateGenerated += 1;
+        }
         emitOperationalMetric(
           dependencies,
           "mercadolivre_affiliate_link_generated",
@@ -2161,6 +2405,9 @@ async function enrichCandidatesWithProvider(
 
       if (generated.status === "INELIGIBLE") {
         metrics.affiliateIneligible += 1;
+        if (candidate.candidateKind === "CATALOG_PRODUCT") {
+          metrics.catalogProductPdpAffiliateFailed += 1;
+        }
         emitOperationalMetric(
           dependencies,
           "mercadolivre_discovery_items_ineligible",
@@ -2176,7 +2423,9 @@ async function enrichCandidatesWithProvider(
           affiliateEligibility: "INELIGIBLE",
           affiliateLabel: null,
           affiliateFailure: fixedAffiliateFailure(
-            "AFFILIATE_LINK_INELIGIBLE",
+            candidate.candidateKind === "CATALOG_PRODUCT"
+              ? "PRODUCT_PDP_AFFILIATE_LINK_UNSUPPORTED"
+              : "AFFILIATE_LINK_INELIGIBLE",
             generated.reason,
             { productIneligible: true, attempts: 1 },
           ),
@@ -2187,6 +2436,9 @@ async function enrichCandidatesWithProvider(
       }
 
       metrics.affiliatePending += 1;
+      if (candidate.candidateKind === "CATALOG_PRODUCT") {
+        metrics.catalogProductPdpAffiliateFailed += 1;
+      }
       emitOperationalMetric(
         dependencies,
         "mercadolivre_discovery_items_pending_link",
@@ -2203,7 +2455,9 @@ async function enrichCandidatesWithProvider(
         affiliateEligibility: "UNKNOWN",
         affiliateLabel: null,
         affiliateFailure: fixedAffiliateFailure(
-          "MANUAL_REQUIRED",
+          candidate.candidateKind === "CATALOG_PRODUCT"
+            ? "PRODUCT_PDP_AFFILIATE_LINK_UNSUPPORTED"
+            : "MANUAL_REQUIRED",
           generated.reason,
           { attempts: 1 },
         ),
@@ -2671,6 +2925,7 @@ function resolutionStrategyFromStoredValue(
     value === "PRODUCT_DIRECT_BUY_BOX" ||
     value === "PRODUCT_CHILD_BUY_BOX" ||
     value === "PRODUCT_ITEMS_FALLBACK" ||
+    value === "PRODUCT_CATALOG_PDP_FALLBACK" ||
     value === "USER_PRODUCT_ACTIVE_ITEM"
     ? value
     : undefined;

@@ -25,8 +25,10 @@ import {
   buildMercadoLivreAuthorizationUrl,
   decryptSecret,
   encryptSecret,
+  isSafeMercadoLivreProductPermalink,
   parseMercadoLivreCatalogProductItemSummary,
   resolveMercadoLivreItemCondition,
+  selectBestMercadoLivreCatalogProductSummary,
   type ApiFetch,
 } from "./index";
 
@@ -389,7 +391,16 @@ describe("MercadoLivreConnector", () => {
         fetchFn: vi.fn(async () =>
           jsonResponse({
             id: "MLB100",
+            name: "Smartphone Catalogo",
+            family_name: "Smartphone",
             status: "inactive",
+            permalink: "https://www.mercadolivre.com.br/smartphone/p/MLB100",
+            pictures: [
+              { secure_url: "https://http2.mlstatic.com/picture.jpg" },
+              { url: "http://unsafe.example/picture.jpg" },
+            ],
+            attributes: [{ id: "BRAND", value_name: "Marca" }],
+            domain_id: "MLB-CELLPHONES",
             children_ids: ["MLB101"],
             sold_quantity: 300,
             buy_box_winner: null,
@@ -400,7 +411,13 @@ describe("MercadoLivreConnector", () => {
 
     await expect(connector.getProduct("MLB100")).resolves.toMatchObject({
       id: "MLB100",
+      name: "Smartphone Catalogo",
+      familyName: "Smartphone",
       status: "inactive",
+      permalink: "https://www.mercadolivre.com.br/smartphone/p/MLB100",
+      pictureUrls: ["https://http2.mlstatic.com/picture.jpg"],
+      attributes: [{ id: "BRAND", valueName: "Marca" }],
+      domainId: "MLB-CELLPHONES",
       childrenIds: ["MLB101"],
       soldQuantity: 300,
     });
@@ -518,6 +535,53 @@ describe("MercadoLivreConnector", () => {
     expect(
       parseMercadoLivreCatalogProductItemSummary({ id: "PRODUCT123" }),
     ).toBeNull();
+  });
+
+  it("selects a usable catalog summary deterministically without detail-only fields", () => {
+    const selected = selectBestMercadoLivreCatalogProductSummary([
+      {
+        itemId: "MLB100001",
+        condition: "used",
+        price: 500,
+        summaryFieldsPresent: ["item_id", "condition", "price"],
+      },
+      {
+        itemId: "MLB100003",
+        condition: "new",
+        price: 450,
+        freeShipping: false,
+        summaryFieldsPresent: ["item_id", "condition", "price"],
+      },
+      {
+        itemId: "MLB100002",
+        condition: "new",
+        price: 500,
+        freeShipping: true,
+        officialStoreId: "10",
+        summaryFieldsPresent: ["item_id", "condition", "price"],
+      },
+    ]);
+
+    expect(selected?.itemId).toBe("MLB100002");
+    expect(
+      selectBestMercadoLivreCatalogProductSummary([
+        {
+          itemId: "MLB100004",
+          condition: "new",
+          summaryFieldsPresent: ["item_id", "condition"],
+        },
+      ]),
+    ).toBeNull();
+    expect(
+      isSafeMercadoLivreProductPermalink(
+        "https://www.mercadolivre.com.br/produto/p/MLB100",
+      ),
+    ).toBe(true);
+    expect(
+      isSafeMercadoLivreProductPermalink(
+        "https://mercadolivre.com.br.evil.example/p/MLB100",
+      ),
+    ).toBe(false);
   });
 
   it("resolves item_condition before condition and ITEM_CONDITION attributes", () => {
