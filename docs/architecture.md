@@ -12,6 +12,18 @@ The ingestion boundary now separates candidate identity from enrichment. `market
 
 Phase 2B adds the publication and tracking loop. The worker selects active compatible channels for `READY_TO_PUBLISH` offers, creates idempotent `Publication` rows with deterministic message payloads, publishes scheduled rows through Telegram or manual export adapters, records `PublicationAttempt`, and updates publication status. `/go/[slug]` is public and records clicks before redirecting to the affiliate destination.
 
+Phase 4 runs that flow continuously with independent discovery, publication,
+retry and maintenance clocks. The publication scheduler chooses at most one
+Offer per Channel in a cadence, while the same Offer version may create one
+idempotent Publication for each compatible Channel. READY offers are ordered by
+never-published state, score, known discount, bestseller position, recency and
+stable ID. Scheduled delivery also takes at most one row per Channel per
+publication cadence, preventing restart bursts.
+
+Daily limits and allowed publication windows use `Channel.timezone`. The worker
+converts the local midnight boundaries to UTC for PostgreSQL queries, so a UTC
+server does not reset an `America/Sao_Paulo` channel at UTC midnight.
+
 Phase 2C adds multi-provider copy generation between channel selection and publication creation. The worker requests structured JSON copy from the configured provider, validates the returned text against confirmed offer facts, persists message metadata on `Publication`, and falls back to the deterministic composer without blocking Telegram, manual export, tracking or Redis locks. Ollama is the default provider and is called over HTTP at the configured `OLLAMA_BASE_URL`; OpenAI remains optional.
 
 Phase 3A adds the official Mercado Livre connector. OAuth starts from `/integracoes`, returns to `/api/integrations/mercadolivre/callback`, validates a server-side `state` cookie, exchanges the code for tokens and stores encrypted rotating credentials in `MarketplaceAccount`. Discovery is configured in `/integracoes/mercado-livre` and uses official categories, `/highlights/{siteId}/category/{categoryId}`, catalog `/products/{PRODUCT_ID}` resolution, multiget `/items?ids=...` and `/items/{ITEM_ID}/prices`.

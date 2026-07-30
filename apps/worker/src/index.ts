@@ -1,5 +1,6 @@
 import {
   canScheduleInWindow,
+  getZonedDayRange,
   isOfferCompatibleWithChannel,
   type ChannelPolicy,
   type PolicyFailureCode,
@@ -126,18 +127,6 @@ function asStringArray(value: unknown) {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === "string")
     : [];
-}
-
-function startOfDay(date: Date) {
-  const next = new Date(date);
-  next.setHours(0, 0, 0, 0);
-  return next;
-}
-
-function addDays(date: Date, days: number) {
-  const next = new Date(date);
-  next.setDate(next.getDate() + days);
-  return next;
 }
 
 function channelPolicy(channel: Channel): ChannelPolicy {
@@ -330,17 +319,56 @@ function publisherForChannel(channel: Channel): PublisherAdapter | null {
   return null;
 }
 
-async function channelDailyCount(channelId: string, now: Date) {
-  const today = startOfDay(now);
-  const tomorrow = addDays(today, 1);
+async function channelDailyCount(channel: Channel, now: Date) {
+  const { start, end } = getZonedDayRange(now, channel.timezone);
 
   return prisma.publication.count({
     where: {
-      channelId,
-      scheduledAt: { gte: today, lt: tomorrow },
+      channelId: channel.id,
+      scheduledAt: { gte: start, lt: end },
       status: { notIn: ["CANCELLED", "PUBLICATION_FAILED", "FAILED"] },
     },
   });
+}
+
+type ReadyOfferPriority = {
+  id: string;
+  publishedAt: Date | null;
+  score: number | null;
+  discountPercentage: number | string | { toString(): string } | null;
+  bestSellerPosition: number | null;
+  collectedAt: Date;
+};
+
+export function compareReadyOfferPriority(
+  left: ReadyOfferPriority,
+  right: ReadyOfferPriority,
+) {
+  const leftPublished = left.publishedAt ? 1 : 0;
+  const rightPublished = right.publishedAt ? 1 : 0;
+  if (leftPublished !== rightPublished) {
+    return leftPublished - rightPublished;
+  }
+
+  const scoreDifference = (right.score ?? 0) - (left.score ?? 0);
+  if (scoreDifference !== 0) return scoreDifference;
+
+  const discountDifference =
+    Number(right.discountPercentage ?? -1) -
+    Number(left.discountPercentage ?? -1);
+  if (discountDifference !== 0) return discountDifference;
+
+  const rankDifference =
+    (left.bestSellerPosition ?? Number.MAX_SAFE_INTEGER) -
+    (right.bestSellerPosition ?? Number.MAX_SAFE_INTEGER);
+  if (rankDifference !== 0) return rankDifference;
+
+  const recencyDifference =
+    (right.collectedAt instanceof Date ? right.collectedAt.getTime() : 0) -
+    (left.collectedAt instanceof Date ? left.collectedAt.getTime() : 0);
+  if (recencyDifference !== 0) return recencyDifference;
+
+  return left.id.localeCompare(right.id);
 }
 
 async function lastChannelPublication(channelId: string) {
@@ -427,21 +455,18 @@ export async function scheduleReadyOffers(now = new Date()) {
   const [offers, channels] = await Promise.all([
     prisma.offer.findMany({
       where: { status: "READY_TO_PUBLISH" },
-      orderBy: { collectedAt: "asc" },
       take: 50,
       include: { affiliateLinks: true },
     }),
     prisma.channel.findMany({ orderBy: { createdAt: "asc" } }),
   ]);
   metrics.readyOffersFound = offers.length;
+  const prioritizedOffers = [...offers].sort(compareReadyOfferPriority);
+  const scheduledChannelIds = new Set<string>();
 
-  for (const offer of offers) {
-    let offerScheduled = false;
-
+  for (const offer of prioritizedOffers) {
     for (const channel of channels) {
-      if (offerScheduled) {
-        break;
-      }
+      if (scheduledChannelIds.has(channel.id)) continue;
 
       const policy = channelPolicy(channel);
       const compatibility = isOfferCompatibleWithChannel(
@@ -472,7 +497,7 @@ export async function scheduleReadyOffers(now = new Date()) {
 
       const [publicationsToday, lastPublication, productPublication] =
         await Promise.all([
-          channelDailyCount(channel.id, now),
+          channelDailyCount(channel, now),
           lastChannelPublication(channel.id),
           lastProductPublication(channel.id, offer.productId),
         ]);
@@ -490,6 +515,16 @@ export async function scheduleReadyOffers(now = new Date()) {
 
       if (!windowResult.ok) {
         recordSkip(metrics, windowResult.code);
+        continue;
+      }
+
+      const idempotencyKey = `publication:${channel.id}:${offer.id}`;
+      const existingPublication = await prisma.publication.findFirst({
+        where: { idempotencyKey },
+        select: { id: true },
+      });
+      if (existingPublication) {
+        recordSkip(metrics, "DUPLICATE_PUBLICATION");
         continue;
       }
 
@@ -511,27 +546,15 @@ export async function scheduleReadyOffers(now = new Date()) {
       }
 
       try {
-        const created = await prisma.$transaction(async (tx) => {
-          const publication = await createPublicationIdempotently(
-            tx,
-            offer,
-            channel,
-            payload,
-            now,
-          );
+        await prisma.$transaction(async (tx) => {
+          await createPublicationIdempotently(tx, offer, channel, payload, now);
           await tx.offer.update({
             where: { id: offer.id },
             data: { status: "SCHEDULED", scheduledAt: now },
           });
-          return publication;
         });
-
-        if (created.createdAt.getTime() === created.updatedAt.getTime()) {
-          metrics.scheduled += 1;
-          offerScheduled = true;
-        } else {
-          recordSkip(metrics, "DUPLICATE_PUBLICATION");
-        }
+        metrics.scheduled += 1;
+        scheduledChannelIds.add(channel.id);
       } finally {
         await lock.release();
       }
@@ -659,7 +682,7 @@ export async function publishScheduledOffers(now = new Date()) {
       status: "SCHEDULED",
       scheduledAt: { lte: now },
     },
-    take: 25,
+    take: 100,
     orderBy: { scheduledAt: "asc" },
     include: {
       channel: true,
@@ -667,8 +690,14 @@ export async function publishScheduledOffers(now = new Date()) {
       attempts: { select: { id: true } },
     },
   });
+  const selectedChannelIds = new Set<string>();
+  const selectedPublications = publications.filter((publication) => {
+    if (selectedChannelIds.has(publication.channelId)) return false;
+    selectedChannelIds.add(publication.channelId);
+    return true;
+  });
 
-  for (const publication of publications) {
+  for (const publication of selectedPublications) {
     const payload = await payloadFromPublication(publication);
     const publisher = publisherForChannel(publication.channel);
 

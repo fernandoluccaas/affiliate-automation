@@ -99,6 +99,29 @@ SIGINT and SIGTERM stop admission of new components, wait for the active
 component to settle, persist an `OFFLINE` heartbeat and only then disconnect
 Prisma.
 
+## Publication distribution
+
+Each publication cadence schedules at most one eligible Offer per Channel and
+delivers at most one due Publication per Channel. It does not drain a backlog in
+one tick. A compatible Offer version can be scheduled once for each Channel;
+the idempotency key remains `channel + Offer version`.
+
+READY offers are sorted deterministically:
+
+1. never published;
+2. highest score;
+3. highest known discount;
+4. best known bestseller position;
+5. most recently collected;
+6. stable ID.
+
+Unknown discount and ranking values are neutral and sort after known values at
+the corresponding priority.
+
+Daily counts use the UTC interval corresponding to midnight-to-midnight in
+`Channel.timezone`. Allowed start/end times and minimum intervals continue to
+use the same channel policy, including windows that cross midnight.
+
 ## Safety boundary
 
 Continuous operation must reuse the validated Mercado Livre discovery service

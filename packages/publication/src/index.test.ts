@@ -7,6 +7,7 @@ import {
   canScheduleInWindow,
   deterministicMessageComposer,
   formatBRLCurrency,
+  getZonedDayRange,
   isOfferCompatibleWithChannel,
   isWithinAllowedWindow,
   selectPromotionalHeadline,
@@ -256,7 +257,12 @@ describe("channel policy", () => {
   it("accepts compatible offers", () => {
     expect(
       isOfferCompatibleWithChannel(
-        { marketplace: "SHOPEE", category: "Casa", score: 90, discountPercentage: 20 },
+        {
+          marketplace: "SHOPEE",
+          category: "Casa",
+          score: 90,
+          discountPercentage: 20,
+        },
         channel,
       ),
     ).toEqual({ ok: true });
@@ -279,50 +285,74 @@ describe("channel policy", () => {
     [10, null, false],
     [10, 15, true],
     [10, 5, false],
-  ])("handles minimum discount %s with offer discount %s", (minimumDiscount, discount, expected) => {
-    const result = isOfferCompatibleWithChannel(
-      { ...sparseOffer, discountPercentage: discount },
-      { ...channel, allowedCategories: [], minimumScore: 0, minimumDiscountPercentage: minimumDiscount },
-    );
+  ])(
+    "handles minimum discount %s with offer discount %s",
+    (minimumDiscount, discount, expected) => {
+      const result = isOfferCompatibleWithChannel(
+        { ...sparseOffer, discountPercentage: discount },
+        {
+          ...channel,
+          allowedCategories: [],
+          minimumScore: 0,
+          minimumDiscountPercentage: minimumDiscount,
+        },
+      );
 
-    expect(result.ok).toBe(expected);
-    if (!expected) {
-      expect(result).toMatchObject({ code: "CHANNEL_MIN_DISCOUNT" });
-    }
-  });
+      expect(result.ok).toBe(expected);
+      if (!expected) {
+        expect(result).toMatchObject({ code: "CHANNEL_MIN_DISCOUNT" });
+      }
+    },
+  );
 
   it.each([
     [[], null, true],
     [["Casa"], null, false],
     [["Casa"], "Casa", true],
     [["Casa"], "Eletronicos", false],
-  ])("handles allowed categories %j with offer category %s", (allowedCategories, category, expected) => {
-    const result = isOfferCompatibleWithChannel(
-      { ...sparseOffer, category },
-      { ...channel, allowedCategories, minimumScore: 0, minimumDiscountPercentage: 0 },
-    );
+  ])(
+    "handles allowed categories %j with offer category %s",
+    (allowedCategories, category, expected) => {
+      const result = isOfferCompatibleWithChannel(
+        { ...sparseOffer, category },
+        {
+          ...channel,
+          allowedCategories,
+          minimumScore: 0,
+          minimumDiscountPercentage: 0,
+        },
+      );
 
-    expect(result.ok).toBe(expected);
-    if (!expected) {
-      expect(result).toMatchObject({ code: "CHANNEL_CATEGORY_MISMATCH" });
-    }
-  });
+      expect(result.ok).toBe(expected);
+      if (!expected) {
+        expect(result).toMatchObject({ code: "CHANNEL_CATEGORY_MISMATCH" });
+      }
+    },
+  );
 
   it.each([
     [0, 70, true],
     [80, 100, true],
     [80, 70, false],
-  ])("handles minimum score %s with offer score %s", (minimumScore, score, expected) => {
-    const result = isOfferCompatibleWithChannel(
-      { ...sparseOffer, score },
-      { ...channel, allowedCategories: [], minimumScore, minimumDiscountPercentage: 0 },
-    );
+  ])(
+    "handles minimum score %s with offer score %s",
+    (minimumScore, score, expected) => {
+      const result = isOfferCompatibleWithChannel(
+        { ...sparseOffer, score },
+        {
+          ...channel,
+          allowedCategories: [],
+          minimumScore,
+          minimumDiscountPercentage: 0,
+        },
+      );
 
-    expect(result.ok).toBe(expected);
-    if (!expected) {
-      expect(result).toMatchObject({ code: "CHANNEL_MIN_SCORE" });
-    }
-  });
+      expect(result.ok).toBe(expected);
+      if (!expected) {
+        expect(result).toMatchObject({ code: "CHANNEL_MIN_SCORE" });
+      }
+    },
+  );
 
   it("does not block unknown stock, unknown shipping or low completeness without explicit policy", () => {
     expect(
@@ -338,25 +368,45 @@ describe("channel policy", () => {
   it("rejects incompatible marketplace, low discount and unavailable channels", () => {
     expect(
       isOfferCompatibleWithChannel(
-        { marketplace: "MERCADO_LIVRE", category: "Casa", score: 90, discountPercentage: 20 },
+        {
+          marketplace: "MERCADO_LIVRE",
+          category: "Casa",
+          score: 90,
+          discountPercentage: 20,
+        },
         channel,
       ),
     ).toMatchObject({ ok: false, code: "CHANNEL_MARKETPLACE_MISMATCH" });
     expect(
       isOfferCompatibleWithChannel(
-        { marketplace: "SHOPEE", category: "Casa", score: 90, discountPercentage: 5 },
+        {
+          marketplace: "SHOPEE",
+          category: "Casa",
+          score: 90,
+          discountPercentage: 5,
+        },
         channel,
       ),
     ).toMatchObject({ ok: false, code: "CHANNEL_MIN_DISCOUNT" });
     expect(
       isOfferCompatibleWithChannel(
-        { marketplace: "SHOPEE", category: "Casa", score: 90, discountPercentage: null },
+        {
+          marketplace: "SHOPEE",
+          category: "Casa",
+          score: 90,
+          discountPercentage: null,
+        },
         channel,
       ),
     ).toMatchObject({ ok: false, code: "CHANNEL_MIN_DISCOUNT" });
     expect(
       isOfferCompatibleWithChannel(
-        { marketplace: "SHOPEE", category: "Casa", score: 90, discountPercentage: 20 },
+        {
+          marketplace: "SHOPEE",
+          category: "Casa",
+          score: 90,
+          discountPercentage: 20,
+        },
         { ...channel, type: "WHATSAPP_CLOUD_API" },
       ),
     ).toMatchObject({ ok: false, code: "CHANNEL_TYPE_UNAVAILABLE" });
@@ -365,7 +415,9 @@ describe("channel policy", () => {
   it("checks daily limit, interval and product repeat", () => {
     const now = new Date("2026-07-23T15:00:00.000Z");
 
-    expect(canScheduleInWindow({ channel, now, publicationsToday: 2 })).toMatchObject({
+    expect(
+      canScheduleInWindow({ channel, now, publicationsToday: 2 }),
+    ).toMatchObject({
       ok: false,
       code: "CHANNEL_DAILY_LIMIT",
     });
@@ -388,9 +440,42 @@ describe("channel policy", () => {
   });
 
   it("checks timezone-aware allowed hours", () => {
-    expect(isWithinAllowedWindow(channel, new Date("2026-07-23T15:00:00.000Z"))).toBe(true);
-    expect(isWithinAllowedWindow(channel, new Date("2026-07-23T04:00:00.000Z"))).toBe(false);
-    expect(canScheduleInWindow({ channel, now: new Date("2026-07-23T04:00:00.000Z"), publicationsToday: 0 }))
-      .toMatchObject({ ok: false, code: "CHANNEL_TIME_WINDOW" });
+    expect(
+      isWithinAllowedWindow(channel, new Date("2026-07-23T15:00:00.000Z")),
+    ).toBe(true);
+    expect(
+      isWithinAllowedWindow(channel, new Date("2026-07-23T04:00:00.000Z")),
+    ).toBe(false);
+    expect(
+      canScheduleInWindow({
+        channel,
+        now: new Date("2026-07-23T04:00:00.000Z"),
+        publicationsToday: 0,
+      }),
+    ).toMatchObject({ ok: false, code: "CHANNEL_TIME_WINDOW" });
+  });
+
+  it("calculates the Brasília day independently from a UTC server day", () => {
+    expect(
+      getZonedDayRange(
+        new Date("2026-07-30T01:30:00.000Z"),
+        "America/Sao_Paulo",
+      ),
+    ).toEqual({
+      start: new Date("2026-07-29T03:00:00.000Z"),
+      end: new Date("2026-07-30T03:00:00.000Z"),
+    });
+  });
+
+  it("handles timezone day boundaries across daylight-saving offsets", () => {
+    expect(
+      getZonedDayRange(
+        new Date("2026-03-08T12:00:00.000Z"),
+        "America/New_York",
+      ),
+    ).toEqual({
+      start: new Date("2026-03-08T05:00:00.000Z"),
+      end: new Date("2026-03-09T04:00:00.000Z"),
+    });
   });
 });

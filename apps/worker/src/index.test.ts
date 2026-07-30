@@ -3,9 +3,11 @@ import type { Channel, Offer, Prisma } from "@affiliate/database";
 import { createMercadoLivreDiscoveryMetrics } from "@affiliate/marketplace-discovery";
 import { generateMessageForOffer } from "@affiliate/ai-copywriter";
 import {
+  compareReadyOfferPriority,
   createPublicationIdempotently,
   getChannelMessageFooter,
   headlineFromMessagePayload,
+  publishScheduledOffers,
   resolvePublicationUrl,
   runWorkerCycle,
   scheduleReadyOffers,
@@ -58,6 +60,27 @@ vi.mock("@affiliate/redis", () => ({
 }));
 
 describe("createPublicationIdempotently", () => {
+  it("prioritizes never-published, score, discount, ranking and recency deterministically", () => {
+    const base = {
+      publishedAt: null,
+      score: 80,
+      discountPercentage: 10,
+      bestSellerPosition: 8,
+      collectedAt: new Date("2026-07-30T10:00:00.000Z"),
+    };
+    const offers = [
+      { ...base, id: "published", publishedAt: new Date() },
+      { ...base, id: "rank-2", bestSellerPosition: 2 },
+      { ...base, id: "discount", discountPercentage: 20 },
+      { ...base, id: "score", score: 90 },
+      { ...base, id: "rank-1", bestSellerPosition: 1 },
+    ];
+
+    expect(
+      offers.sort(compareReadyOfferPriority).map((offer) => offer.id),
+    ).toEqual(["score", "discount", "rank-1", "rank-2", "published"]);
+  });
+
   it("uses direct affiliate URL for Mercado Livre offers", () => {
     const offer = {
       marketplace: "MERCADO_LIVRE",
@@ -178,6 +201,7 @@ describe("createPublicationIdempotently", () => {
       updatedAt: now,
     });
     const offerUpdate = vi.fn().mockResolvedValue(offer);
+    const publicationCount = vi.fn().mockResolvedValue(0);
 
     Object.assign(actual.prisma, {
       offer: {
@@ -186,7 +210,7 @@ describe("createPublicationIdempotently", () => {
       },
       channel: { findMany: vi.fn().mockResolvedValue([channel]) },
       publication: {
-        count: vi.fn().mockResolvedValue(0),
+        count: publicationCount,
         findFirst: vi.fn().mockResolvedValue(null),
         findMany: vi.fn().mockResolvedValue([
           {
@@ -209,6 +233,15 @@ describe("createPublicationIdempotently", () => {
       scheduled: 1,
       skipped: 0,
       skipReasons: {},
+    });
+    expect(publicationCount).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        channelId: "channel-1",
+        scheduledAt: {
+          gte: new Date("2026-07-24T03:00:00.000Z"),
+          lt: new Date("2026-07-25T03:00:00.000Z"),
+        },
+      }),
     });
     expect(vi.mocked(generateMessageForOffer)).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -234,6 +267,147 @@ describe("createPublicationIdempotently", () => {
         }),
       }),
     );
+  });
+
+  it("schedules the same Offer version once for each compatible channel", async () => {
+    const actual = await import("@affiliate/database");
+    const now = new Date("2026-07-30T12:00:00.000Z");
+    const offer = {
+      id: "offer-multi-channel",
+      productId: "product-multi",
+      title: "Oferta para dois canais",
+      externalProductId: "MLB-MULTI",
+      marketplace: "MERCADO_LIVRE",
+      category: "Tecnologia",
+      imageUrl: null,
+      originalPrice: 200,
+      currentPrice: 100,
+      discountPercentage: 50,
+      couponCode: null,
+      couponExpiration: null,
+      freeShipping: true,
+      shippingStatus: "FREE",
+      stockStatus: "IN_STOCK",
+      score: 90,
+      scoreCompletenessPercentage: 80,
+      affiliateUrl: "https://meli.la/multi",
+      trackingStrategy: "DIRECT_AFFILIATE_LINK",
+      version: 1,
+      collectedAt: now,
+      bestSellerPosition: 1,
+      affiliateLinks: [],
+    };
+    const channelBase = {
+      name: "Telegram",
+      type: "MANUAL_EXPORT",
+      enabled: true,
+      timezone: "America/Sao_Paulo",
+      dailyPublicationLimit: 10,
+      minimumIntervalMinutes: 0,
+      allowedStartTime: null,
+      allowedEndTime: null,
+      minimumScore: 0,
+      minDiscountPercentage: 0,
+      productRepeatIntervalDays: 0,
+      allowedMarketplaces: ["MERCADO_LIVRE"],
+      allowedCategories: [],
+      configuration: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const channels = [
+      { ...channelBase, id: "channel-general" },
+      { ...channelBase, id: "channel-tech" },
+    ];
+    const upsert = vi.fn().mockImplementation(({ create }) => ({
+      ...create,
+      id: `publication-${create.channelId}`,
+      createdAt: now,
+      updatedAt: now,
+    }));
+    const offerUpdate = vi.fn().mockResolvedValue(offer);
+
+    Object.assign(actual.prisma, {
+      offer: {
+        findMany: vi.fn().mockResolvedValue([offer]),
+        update: offerUpdate,
+      },
+      channel: { findMany: vi.fn().mockResolvedValue(channels) },
+      publication: {
+        count: vi.fn().mockResolvedValue(0),
+        findFirst: vi.fn().mockResolvedValue(null),
+        findMany: vi.fn().mockResolvedValue([]),
+        upsert,
+      },
+      $transaction: vi.fn(async (callback: (tx: unknown) => unknown) =>
+        callback({
+          publication: { upsert },
+          offer: { update: offerUpdate },
+        }),
+      ),
+    });
+
+    const metrics = await scheduleReadyOffers(now);
+
+    expect(metrics.scheduled).toBe(2);
+    expect(upsert).toHaveBeenCalledTimes(2);
+    expect(upsert.mock.calls.map(([input]) => input.create.channelId)).toEqual([
+      "channel-general",
+      "channel-tech",
+    ]);
+  });
+
+  it("publishes at most one queued row per channel after restart", async () => {
+    const actual = await import("@affiliate/database");
+    const now = new Date("2026-07-30T12:00:00.000Z");
+    const offer = {
+      id: "offer-queued",
+      imageUrl: null,
+      affiliateLinks: [],
+    };
+    const channel = (id: string) => ({
+      id,
+      type: "MANUAL_EXPORT",
+      configuration: null,
+    });
+    const publication = (id: string, channelId: string) => ({
+      id,
+      offerId: offer.id,
+      channelId,
+      status: "SCHEDULED",
+      messagePayload: {
+        offerId: offer.id,
+        channelId,
+        trackingUrl: "https://meli.la/queued",
+        message: "Mensagem",
+      },
+      offer,
+      channel: channel(channelId),
+      attempts: [],
+    });
+    const attemptCreate = vi.fn().mockResolvedValue({});
+    const publicationUpdate = vi.fn().mockResolvedValue({});
+    Object.assign(actual.prisma, {
+      publication: {
+        findMany: vi
+          .fn()
+          .mockResolvedValue([
+            publication("publication-a1", "channel-a"),
+            publication("publication-a2", "channel-a"),
+            publication("publication-b1", "channel-b"),
+          ]),
+        update: publicationUpdate,
+      },
+      publicationAttempt: { create: attemptCreate },
+    });
+
+    const metrics = await publishScheduledOffers(now);
+
+    expect(metrics.exported).toBe(2);
+    expect(attemptCreate).toHaveBeenCalledTimes(2);
+    expect(
+      attemptCreate.mock.calls.map(([input]) => input.data.publicationId),
+    ).toEqual(["publication-a1", "publication-b1"]);
   });
 
   it("uses a stable channel and offer idempotency key", async () => {

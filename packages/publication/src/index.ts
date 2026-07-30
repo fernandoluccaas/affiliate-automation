@@ -127,7 +127,8 @@ export type PolicyFailureCode =
   | "CHANNEL_TIME_WINDOW"
   | "CHANNEL_PRODUCT_REPEAT";
 
-export type PolicyResult = { ok: true } | { ok: false; code: PolicyFailureCode; reason: string };
+export type PolicyResult =
+  { ok: true } | { ok: false; code: PolicyFailureCode; reason: string };
 
 export function formatBRLCurrency(value: number | string) {
   return new Intl.NumberFormat("pt-BR", {
@@ -196,7 +197,9 @@ export function selectPromotionalHeadline(input: {
         );
   const safeCandidates = candidates.length > 0 ? candidates : pool;
 
-  return safeCandidates[stableHash(input.seed) % safeCandidates.length] as string;
+  return safeCandidates[
+    stableHash(input.seed) % safeCandidates.length
+  ] as string;
 }
 
 function validOptionalUrl(value: string | null | undefined) {
@@ -233,7 +236,9 @@ export class PromoMessageBuilder {
     };
     const headline = selectPromotionalHeadline({
       marketplace: input.marketplace,
-      seed: input.seed ?? `${input.marketplace}:${input.title}:${input.trackingUrl}`,
+      seed:
+        input.seed ??
+        `${input.marketplace}:${input.title}:${input.trackingUrl}`,
       ...(input.recentHeadlines
         ? { recentHeadlines: input.recentHeadlines }
         : {}),
@@ -329,8 +334,80 @@ function zonedMinutes(date: Date, timezone: string) {
     hour12: false,
   }).formatToParts(date);
   const hour = Number(parts.find((part) => part.type === "hour")?.value ?? 0);
-  const minute = Number(parts.find((part) => part.type === "minute")?.value ?? 0);
+  const minute = Number(
+    parts.find((part) => part.type === "minute")?.value ?? 0,
+  );
   return hour * 60 + minute;
+}
+
+function zonedDateParts(date: Date, timezone: string) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+
+  return {
+    year: Number(parts.find((part) => part.type === "year")?.value),
+    month: Number(parts.find((part) => part.type === "month")?.value),
+    day: Number(parts.find((part) => part.type === "day")?.value),
+  };
+}
+
+function timezoneOffsetMs(date: Date, timezone: string) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(date);
+  const value = (type: Intl.DateTimeFormatPartTypes) =>
+    Number(parts.find((part) => part.type === type)?.value);
+  const hour = value("hour") === 24 ? 0 : value("hour");
+  const representedAsUtc = Date.UTC(
+    value("year"),
+    value("month") - 1,
+    value("day"),
+    hour,
+    value("minute"),
+    value("second"),
+  );
+
+  return representedAsUtc - date.getTime();
+}
+
+function localMidnightToUtc(
+  input: { year: number; month: number; day: number },
+  timezone: string,
+) {
+  const localAsUtc = Date.UTC(input.year, input.month - 1, input.day);
+  let result = new Date(
+    localAsUtc - timezoneOffsetMs(new Date(localAsUtc), timezone),
+  );
+  result = new Date(localAsUtc - timezoneOffsetMs(result, timezone));
+  return result;
+}
+
+export function getZonedDayRange(now: Date, timezone: string) {
+  const current = zonedDateParts(now, timezone);
+  const nextDate = new Date(
+    Date.UTC(current.year, current.month - 1, current.day + 1),
+  );
+  const next = {
+    year: nextDate.getUTCFullYear(),
+    month: nextDate.getUTCMonth() + 1,
+    day: nextDate.getUTCDate(),
+  };
+
+  return {
+    start: localMidnightToUtc(current, timezone),
+    end: localMidnightToUtc(next, timezone),
+  };
 }
 
 export function isWithinAllowedWindow(channel: ChannelPolicy, now: Date) {
@@ -378,7 +455,10 @@ export function isOfferCompatibleWithChannel(
   }
 
   if (channel.allowedCategories.length > 0) {
-    if (!offer.category || !channel.allowedCategories.includes(offer.category)) {
+    if (
+      !offer.category ||
+      !channel.allowedCategories.includes(offer.category)
+    ) {
       return {
         ok: false,
         code: "CHANNEL_CATEGORY_MISMATCH",
@@ -389,14 +469,25 @@ export function isOfferCompatibleWithChannel(
 
   const minimumScore = Number(channel.minimumScore ?? 0);
 
-  if (Number.isFinite(minimumScore) && minimumScore > 0 && (offer.score ?? 0) < minimumScore) {
-    return { ok: false, code: "CHANNEL_MIN_SCORE", reason: "Score abaixo do minimo do canal." };
+  if (
+    Number.isFinite(minimumScore) &&
+    minimumScore > 0 &&
+    (offer.score ?? 0) < minimumScore
+  ) {
+    return {
+      ok: false,
+      code: "CHANNEL_MIN_SCORE",
+      reason: "Score abaixo do minimo do canal.",
+    };
   }
 
   const minimumDiscount = Number(channel.minimumDiscountPercentage ?? 0);
 
   if (Number.isFinite(minimumDiscount) && minimumDiscount > 0) {
-    if (offer.discountPercentage === null || offer.discountPercentage === undefined) {
+    if (
+      offer.discountPercentage === null ||
+      offer.discountPercentage === undefined
+    ) {
       return {
         ok: false,
         code: "CHANNEL_MIN_DISCOUNT",
@@ -416,7 +507,9 @@ export function isOfferCompatibleWithChannel(
   return { ok: true };
 }
 
-export function canScheduleInWindow(input: PublicationWindowInput): PolicyResult {
+export function canScheduleInWindow(
+  input: PublicationWindowInput,
+): PolicyResult {
   if (input.publicationsToday >= input.channel.dailyPublicationLimit) {
     return {
       ok: false,
@@ -448,7 +541,8 @@ export function canScheduleInWindow(input: PublicationWindowInput): PolicyResult
 
   if (input.lastProductPublicationAt) {
     const elapsedDays =
-      (input.now.getTime() - input.lastProductPublicationAt.getTime()) / (24 * 60 * 60 * 1000);
+      (input.now.getTime() - input.lastProductPublicationAt.getTime()) /
+      (24 * 60 * 60 * 1000);
 
     if (elapsedDays < input.channel.productRepeatIntervalDays) {
       return {
