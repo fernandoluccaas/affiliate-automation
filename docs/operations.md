@@ -104,6 +104,20 @@ Each component emits one bounded JSON event with timestamp, component, run ID,
 status and duration. Failure events use a fixed error code and never serialize
 the thrown error, cookies, tokens, headers or session values.
 
+## Restart and delivery guarantees
+
+The database side is idempotent: restarting never creates a second Publication
+for the same `Channel + Offer version`, and queued rows are drained at one row
+per Channel cadence.
+
+Delivery has one unavoidable at-least-once boundary. If the process stops before
+calling Telegram, the saved SCHEDULED row is retried safely. If Telegram accepts
+the message but the process stops before saving its returned message ID, the
+worker cannot prove delivery because the Bot API does not accept an idempotency
+key or provide a reliable lookup by the local Publication ID. That row may be
+sent again after restart. Publication attempts and external IDs are persisted as
+soon as a response is received, minimizing but not eliminating this window.
+
 ## Publication distribution
 
 Each publication cadence schedules at most one eligible Offer per Channel and
