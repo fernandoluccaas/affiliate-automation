@@ -139,17 +139,24 @@ export async function getRedisHealth(): Promise<RedisHealth> {
 export async function acquireLock(
   key: string,
   ttlMs: number,
+  options: {
+    env?: NodeJS.ProcessEnv;
+    requireRedis?: boolean;
+  } = {},
 ): Promise<LockHandle> {
-  const config = getRedisConfig();
+  const env = options.env ?? process.env;
+  const config = getRedisConfig(env);
   const token = randomUUID();
+  const requireRedis =
+    options.requireRedis ?? env.WORKER_REQUIRE_REDIS === "true";
 
   if (config.mode === "unavailable") {
     return {
       key,
       token,
-      acquired: true,
+      acquired: !requireRedis,
       mode: "unavailable",
-      extend: async () => true,
+      extend: async () => !requireRedis,
       release: async () => undefined,
     };
   }

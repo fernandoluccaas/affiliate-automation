@@ -7,6 +7,7 @@ import {
   createPublicationIdempotently,
   getChannelMessageFooter,
   headlineFromMessagePayload,
+  publicationRetryDelayMs,
   publishScheduledOffers,
   resolvePublicationUrl,
   runWorkerCycle,
@@ -60,6 +61,13 @@ vi.mock("@affiliate/redis", () => ({
 }));
 
 describe("createPublicationIdempotently", () => {
+  it("uses bounded exponential publication retry delays and honors Retry-After", () => {
+    expect(
+      [1, 2, 3, 4, 5].map((attempt) => publicationRetryDelayMs(attempt)),
+    ).toEqual([60_000, 300_000, 900_000, 1_800_000, 1_800_000]);
+    expect(publicationRetryDelayMs(1, 90)).toBe(90_000);
+  });
+
   it("prioritizes never-published, score, discount, ranking and recency deterministically", () => {
     const base = {
       publishedAt: null,
@@ -408,6 +416,78 @@ describe("createPublicationIdempotently", () => {
     expect(
       attemptCreate.mock.calls.map(([input]) => input.data.publicationId),
     ).toEqual(["publication-a1", "publication-b1"]);
+  });
+
+  it("persists Telegram Retry-After and blocks immediate retry", async () => {
+    const actual = await import("@affiliate/database");
+    const now = new Date("2026-07-30T12:00:00.000Z");
+    const previousToken = process.env.TELEGRAM_BOT_TOKEN;
+    const previousChat = process.env.TELEGRAM_CHAT_ID;
+    process.env.TELEGRAM_BOT_TOKEN = "test-token";
+    process.env.TELEGRAM_CHAT_ID = "test-chat";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 429,
+        json: async () => ({
+          ok: false,
+          error_code: 429,
+          description: "Too Many Requests",
+          parameters: { retry_after: 90 },
+        }),
+      }),
+    );
+    const publicationUpdate = vi.fn().mockResolvedValue({});
+    Object.assign(actual.prisma, {
+      publication: {
+        findMany: vi.fn().mockResolvedValue([
+          {
+            id: "publication-429",
+            offerId: "offer-429",
+            channelId: "channel-429",
+            status: "SCHEDULED",
+            messagePayload: {
+              offerId: "offer-429",
+              channelId: "channel-429",
+              trackingUrl: "https://meli.la/retry",
+              message: "Mensagem",
+            },
+            offer: {
+              id: "offer-429",
+              imageUrl: null,
+              affiliateLinks: [],
+            },
+            channel: {
+              id: "channel-429",
+              type: "TELEGRAM",
+              configuration: null,
+            },
+            attempts: [],
+          },
+        ]),
+        update: publicationUpdate,
+      },
+      publicationAttempt: { create: vi.fn().mockResolvedValue({}) },
+      systemAlert: { create: vi.fn().mockResolvedValue({}) },
+    });
+
+    const metrics = await publishScheduledOffers(now);
+
+    expect(metrics.failed).toBe(1);
+    expect(publicationUpdate).toHaveBeenCalledWith({
+      where: { id: "publication-429" },
+      data: expect.objectContaining({
+        status: "FAILED",
+        scheduledAt: new Date("2026-07-30T12:01:30.000Z"),
+      }),
+    });
+
+    if (previousToken === undefined) delete process.env.TELEGRAM_BOT_TOKEN;
+    else process.env.TELEGRAM_BOT_TOKEN = previousToken;
+    if (previousChat === undefined) delete process.env.TELEGRAM_CHAT_ID;
+    else process.env.TELEGRAM_CHAT_ID = previousChat;
+    vi.unstubAllGlobals();
   });
 
   it("uses a stable channel and offer idempotency key", async () => {

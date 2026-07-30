@@ -32,12 +32,15 @@ import {
 import { sanitizeMercadoLivreAffiliateError } from "@affiliate/marketplace-connectors";
 import { validateMarketplaceAffiliateUrl } from "@affiliate/validation";
 import {
+  getWorkerCadences,
   runContinuousWorker,
   type ContinuousWorkerDependencies,
   type WorkerCadences,
+  type WorkerComponent,
 } from "./runtime";
 
-const DEFAULT_MAX_ATTEMPTS = 3;
+const DEFAULT_MAX_ATTEMPTS = 4;
+const PUBLICATION_RETRY_MINUTES = [1, 5, 15, 30] as const;
 
 type JobMetrics = {
   readyOffersFound: number;
@@ -597,6 +600,7 @@ async function recordPublicationResult(
   result: PublisherResult,
   attemptNumber: number,
   maxAttempts: number,
+  now: Date,
 ) {
   const attemptStatus =
     result.status === "PUBLISHED"
@@ -647,11 +651,17 @@ async function recordPublicationResult(
     return;
   }
 
-  const definitiveFailure = attemptNumber >= maxAttempts;
+  const definitiveFailure =
+    result.failureKind === "PERMANENT" || attemptNumber >= maxAttempts;
+  const retryAt = new Date(
+    now.getTime() +
+      publicationRetryDelayMs(attemptNumber, result.retryAfterSeconds),
+  );
   await prisma.publication.update({
     where: { id: publication.id },
     data: {
       status: definitiveFailure ? "PUBLICATION_FAILED" : "FAILED",
+      ...(!definitiveFailure ? { scheduledAt: retryAt } : {}),
       errorMessage: result.errorMessage ?? "Publication failed.",
     },
   });
@@ -672,6 +682,21 @@ async function recordPublicationResult(
   }
 }
 
+export function publicationRetryDelayMs(
+  attemptNumber: number,
+  retryAfterSeconds?: number,
+) {
+  const position = Math.max(
+    0,
+    Math.min(PUBLICATION_RETRY_MINUTES.length - 1, attemptNumber - 1),
+  );
+  const backoffMs =
+    (PUBLICATION_RETRY_MINUTES[position] ?? 30) * 60_000;
+  const retryAfterMs =
+    retryAfterSeconds && retryAfterSeconds > 0 ? retryAfterSeconds * 1000 : 0;
+  return Math.max(backoffMs, retryAfterMs);
+}
+
 export async function publishScheduledOffers(now = new Date()) {
   const metrics = emptyMetrics();
   const maxAttempts = Number(
@@ -681,6 +706,14 @@ export async function publishScheduledOffers(now = new Date()) {
     where: {
       status: "SCHEDULED",
       scheduledAt: { lte: now },
+      channel: {
+        publications: {
+          none: {
+            status: "FAILED",
+            scheduledAt: { gt: now },
+          },
+        },
+      },
     },
     take: 100,
     orderBy: { scheduledAt: "asc" },
@@ -720,6 +753,7 @@ export async function publishScheduledOffers(now = new Date()) {
       result,
       attemptNumber,
       maxAttempts,
+      now,
     );
 
     if (result.status === "PUBLISHED") {
@@ -740,11 +774,17 @@ export async function retryFailedPublications(now = new Date()) {
     process.env.WORKER_MAX_ATTEMPTS ?? DEFAULT_MAX_ATTEMPTS,
   );
   const publications = await prisma.publication.findMany({
-    where: { status: "FAILED" },
+    where: { status: "FAILED", scheduledAt: { lte: now } },
+    orderBy: { scheduledAt: "asc" },
+    take: 100,
     include: { attempts: { select: { id: true } } },
   });
+  const selectedChannels = new Set<string>();
 
   for (const publication of publications) {
+    if (selectedChannels.has(publication.channelId)) continue;
+    selectedChannels.add(publication.channelId);
+
     if (publication.attempts.length >= maxAttempts) {
       await prisma.publication.update({
         where: { id: publication.id },
@@ -1161,34 +1201,64 @@ export async function startWorker(
     }
   };
 
-  const dependencies: ContinuousWorkerDependencies = options.dependencies ?? {
-    discovery: (now) =>
-      independently([
-        () => collectMercadoLivreCandidates(now),
-        () =>
-          processAffiliateLinkJobs({
-            limit: pendingAffiliateBatchLimit(),
-          }),
-        () => refreshMercadoLivreOffers(now),
-      ]),
-    publication: (now) =>
-      independently([
-        () => scheduleReadyOffers(now),
-        () => publishScheduledOffers(now),
-      ]),
-    retry: (now) =>
-      independently([
-        () => retryFailedPublications(now),
-        () => publishScheduledOffers(now),
-      ]),
-    maintenance: (now) => expireInvalidOffers(now),
-  };
+  const rawDependencies: ContinuousWorkerDependencies =
+    options.dependencies ?? {
+      discovery: (now) =>
+        independently([
+          () => collectMercadoLivreCandidates(now),
+          () =>
+            processAffiliateLinkJobs({
+              limit: pendingAffiliateBatchLimit(),
+            }),
+          () => refreshMercadoLivreOffers(now),
+        ]),
+      publication: (now) =>
+        independently([
+          () => scheduleReadyOffers(now),
+          () => publishScheduledOffers(now),
+        ]),
+      retry: (now) => retryFailedPublications(now),
+      maintenance: (now) => expireInvalidOffers(now),
+    };
+  const cadences = options.cadences ?? getWorkerCadences();
+  const components: WorkerComponent[] = [
+    "discovery",
+    "publication",
+    "retry",
+    "maintenance",
+  ];
+  const dependencies = Object.fromEntries(
+    components.map((component) => [
+      component,
+      async (now: Date) => {
+        const lock = await acquireLock(
+          `worker:continuous:${component}`,
+          Math.max(60_000, cadences[component]),
+        );
+        if (!lock.acquired) {
+          if (
+            lock.mode === "unavailable" &&
+            process.env.WORKER_REQUIRE_REDIS === "true"
+          ) {
+            throw new Error("Required Redis lock is unavailable.");
+          }
+          return { skipped: true, reason: "LOCK_NOT_ACQUIRED" };
+        }
+
+        try {
+          return await rawDependencies[component](now);
+        } finally {
+          await lock.release();
+        }
+      },
+    ]),
+  ) as ContinuousWorkerDependencies;
 
   try {
     return await runContinuousWorker({
       dependencies,
       signal: shutdownController.signal,
-      ...(options.cadences ? { cadences: options.cadences } : {}),
+      cadences,
       ...(options.heartbeatIntervalMs
         ? { heartbeatIntervalMs: options.heartbeatIntervalMs }
         : {}),

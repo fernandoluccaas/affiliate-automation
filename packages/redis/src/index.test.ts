@@ -47,4 +47,16 @@ describe("redis abstraction", () => {
     restoreEnv("UPSTASH_REDIS_REST_TOKEN", previousUpstashToken);
     restoreEnv("REDIS_URL", previousRedisUrl);
   });
+
+  it("does not pretend to acquire a lock when Redis is required", async () => {
+    const lock = await acquireLock("required-lock", 1000, {
+      env: { WORKER_REQUIRE_REDIS: "true" },
+    });
+
+    expect(lock).toMatchObject({
+      acquired: false,
+      mode: "unavailable",
+    });
+    await expect(lock.extend(1000)).resolves.toBe(false);
+  });
 });

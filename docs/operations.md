@@ -122,6 +122,42 @@ Daily counts use the UTC interval corresponding to midnight-to-midnight in
 `Channel.timezone`. Allowed start/end times and minimum intervals continue to
 use the same channel policy, including windows that cross midnight.
 
+## Redis coordination
+
+Continuous discovery, publication, retry and maintenance components each use a
+distributed lock with an ownership token and bounded TTL. Existing discovery
+and per-publication locks remain in place.
+
+Local development stays permissive when Redis is not configured. Production can
+require coordination:
+
+```env
+WORKER_REQUIRE_REDIS="true"
+REDIS_URL="redis://localhost:6379"
+```
+
+With required mode enabled, an unavailable Redis instance never returns a
+successful lock. The affected component fails safely and is reflected in the
+worker heartbeat instead of running without distributed coordination.
+
+## Telegram retry policy
+
+Telegram timeouts, network failures, HTTP 429 and HTTP 5xx are transient.
+Invalid credentials/chat and other HTTP 4xx responses are permanent.
+
+Transient failures use bounded backoff:
+
+```text
+1 minute -> 5 minutes -> 15 minutes -> 30 minutes
+```
+
+Telegram `Retry-After` is used whenever it is longer than the normal backoff.
+The retry timestamp is persisted in `Publication.scheduledAt`. A Channel with a
+pending transient failure is not used for another delivery until that timestamp
+passes. Permanent failures become `PUBLICATION_FAILED` immediately; transient
+failures stop after four attempts. Only one failed row per Channel is requeued
+in a retry cadence.
+
 ## Safety boundary
 
 Continuous operation must reuse the validated Mercado Livre discovery service

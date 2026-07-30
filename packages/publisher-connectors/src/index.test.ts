@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ManualExportPublisher, TelegramPublisher, type PublicationPayload } from "./index";
+import {
+  ManualExportPublisher,
+  TelegramPublisher,
+  type PublicationPayload,
+} from "./index";
 
 const payload: PublicationPayload = {
   offerId: "offer-1",
@@ -14,7 +18,91 @@ describe("ManualExportPublisher", () => {
     const result = await new ManualExportPublisher().publish(payload);
 
     expect(result.status).toBe("EXPORTED");
-    expect(result.rawResponse).toMatchObject({ exportedOnly: true, message: payload.message });
+    expect(result.rawResponse).toMatchObject({
+      exportedOnly: true,
+      message: payload.message,
+    });
+  });
+});
+
+describe("TelegramPublisher retry classification", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("returns Retry-After for Telegram 429 without a text fallback burst", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 429,
+      json: async () => ({
+        ok: false,
+        error_code: 429,
+        description: "Too Many Requests",
+        parameters: { retry_after: 90 },
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await new TelegramPublisher({
+      botToken: "secret-token",
+      chatId: "chat-1",
+    }).publish(payload);
+
+    expect(result).toMatchObject({
+      status: "FAILED",
+      failureKind: "TRANSIENT",
+      errorCode: "TELEGRAM_429",
+      retryAfterSeconds: 90,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("classifies Telegram 500 as transient", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 500,
+        json: async () => ({ ok: false }),
+      }),
+    );
+
+    await expect(
+      new TelegramPublisher({
+        botToken: "secret-token",
+        chatId: "chat-1",
+      }).publish({ ...payload, imageUrl: null }),
+    ).resolves.toMatchObject({
+      status: "FAILED",
+      failureKind: "TRANSIENT",
+      errorCode: "TELEGRAM_HTTP_500",
+    });
+  });
+
+  it("classifies invalid chat errors as permanent", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        json: async () => ({
+          ok: false,
+          error_code: 400,
+          description: "Bad Request: chat not found",
+        }),
+      }),
+    );
+
+    await expect(
+      new TelegramPublisher({
+        botToken: "secret-token",
+        chatId: "chat-1",
+      }).publish({ ...payload, imageUrl: null }),
+    ).resolves.toMatchObject({
+      status: "FAILED",
+      failureKind: "PERMANENT",
+      errorCode: "TELEGRAM_400",
+    });
   });
 });
 
@@ -76,7 +164,8 @@ describe("TelegramPublisher", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const message = "\u{1F525} Produto em promoção\n\u{1F6D2} Confira\nSão Luís\nPreço válido";
+    const message =
+      "\u{1F525} Produto em promoção\n\u{1F6D2} Confira\nSão Luís\nPreço válido";
     await new TelegramPublisher({
       botToken: "secret-token",
       chatId: "chat-1",

@@ -16,13 +16,19 @@ export type PublisherResult = {
   status: "PUBLISHED" | "FAILED" | "EXPORTED";
   rawResponse?: unknown;
   errorMessage?: string | undefined;
+  failureKind?: "TRANSIENT" | "PERMANENT" | undefined;
+  errorCode?: string | undefined;
+  retryAfterSeconds?: number | undefined;
 };
 
 export interface PublisherAdapter {
   validateCredentials(): Promise<boolean>;
   publish(payload: PublicationPayload): Promise<PublisherResult>;
   getPublicationStatus(externalId: string): Promise<PublisherResult>;
-  retry(publicationId: string, payload?: PublicationPayload): Promise<PublisherResult>;
+  retry(
+    publicationId: string,
+    payload?: PublicationPayload,
+  ): Promise<PublisherResult>;
   healthCheck(): Promise<boolean>;
 }
 
@@ -35,6 +41,12 @@ type TelegramConfig = {
 type TelegramApiResponse = {
   ok?: boolean;
   description?: string;
+  error_code?: number;
+  httpStatus?: number;
+  transientFailure?: boolean;
+  parameters?: {
+    retry_after?: number;
+  };
   result?: {
     message_id?: number;
     [key: string]: unknown;
@@ -44,8 +56,29 @@ type TelegramApiResponse = {
 function sanitizeTelegramResponse(response: TelegramApiResponse) {
   return {
     ok: response.ok,
-    description: response.description,
+    errorCode: response.error_code,
+    retryAfterSeconds: response.parameters?.retry_after,
     messageId: response.result?.message_id,
+  };
+}
+
+function telegramFailure(response: TelegramApiResponse) {
+  const retryAfterSeconds = response.parameters?.retry_after;
+  const transient =
+    response.transientFailure === true ||
+    response.error_code === 429 ||
+    response.httpStatus === 429 ||
+    (response.httpStatus !== undefined && response.httpStatus >= 500);
+
+  return {
+    failureKind: transient ? ("TRANSIENT" as const) : ("PERMANENT" as const),
+    errorCode:
+      response.error_code !== undefined
+        ? `TELEGRAM_${response.error_code}`
+        : response.httpStatus !== undefined
+          ? `TELEGRAM_HTTP_${response.httpStatus}`
+          : "TELEGRAM_REQUEST_FAILED",
+    ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}),
   };
 }
 
@@ -92,13 +125,21 @@ export class TelegramPublisher implements PublisherAdapter {
 
   async publish(payload: PublicationPayload) {
     if (!this.botToken || !this.chatId) {
-      return { status: "FAILED" as const, errorMessage: "Telegram credentials are not configured." };
+      return {
+        status: "FAILED" as const,
+        failureKind: "PERMANENT" as const,
+        errorCode: "TELEGRAM_CREDENTIALS_MISSING",
+        errorMessage: "Telegram credentials are not configured.",
+      };
     }
 
     if (isValidHttpUrl(payload.imageUrl)) {
       const imageResult = await this.sendPhoto(payload);
 
-      if (imageResult.status === "PUBLISHED") {
+      if (
+        imageResult.status === "PUBLISHED" ||
+        imageResult.failureKind === "TRANSIENT"
+      ) {
         return imageResult;
       }
     }
@@ -126,7 +167,9 @@ export class TelegramPublisher implements PublisherAdapter {
     return this.publish(payload);
   }
 
-  private async sendPhoto(payload: PublicationPayload): Promise<PublisherResult> {
+  private async sendPhoto(
+    payload: PublicationPayload,
+  ): Promise<PublisherResult> {
     const response = await this.request("sendPhoto", {
       chat_id: this.chatId,
       photo: payload.imageUrl,
@@ -135,7 +178,9 @@ export class TelegramPublisher implements PublisherAdapter {
 
     if (response.ok) {
       return {
-        externalId: response.result?.message_id ? String(response.result.message_id) : undefined,
+        externalId: response.result?.message_id
+          ? String(response.result.message_id)
+          : undefined,
         status: "PUBLISHED",
         rawResponse: sanitizeTelegramResponse(response),
       };
@@ -144,7 +189,9 @@ export class TelegramPublisher implements PublisherAdapter {
     return {
       status: "FAILED",
       rawResponse: sanitizeTelegramResponse(response),
-      errorMessage: response.description ?? "Telegram image publication failed.",
+      errorMessage:
+        response.description ?? "Telegram image publication failed.",
+      ...telegramFailure(response),
     };
   }
 
@@ -157,7 +204,9 @@ export class TelegramPublisher implements PublisherAdapter {
 
     if (response.ok) {
       return {
-        externalId: response.result?.message_id ? String(response.result.message_id) : undefined,
+        externalId: response.result?.message_id
+          ? String(response.result.message_id)
+          : undefined,
         status: "PUBLISHED",
         rawResponse: sanitizeTelegramResponse(response),
       };
@@ -167,6 +216,7 @@ export class TelegramPublisher implements PublisherAdapter {
       status: "FAILED",
       rawResponse: sanitizeTelegramResponse(response),
       errorMessage: response.description ?? "Telegram text publication failed.",
+      ...telegramFailure(response),
     };
   }
 
@@ -175,12 +225,15 @@ export class TelegramPublisher implements PublisherAdapter {
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
 
     try {
-      const response = await fetch(`https://api.telegram.org/bot${this.botToken}/${method}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json; charset=utf-8" },
-        body: JSON.stringify(payload),
-        signal: controller.signal,
-      });
+      const response = await fetch(
+        `https://api.telegram.org/bot${this.botToken}/${method}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        },
+      );
 
       const body = (await response.json().catch(() => ({
         ok: false,
@@ -191,11 +244,21 @@ export class TelegramPublisher implements PublisherAdapter {
         return {
           ...body,
           ok: false,
+          httpStatus: response.status,
           description: body.description ?? `Telegram HTTP ${response.status}`,
         };
       }
 
       return body;
+    } catch (error) {
+      return {
+        ok: false,
+        transientFailure: true,
+        description:
+          error instanceof Error && error.name === "AbortError"
+            ? "Telegram request timed out."
+            : "Telegram request failed.",
+      };
     } finally {
       clearTimeout(timeout);
     }
@@ -219,7 +282,11 @@ export class ManualExportPublisher implements PublisherAdapter {
   }
 
   async getPublicationStatus(externalId: string) {
-    return { externalId, status: "EXPORTED" as const, rawResponse: { exportedOnly: true } };
+    return {
+      externalId,
+      status: "EXPORTED" as const,
+      rawResponse: { exportedOnly: true },
+    };
   }
 
   async retry(publicationId: string) {
