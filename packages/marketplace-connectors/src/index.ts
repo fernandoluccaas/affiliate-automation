@@ -381,6 +381,8 @@ export type MercadoLivreProductResolutionDiagnostics = {
   productResolvedViaChild: number;
   productResolvedViaItems: number;
   productResolvedViaCatalogPdp: number;
+  productCanonicalPdpCandidates: number;
+  productCanonicalPdpResolved: number;
   productDetailEnrichmentUnavailable: boolean;
   productPdpFallbackEligible: boolean;
   productItemsFetched: number;

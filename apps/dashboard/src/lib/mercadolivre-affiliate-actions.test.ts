@@ -41,9 +41,30 @@ vi.mock("@affiliate/marketplace-discovery", () => ({
 
 vi.mock("@affiliate/marketplace-connectors", () => ({
   createMercadoLivreConnector: createMercadoLivreConnectorMock,
-  isSafeMercadoLivreProductPermalink: (value: unknown) =>
-    typeof value === "string" &&
-    value.startsWith("https://www.mercadolivre.com.br/"),
+  resolveMercadoLivreCatalogProductUrl: (input: {
+    productId: string;
+    productPermalink: string | null;
+    productStatus: string | null;
+  }) => {
+    if (
+      input.productPermalink?.startsWith(
+        "https://www.mercadolivre.com.br/",
+      )
+    ) {
+      return {
+        productUrl: input.productPermalink,
+        source: "API_PERMALINK",
+      };
+    }
+
+    return /^MLB\d+$/.test(input.productId) &&
+      input.productStatus !== "inactive"
+      ? {
+          productUrl: `https://www.mercadolivre.com.br/p/${input.productId}`,
+          source: "CANONICAL_CATALOG_PDP",
+        }
+      : null;
+  },
 }));
 
 function saveForm(overrides: Record<string, string> = {}) {
@@ -141,6 +162,7 @@ beforeEach(() => {
     getProduct: vi.fn().mockResolvedValue({
       id: "MLB62081577",
       permalink: "https://www.mercadolivre.com.br/smartphone/p/MLB62081577",
+      status: "active",
     }),
   });
 });
@@ -165,17 +187,19 @@ describe("Mercado Livre affiliate server actions", () => {
     expect(query.get("pdpAffiliateEndpointMode")).toBe("stripe_v2");
     expect(query.get("pdpAffiliateHost")).toBe("meli.la");
     expect(query.get("pdpAffiliateMeliLa")).toBe("true");
+    expect(query.get("pdpProductUrlSource")).toBe("API_PERMALINK");
     expect(redirectUrl).not.toContain("real-test");
     expect(redirectUrl).not.toContain("cookie");
     expect(redirectUrl).not.toContain("csrf");
   });
 
-  it("does not generate a PDP link when the API omits the permalink", async () => {
+  it("tests the canonical catalog PDP when the API omits the permalink", async () => {
     const actions = await import("./mercadolivre-affiliate-actions");
     createMercadoLivreConnectorMock.mockResolvedValueOnce({
       getProduct: vi.fn().mockResolvedValue({
         id: "MLB62081577",
         permalink: null,
+        status: "active",
       }),
     });
     const formData = new FormData();
@@ -183,7 +207,30 @@ describe("Mercado Livre affiliate server actions", () => {
 
     await expect(
       actions.testMercadoLivreProductPdpAffiliateLinkAction(formData),
-    ).rejects.toThrow("product-pdp-permalink-unavailable");
+    ).rejects.toThrow("REDIRECT:");
+    expect(generateAffiliateTestLinkMock).toHaveBeenCalledWith({
+      productUrl: "https://www.mercadolivre.com.br/p/MLB62081577",
+    });
+    const redirectUrl = String(redirectMock.mock.calls.at(-1)?.[0] ?? "");
+    const query = new URL(redirectUrl, "http://localhost").searchParams;
+    expect(query.get("pdpProductUrlSource")).toBe("CANONICAL_CATALOG_PDP");
+  });
+
+  it("does not construct a canonical PDP for an inactive product", async () => {
+    const actions = await import("./mercadolivre-affiliate-actions");
+    createMercadoLivreConnectorMock.mockResolvedValueOnce({
+      getProduct: vi.fn().mockResolvedValue({
+        id: "MLB62081577",
+        permalink: null,
+        status: "inactive",
+      }),
+    });
+    const formData = new FormData();
+    formData.set("productId", "MLB62081577");
+
+    await expect(
+      actions.testMercadoLivreProductPdpAffiliateLinkAction(formData),
+    ).rejects.toThrow("product-pdp-url-unavailable");
     expect(generateAffiliateTestLinkMock).not.toHaveBeenCalled();
   });
 

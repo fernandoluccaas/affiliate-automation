@@ -76,12 +76,19 @@ import metadata, while offer fingerprinting remains based on material price,
 link, shipping and stock facts rather than seller/ranking churn.
 
 The PRODUCT diagnostic shows the sanitized PDP status/name, safe permalink,
-picture count, selected summary facts, ITEM hydration availability and PDP
-fallback eligibility. Its optional affiliate test submits only the exact safe
-PDP permalink to the existing server-side provider. It does not ingest data or
-create Product, Offer or ImportJob records, and its browser-visible result is
-limited to PRODUCT ID, endpoint mode, result host and whether the result uses
-`https://meli.la/`.
+resolved catalog URL and source, picture count, selected summary facts, ITEM
+hydration availability and resolution eligibility. Its optional affiliate test
+submits either the safe API permalink or the strictly derived canonical MLB PDP
+to the existing server-side provider. It does not ingest data or create
+Product, Offer or ImportJob records, and its browser-visible result is limited
+to PRODUCT ID, URL source, endpoint mode, result host and whether the result
+uses `https://meli.la/`.
+
+Discovery metrics distinguish canonical candidates/resolutions, affiliate-link
+requests/generations/failures and optional detail enrichment failures. A
+successful canonical flow remains `SUCCEEDED` when ITEM detail hydration alone
+returns 401/403. ImportJobItem metadata records the URL source, resolution
+strategy, selected commercial ITEM and seller, and affiliate-link status.
 
 `bestSellersEnabled=true` enables the highlights source. When it is false, discovery returns `DISCOVERY_SOURCE_DISABLED` and does not call highlights. No automatic category-search fallback exists yet.
 

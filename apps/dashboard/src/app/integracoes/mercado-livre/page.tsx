@@ -76,9 +76,9 @@ function messageText(message?: string | string[]) {
   if (value === "product-diagnostic-error")
     return "Nao foi possivel diagnosticar o PRODUCT na API oficial.";
   if (value === "product-pdp-affiliate-tested")
-    return "O Portal de Afiliados aceitou o permalink oficial da PDP.";
-  if (value === "product-pdp-permalink-unavailable")
-    return "A API oficial nao forneceu um permalink PDP HTTPS; nenhum link foi solicitado.";
+    return "O Portal de Afiliados aceitou a PDP resolvida do catalogo.";
+  if (value === "product-pdp-url-unavailable")
+    return "Nao foi possivel resolver uma PDP oficial ou canonica segura; nenhum link foi solicitado.";
   if (value === "product-pdp-affiliate-unsupported")
     return "O Portal de Afiliados nao aceitou o permalink oficial da PDP.";
   if (value === "product-pdp-affiliate-error")
@@ -1055,9 +1055,23 @@ export default async function MercadoLivreIntegrationPage({
                     value={single(productProbeResult.productName) || "-"}
                   />
                   <Result
-                    label="Product permalink"
+                    label="API permalink"
                     value={
                       single(productProbeResult.productPermalink) ||
+                      "indisponivel"
+                    }
+                  />
+                  <Result
+                    label="PDP resolvida"
+                    value={
+                      single(productProbeResult.resolvedProductUrl) ||
+                      "indisponivel"
+                    }
+                  />
+                  <Result
+                    label="PDP source"
+                    value={
+                      single(productProbeResult.productUrlSource) ||
                       "indisponivel"
                     }
                   />
@@ -1150,9 +1164,16 @@ export default async function MercadoLivreIntegrationPage({
                     }
                   />
                   <Result
-                    label="PDP fallback eligible"
+                    label="Enrichment"
                     value={
-                      single(productProbeResult.pdpFallbackEligible) === "true"
+                      single(productProbeResult.detailEnrichmentStatus) ||
+                      "indisponivel"
+                    }
+                  />
+                  <Result
+                    label="Resolution eligible"
+                    value={
+                      single(productProbeResult.resolutionEligible) === "true"
                         ? "sim"
                         : "nao"
                     }
@@ -1178,8 +1199,8 @@ export default async function MercadoLivreIntegrationPage({
                     Testar link afiliado da PDP
                   </Button>
                   <p className="text-xs text-[var(--muted-foreground)]">
-                    Usa somente o permalink retornado pela API. Nao cria
-                    Product, Offer ou ImportJob.
+                    Usa o permalink seguro da API ou a rota canonica MLB
+                    estritamente validada. Nao cria Product, Offer ou ImportJob.
                   </p>
                 </form>
 
@@ -1255,6 +1276,12 @@ export default async function MercadoLivreIntegrationPage({
                 <Result
                   label="PRODUCT"
                   value={single(productPdpAffiliateResult.productId) ?? "-"}
+                />
+                <Result
+                  label="PDP source"
+                  value={
+                    single(productPdpAffiliateResult.pdpProductUrlSource) ?? "-"
+                  }
                 />
                 <Result
                   label="Endpoint mode"

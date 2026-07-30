@@ -181,7 +181,11 @@ function rankedOffer(
   };
 }
 
-function catalogPdpOffer(currentPrice: number, sellerId = "seller-1") {
+function catalogPdpOffer(
+  currentPrice: number,
+  sellerId = "seller-1",
+  selectedItemId = "MLB4827891325",
+) {
   return {
     marketplace: "MERCADO_LIVRE",
     externalProductId: "MLB62081577",
@@ -191,13 +195,15 @@ function catalogPdpOffer(currentPrice: number, sellerId = "seller-1") {
     bestSellerPosition: 1,
     sourceHighlightId: "MLB62081577",
     sourceHighlightType: "PRODUCT",
-    resolutionStrategy: "PRODUCT_CATALOG_PDP_FALLBACK",
-    productUrl: "https://www.mercadolivre.com.br/smartphone/p/MLB62081577",
+    resolutionStrategy: "PRODUCT_CATALOG_CANONICAL_PDP",
+    productUrl: "https://www.mercadolivre.com.br/p/MLB62081577",
     affiliateUrl: "https://meli.la/catalog-pdp",
     affiliateEligibility: "ELIGIBLE",
     affiliateFailure: null,
     affiliateLabel: "default-tag",
     sellerId,
+    resolvedItemId: selectedItemId,
+    selectedCatalogItemId: selectedItemId,
     currentPrice,
     trackingStrategy: "DIRECT_AFFILIATE_LINK",
     shippingStatus: "FREE",
@@ -286,10 +292,13 @@ describe("ranking and affiliate failure persistence", () => {
     expect(historical.bestSellerPosition).toBe(9);
   });
 
-  it("keeps catalog PRODUCT identity idempotent when the selected seller changes", async () => {
+  it("keeps canonical catalog PRODUCT identity idempotent when the selected seller and item change", async () => {
     const tx = new FakeTransaction();
     const first = await ingest(tx, catalogPdpOffer(1429, "seller-1"));
-    const second = await ingest(tx, catalogPdpOffer(1429, "seller-2"));
+    const second = await ingest(
+      tx,
+      catalogPdpOffer(1429, "seller-2", "MLB7282181302"),
+    );
 
     expect(first).toMatchObject({
       productCreated: true,
@@ -303,6 +312,7 @@ describe("ranking and affiliate failure persistence", () => {
       version: 1,
     });
     expect(tx.products).toHaveLength(1);
+    expect(tx.products[0]?.externalProductId).toBe("MLB62081577");
     expect(tx.offers).toHaveLength(1);
   });
 
@@ -320,5 +330,24 @@ describe("ranking and affiliate failure persistence", () => {
     });
     expect(tx.products).toHaveLength(1);
     expect(tx.offers).toHaveLength(2);
+  });
+
+  it("updates canonical catalog ranking without duplicating Product or Offer", async () => {
+    const tx = new FakeTransaction();
+    await ingest(tx, catalogPdpOffer(1429));
+    const result = await ingest(tx, {
+      ...catalogPdpOffer(1429),
+      bestSellerPosition: 2,
+    });
+
+    expect(result).toMatchObject({
+      productCreated: false,
+      offerCreated: false,
+      offerReused: true,
+      version: 1,
+    });
+    expect(tx.products).toHaveLength(1);
+    expect(tx.offers).toHaveLength(1);
+    expect(tx.offers[0]?.bestSellerPosition).toBe(2);
   });
 });

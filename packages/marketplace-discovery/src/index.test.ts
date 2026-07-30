@@ -344,6 +344,66 @@ describe("diagnoseMercadoLivreProduct", () => {
     expect(marketplace.getProductItems).toHaveBeenCalledTimes(1);
   });
 
+  it("reports a canonical PDP as eligible when detail enrichment is unavailable", async () => {
+    const marketplace = connector({
+      getProduct: vi.fn().mockResolvedValue(
+        catalogProduct({
+          id: "MLB62081577",
+          name: "Smartphone de catalogo",
+          permalink: null,
+          pictureUrls: ["https://http2.mlstatic.com/picture.jpg"],
+        }),
+      ),
+      getProductItems: vi.fn().mockResolvedValue(
+        productItemsResolution(
+          [
+            {
+              itemId: "MLB4827891325",
+              sellerId: "37175967",
+              condition: "new",
+              price: 1429,
+              freeShipping: true,
+            },
+          ],
+          [],
+          {
+            productItemsHydrated: 0,
+            productItemsUsable: 0,
+            rejectionReasons: { PRODUCT_ITEM_DETAIL_HTTP_ERROR: 1 },
+            samples: [
+              {
+                itemId: "MLB4827891325",
+                summaryFieldsPresent: ["item_id", "price"],
+                hydrationHttpStatus: 403,
+                hydratedStatus: null,
+                hydratedCondition: "unknown",
+                hydratedAvailableQuantity: null,
+                hydratedChannels: [],
+                hasPermalink: false,
+                hasPrice: false,
+                rejectedReason: "PRODUCT_ITEM_DETAIL_HTTP_ERROR",
+              },
+            ],
+          },
+        ),
+      ),
+    });
+
+    await expect(
+      diagnoseMercadoLivreProduct(marketplace, "MLB62081577"),
+    ).resolves.toMatchObject({
+      productPermalink: null,
+      resolvedProductUrl:
+        "https://www.mercadolivre.com.br/p/MLB62081577",
+      productUrlSource: "CANONICAL_CATALOG_PDP",
+      selectedItemId: "MLB4827891325",
+      selectedSellerId: "37175967",
+      selectedPrice: 1429,
+      detailEnrichmentStatus: "DETAIL_ENRICHMENT_UNAVAILABLE",
+      resolutionEligible: true,
+    });
+  });
+
   it("prefers proven active, new, stocked marketplace facts over unknowns", () => {
     const selected = selectBestMercadoLivreProductItem([
       offerCandidate("MLBUNKNOWN", {
@@ -1170,10 +1230,9 @@ describe("MercadoLivreDiscoveryService", () => {
     );
   });
 
-  it("sends the exact catalog permalink to the provider and ingests the PRODUCT identity", async () => {
+  it("sends the exact canonical catalog PDP to the provider and ingests the PRODUCT identity", async () => {
     const database = fakeDatabase();
-    const permalink =
-      "https://www.mercadolivre.com.br/smartphone/p/MLB62081577";
+    const permalink = "https://www.mercadolivre.com.br/p/MLB62081577";
     const marketplace = connector({
       getBestSellers: vi.fn().mockResolvedValue([
         {
@@ -1188,7 +1247,7 @@ describe("MercadoLivreDiscoveryService", () => {
         catalogProduct({
           id: "MLB62081577",
           name: "Smartphone de catalogo",
-          permalink,
+          permalink: null,
           pictureUrls: ["https://http2.mlstatic.com/picture.jpg"],
         }),
       ),
@@ -1243,7 +1302,7 @@ describe("MercadoLivreDiscoveryService", () => {
         productUrl: permalink,
         affiliateUrl: "https://meli.la/catalog-pdp",
         sellerId: "37175967",
-        resolutionStrategy: "PRODUCT_CATALOG_PDP_FALLBACK",
+        resolutionStrategy: "PRODUCT_CATALOG_CANONICAL_PDP",
       }),
       expect.anything(),
     );
@@ -1252,10 +1311,31 @@ describe("MercadoLivreDiscoveryService", () => {
       metrics: {
         resolvedCatalogProducts: 1,
         resolvedCatalogProductsViaSummary: 1,
+        catalogCanonicalPdpCandidates: 1,
+        catalogCanonicalPdpResolved: 1,
         catalogProductPdpAffiliateRequested: 1,
         catalogProductPdpAffiliateGenerated: 1,
         catalogProductPdpAffiliateFailed: 0,
+        catalogCanonicalPdpAffiliateRequested: 1,
+        catalogCanonicalPdpAffiliateGenerated: 1,
+        catalogCanonicalPdpAffiliateFailed: 0,
+        detailEnrichmentUnavailable: 1,
       },
+    });
+    expect(database.importJobItem.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        sourceId: "MLB62081577",
+        sourceType: "PRODUCT",
+        position: 1,
+        offerId: "offer-MLB62081577",
+        metadata: expect.objectContaining({
+          resolutionStrategy: "PRODUCT_CATALOG_CANONICAL_PDP",
+          productUrlSource: "CANONICAL_CATALOG_PDP",
+          selectedItemId: "MLB4827891325",
+          selectedSellerId: "37175967",
+          affiliateLinkStatus: "GENERATED",
+        }),
+      }),
     });
   });
 
@@ -1275,7 +1355,7 @@ describe("MercadoLivreDiscoveryService", () => {
         catalogProduct({
           id: "MLB62081577",
           name: "Smartphone de catalogo",
-          permalink: "https://www.mercadolivre.com.br/smartphone/p/MLB62081577",
+          permalink: null,
           pictureUrls: ["https://http2.mlstatic.com/picture.jpg"],
         }),
       ),
@@ -1335,7 +1415,20 @@ describe("MercadoLivreDiscoveryService", () => {
         catalogProductPdpAffiliateRequested: 1,
         catalogProductPdpAffiliateGenerated: 0,
         catalogProductPdpAffiliateFailed: 1,
+        catalogCanonicalPdpAffiliateRequested: 1,
+        catalogCanonicalPdpAffiliateGenerated: 0,
+        catalogCanonicalPdpAffiliateFailed: 1,
       },
+    });
+    expect(database.importJobItem.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        status: "PENDING_AFFILIATE_LINK",
+        metadata: expect.objectContaining({
+          resolutionStrategy: "PRODUCT_CATALOG_CANONICAL_PDP",
+          productUrlSource: "CANONICAL_CATALOG_PDP",
+          affiliateLinkStatus: "MANUAL_REQUIRED",
+        }),
+      }),
     });
   });
 

@@ -5,7 +5,7 @@ import { redirect } from "next/navigation";
 import { z } from "zod";
 import {
   createMercadoLivreConnector,
-  isSafeMercadoLivreProductPermalink,
+  resolveMercadoLivreCatalogProductUrl,
 } from "@affiliate/marketplace-connectors";
 import {
   generatePendingMercadoLivreAffiliateLinks,
@@ -198,13 +198,20 @@ export async function testMercadoLivreProductPdpAffiliateLinkAction(
 
   const productId = parsed.data.productId.toUpperCase();
   let productUrl: string | null = null;
+  let productUrlSource: "API_PERMALINK" | "CANONICAL_CATALOG_PDP" | null = null;
 
   try {
     const connector = await createMercadoLivreConnector();
     const product = await connector.getProduct(productId);
 
-    if (product && isSafeMercadoLivreProductPermalink(product.permalink)) {
-      productUrl = product.permalink;
+    if (product) {
+      const resolved = resolveMercadoLivreCatalogProductUrl({
+        productId: product.id,
+        productPermalink: product.permalink,
+        productStatus: product.status,
+      });
+      productUrl = resolved?.productUrl ?? null;
+      productUrlSource = resolved?.source ?? null;
     }
   } catch {
     redirect(
@@ -214,7 +221,7 @@ export async function testMercadoLivreProductPdpAffiliateLinkAction(
 
   if (!productUrl) {
     redirect(
-      `/integracoes/mercado-livre?message=product-pdp-permalink-unavailable&productId=${encodeURIComponent(productId)}`,
+      `/integracoes/mercado-livre?message=product-pdp-url-unavailable&productId=${encodeURIComponent(productId)}`,
     );
   }
 
@@ -246,6 +253,7 @@ export async function testMercadoLivreProductPdpAffiliateLinkAction(
     pdpAffiliateEndpointMode: result.provider ?? "stripe_v2",
     pdpAffiliateHost: affiliateHost,
     pdpAffiliateMeliLa: String(startsWithMeliLa),
+    pdpProductUrlSource: productUrlSource ?? "",
   });
   redirect(`/integracoes/mercado-livre?${query.toString()}`);
 }

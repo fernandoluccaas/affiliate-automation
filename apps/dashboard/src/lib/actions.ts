@@ -367,6 +367,8 @@ function emptyProductDiagnostics(): MercadoLivreProductResolutionDiagnostics {
     productResolvedViaChild: 0,
     productResolvedViaItems: 0,
     productResolvedViaCatalogPdp: 0,
+    productCanonicalPdpCandidates: 0,
+    productCanonicalPdpResolved: 0,
     productDetailEnrichmentUnavailable: false,
     productPdpFallbackEligible: false,
     productItemsFetched: 0,
@@ -392,6 +394,8 @@ function addProductDiagnostics(
   target.productResolvedViaChild += source.productResolvedViaChild;
   target.productResolvedViaItems += source.productResolvedViaItems;
   target.productResolvedViaCatalogPdp += source.productResolvedViaCatalogPdp;
+  target.productCanonicalPdpCandidates += source.productCanonicalPdpCandidates;
+  target.productCanonicalPdpResolved += source.productCanonicalPdpResolved;
   target.productDetailEnrichmentUnavailable ||=
     source.productDetailEnrichmentUnavailable;
   target.productPdpFallbackEligible ||= source.productPdpFallbackEligible;
@@ -1023,6 +1027,8 @@ export async function diagnoseMercadoLivreProductAction(formData: FormData) {
       productStatus: result.productStatus ?? "",
       productName: result.productName ?? "",
       productPermalink: result.productPermalink ?? "",
+      resolvedProductUrl: result.resolvedProductUrl ?? "",
+      productUrlSource: result.productUrlSource ?? "",
       productPictureCount: String(result.productPictureCount),
       buyBoxWinnerPresent: String(result.buyBoxWinnerPresent),
       buyBoxWinnerItemId: result.buyBoxWinnerItemId ?? "",
@@ -1045,7 +1051,9 @@ export async function diagnoseMercadoLivreProductAction(formData: FormData) {
           ? ""
           : String(result.selectedFreeShipping),
       itemHydrationAvailable: String(result.itemHydrationAvailable),
+      detailEnrichmentStatus: result.detailEnrichmentStatus,
       pdpFallbackEligible: String(result.pdpFallbackEligible),
+      resolutionEligible: String(result.resolutionEligible),
       rejectionReasons: JSON.stringify(diagnostics.rejectionReasons),
       diagnosticSamples: JSON.stringify(diagnostics.samples),
     });

@@ -103,6 +103,8 @@ export type MercadoLivreDiscoveryMetrics = {
   resolvedItems: number;
   resolvedCatalogProducts: number;
   resolvedCatalogProductsViaSummary: number;
+  catalogCanonicalPdpCandidates: number;
+  catalogCanonicalPdpResolved: number;
   resolvedUserProducts: number;
   unresolvedCandidates: number;
   uniqueCandidates: number;
@@ -120,6 +122,10 @@ export type MercadoLivreDiscoveryMetrics = {
   catalogProductPdpAffiliateRequested: number;
   catalogProductPdpAffiliateGenerated: number;
   catalogProductPdpAffiliateFailed: number;
+  catalogCanonicalPdpAffiliateRequested: number;
+  catalogCanonicalPdpAffiliateGenerated: number;
+  catalogCanonicalPdpAffiliateFailed: number;
+  detailEnrichmentUnavailable: number;
   affiliateLinksGenerated: number;
   affiliateLinksReused: number;
   affiliateIneligible: number;
@@ -370,6 +376,8 @@ export function createMercadoLivreDiscoveryMetrics(): MercadoLivreDiscoveryMetri
     resolvedItems: 0,
     resolvedCatalogProducts: 0,
     resolvedCatalogProductsViaSummary: 0,
+    catalogCanonicalPdpCandidates: 0,
+    catalogCanonicalPdpResolved: 0,
     resolvedUserProducts: 0,
     unresolvedCandidates: 0,
     uniqueCandidates: 0,
@@ -387,6 +395,10 @@ export function createMercadoLivreDiscoveryMetrics(): MercadoLivreDiscoveryMetri
     catalogProductPdpAffiliateRequested: 0,
     catalogProductPdpAffiliateGenerated: 0,
     catalogProductPdpAffiliateFailed: 0,
+    catalogCanonicalPdpAffiliateRequested: 0,
+    catalogCanonicalPdpAffiliateGenerated: 0,
+    catalogCanonicalPdpAffiliateFailed: 0,
+    detailEnrichmentUnavailable: 0,
     affiliateLinksGenerated: 0,
     affiliateLinksReused: 0,
     affiliateIneligible: 0,
@@ -947,6 +959,9 @@ async function enrichCandidatesWithAffiliateLinks(
       if (candidate.candidateKind === "CATALOG_PRODUCT") {
         metrics.catalogProductPdpAffiliateRequested += 1;
       }
+      if (candidate.productUrlSource === "CANONICAL_CATALOG_PDP") {
+        metrics.catalogCanonicalPdpAffiliateRequested += 1;
+      }
 
       try {
         const generated = await provider.generate({
@@ -969,6 +984,9 @@ async function enrichCandidatesWithAffiliateLinks(
         metrics.affiliateLinksGenerated += 1;
         if (candidate.candidateKind === "CATALOG_PRODUCT") {
           metrics.catalogProductPdpAffiliateGenerated += 1;
+        }
+        if (candidate.productUrlSource === "CANONICAL_CATALOG_PDP") {
+          metrics.catalogCanonicalPdpAffiliateGenerated += 1;
         }
         emitItem("mercadolivre_affiliate_link_generated", "SUCCEEDED", 1);
         return {
@@ -994,6 +1012,9 @@ async function enrichCandidatesWithAffiliateLinks(
           if (!failure.sessionExpired) {
             failure.code = "PRODUCT_PDP_AFFILIATE_LINK_UNSUPPORTED";
           }
+        }
+        if (candidate.productUrlSource === "CANONICAL_CATALOG_PDP") {
+          metrics.catalogCanonicalPdpAffiliateFailed += 1;
         }
 
         if (failure.productIneligible) {
@@ -1162,6 +1183,13 @@ function recordProductDiagnostics(
   metrics.productResolvedViaItems += diagnostics.productResolvedViaItems;
   metrics.resolvedCatalogProductsViaSummary +=
     diagnostics.productResolvedViaCatalogPdp;
+  metrics.catalogCanonicalPdpCandidates +=
+    diagnostics.productCanonicalPdpCandidates;
+  metrics.catalogCanonicalPdpResolved +=
+    diagnostics.productCanonicalPdpResolved;
+  metrics.detailEnrichmentUnavailable += Number(
+    diagnostics.productDetailEnrichmentUnavailable,
+  );
   metrics.productItemsFetched += diagnostics.productItemsFetched;
   metrics.productItemsUsable += diagnostics.productItemsUsable;
   metrics.productItemsSkipped += diagnostics.productItemsSkipped;
@@ -1190,6 +1218,8 @@ function emptyProductDiagnostics(): MercadoLivreProductResolutionDiagnostics {
     productResolvedViaChild: 0,
     productResolvedViaItems: 0,
     productResolvedViaCatalogPdp: 0,
+    productCanonicalPdpCandidates: 0,
+    productCanonicalPdpResolved: 0,
     productDetailEnrichmentUnavailable: false,
     productPdpFallbackEligible: false,
     productItemsFetched: 0,
@@ -1480,6 +1510,8 @@ export type MercadoLivreProductProbeResult = {
   productStatus: string | null;
   productName: string | null;
   productPermalink: string | null;
+  resolvedProductUrl: string | null;
+  productUrlSource: "API_PERMALINK" | "CANONICAL_CATALOG_PDP" | null;
   productPictureCount: number;
   buyBoxWinnerPresent: boolean;
   buyBoxWinnerItemId: string | null;
@@ -1488,7 +1520,9 @@ export type MercadoLivreProductProbeResult = {
   selectedPrice: number | null;
   selectedFreeShipping: boolean | null;
   itemHydrationAvailable: boolean;
+  detailEnrichmentStatus: "AVAILABLE" | "DETAIL_ENRICHMENT_UNAVAILABLE";
   pdpFallbackEligible: boolean;
+  resolutionEligible: boolean;
   diagnostics: Awaited<
     ReturnType<MarketplaceConnector["getProductItems"]>
   >["diagnostics"];
@@ -1543,6 +1577,17 @@ export async function diagnoseMercadoLivreProduct(
           catalogProductUrl,
         )
       : null;
+  const detailFailureCount =
+    (productItems.diagnostics.rejectionReasons
+      .PRODUCT_ITEM_DETAIL_HTTP_ERROR ?? 0) +
+    (productItems.diagnostics.rejectionReasons.PRODUCT_ITEM_DETAIL_NOT_FOUND ??
+      0) +
+    (productItems.diagnostics.rejectionReasons.PRODUCT_ITEM_SCHEMA_MISMATCH ??
+      0);
+  const detailEnrichmentUnavailable =
+    productItems.diagnostics.productItemsUniqueIds > 0 &&
+    productItems.diagnostics.productItemsHydrated === 0 &&
+    detailFailureCount >= productItems.diagnostics.productItemsUniqueIds;
 
   return {
     productId,
@@ -1550,6 +1595,8 @@ export async function diagnoseMercadoLivreProduct(
     productStatus: product?.status ?? null,
     productName: product ? (product.name ?? product.familyName) : null,
     productPermalink: safePermalink,
+    resolvedProductUrl: catalogProductUrl?.productUrl ?? null,
+    productUrlSource: catalogProductUrl?.source ?? null,
     productPictureCount: product?.pictureUrls.length ?? 0,
     buyBoxWinnerPresent: Boolean(product?.buyBoxWinnerItemId),
     buyBoxWinnerItemId: product?.buyBoxWinnerItemId ?? null,
@@ -1560,7 +1607,11 @@ export async function diagnoseMercadoLivreProduct(
     selectedFreeShipping:
       selected?.freeShipping ?? selectedSummary?.freeShipping ?? null,
     itemHydrationAvailable: productItems.diagnostics.productItemsHydrated > 0,
+    detailEnrichmentStatus: detailEnrichmentUnavailable
+      ? "DETAIL_ENRICHMENT_UNAVAILABLE"
+      : "AVAILABLE",
     pdpFallbackEligible: Boolean(pdpCandidate),
+    resolutionEligible: Boolean(pdpCandidate),
     diagnostics: productItems.diagnostics,
   };
 }
@@ -1808,6 +1859,9 @@ export class MercadoLivreHighlightResolver {
       catalogProductUrl &&
       (catalogProductUrl.source === "CANONICAL_CATALOG_PDP" || !chosen)
     ) {
+      if (catalogProductUrl.source === "CANONICAL_CATALOG_PDP") {
+        diagnostics.productCanonicalPdpCandidates += 1;
+      }
       const offerCandidate = catalogProductOfferCandidate(
         candidate,
         product,
@@ -1819,6 +1873,9 @@ export class MercadoLivreHighlightResolver {
 
       if (offerCandidate) {
         diagnostics.productResolvedViaCatalogPdp += 1;
+        if (catalogProductUrl.source === "CANONICAL_CATALOG_PDP") {
+          diagnostics.productCanonicalPdpResolved += 1;
+        }
         return resolvedCatalogProduct(
           candidate,
           product,
@@ -2289,6 +2346,13 @@ function itemSourceData(candidate: MercadoLivreDiscoveredCandidate) {
   };
 }
 
+function affiliateLinkStatus(enrichment: AffiliateEnrichmentResult) {
+  if (enrichment.linkGenerated) return "GENERATED";
+  if (enrichment.linkReused) return "REUSED";
+  if (enrichment.affiliateFailure?.productIneligible) return "INELIGIBLE";
+  return "MANUAL_REQUIRED";
+}
+
 async function persistIngestionResultItem(
   database: typeof prisma,
   importJobId: string,
@@ -2339,10 +2403,16 @@ async function persistIngestionResultItem(
       ...(errorMessage ? { errorMessage } : {}),
       metadata: {
         resolutionStrategy: enrichment.candidate.resolutionStrategy ?? null,
+        productUrlSource: enrichment.candidate.productUrlSource ?? null,
         candidateKind: enrichment.candidate.candidateKind ?? "ITEM",
+        selectedItemId:
+          enrichment.candidate.selectedCatalogItemId ??
+          enrichment.candidate.resolvedItemId ??
+          null,
         selectedCatalogItemId:
           enrichment.candidate.selectedCatalogItemId ?? null,
         selectedSellerId: enrichment.candidate.sellerId ?? null,
+        affiliateLinkStatus: affiliateLinkStatus(enrichment),
         linkGenerated: enrichment.linkGenerated,
         linkReused: enrichment.linkReused,
         ingestionStatus: result.status,
@@ -2412,10 +2482,17 @@ async function ingestAffiliateEnrichments(
             metadata: {
               resolutionStrategy:
                 enrichment.candidate.resolutionStrategy ?? null,
+              productUrlSource:
+                enrichment.candidate.productUrlSource ?? null,
               candidateKind: enrichment.candidate.candidateKind ?? "ITEM",
+              selectedItemId:
+                enrichment.candidate.selectedCatalogItemId ??
+                enrichment.candidate.resolvedItemId ??
+                null,
               selectedCatalogItemId:
                 enrichment.candidate.selectedCatalogItemId ?? null,
               selectedSellerId: enrichment.candidate.sellerId ?? null,
+              affiliateLinkStatus: affiliateLinkStatus(enrichment),
             },
           },
         });
@@ -2457,6 +2534,9 @@ async function enrichCandidatesWithProvider(
       if (candidate.candidateKind === "CATALOG_PRODUCT") {
         metrics.catalogProductPdpAffiliateRequested += 1;
       }
+      if (candidate.productUrlSource === "CANONICAL_CATALOG_PDP") {
+        metrics.catalogCanonicalPdpAffiliateRequested += 1;
+      }
       const generated = await dependencies.affiliateLinkProvider.generate({
         marketplace: candidate.marketplace,
         productUrl: candidate.productUrl,
@@ -2467,6 +2547,9 @@ async function enrichCandidatesWithProvider(
         metrics.affiliateLinksGenerated += 1;
         if (candidate.candidateKind === "CATALOG_PRODUCT") {
           metrics.catalogProductPdpAffiliateGenerated += 1;
+        }
+        if (candidate.productUrlSource === "CANONICAL_CATALOG_PDP") {
+          metrics.catalogCanonicalPdpAffiliateGenerated += 1;
         }
         emitOperationalMetric(
           dependencies,
@@ -2493,6 +2576,9 @@ async function enrichCandidatesWithProvider(
         metrics.affiliateIneligible += 1;
         if (candidate.candidateKind === "CATALOG_PRODUCT") {
           metrics.catalogProductPdpAffiliateFailed += 1;
+        }
+        if (candidate.productUrlSource === "CANONICAL_CATALOG_PDP") {
+          metrics.catalogCanonicalPdpAffiliateFailed += 1;
         }
         emitOperationalMetric(
           dependencies,
@@ -2524,6 +2610,9 @@ async function enrichCandidatesWithProvider(
       metrics.affiliatePending += 1;
       if (candidate.candidateKind === "CATALOG_PRODUCT") {
         metrics.catalogProductPdpAffiliateFailed += 1;
+      }
+      if (candidate.productUrlSource === "CANONICAL_CATALOG_PDP") {
+        metrics.catalogCanonicalPdpAffiliateFailed += 1;
       }
       emitOperationalMetric(
         dependencies,
@@ -3012,6 +3101,7 @@ function resolutionStrategyFromStoredValue(
     value === "PRODUCT_CHILD_BUY_BOX" ||
     value === "PRODUCT_ITEMS_FALLBACK" ||
     value === "PRODUCT_CATALOG_PDP_FALLBACK" ||
+    value === "PRODUCT_CATALOG_CANONICAL_PDP" ||
     value === "USER_PRODUCT_ACTIVE_ITEM"
     ? value
     : undefined;
