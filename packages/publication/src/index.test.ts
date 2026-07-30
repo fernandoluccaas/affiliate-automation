@@ -1,10 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
+  GENERIC_HEADLINES,
+  MERCADO_LIVRE_HEADLINES,
+  SHOPEE_HEADLINES,
+  buildPromoMessage,
   canScheduleInWindow,
   deterministicMessageComposer,
   formatBRLCurrency,
   isOfferCompatibleWithChannel,
   isWithinAllowedWindow,
+  selectPromotionalHeadline,
   type ChannelPolicy,
 } from "./index";
 
@@ -26,27 +31,27 @@ const channel: ChannelPolicy = {
 describe("deterministicMessageComposer", () => {
   it("formats confirmed offer facts without inventing values", () => {
     const message = deterministicMessageComposer({
-      title: "Oferta confirmada",
+      title: "  Oferta   confirmada  ",
       originalPrice: 199.9,
       currentPrice: 149.9,
       discountPercentage: 25.01,
       couponCode: "PROMO",
       couponExpiration: new Date("2026-07-24T12:00:00.000Z"),
       freeShipping: true,
-      marketplace: "SHOPEE",
-      trackingUrl: "https://example.com/go/slug",
+      marketplace: "MERCADO_LIVRE",
+      trackingUrl: "https://meli.la/abc123",
     });
 
     expect(message).toContain("Oferta confirmada");
-    expect(message).toContain("R$");
+    expect(message).toContain("De: R$\u00a0199,90");
+    expect(message).toContain("Por: R$\u00a0149,90 ✅");
     expect(message).toContain("PROMO");
-    expect(message).toContain("Frete gratis");
-    expect(message).toContain("#publi");
-    expect(message).toContain("\u{1F525}");
-    expect(message).toContain("\u{1F6D2}");
-    expect(message).not.toContain("Ã°Å¸");
-    expect(message).not.toContain("Ãƒ");
-    expect(message).not.toContain("Ã‚");
+    expect(message).toContain("🚚 Frete grátis");
+    expect(message).toContain("🛒 Compre aqui:");
+    expect(message).not.toContain("25,01%");
+    expect(message).not.toContain("#publi");
+    expect(message.toLowerCase()).not.toContain("link de afiliado");
+    expect(message.endsWith("https://meli.la/abc123")).toBe(true);
   });
 
   it("preserves Portuguese accents and Unicode symbols", () => {
@@ -54,33 +59,180 @@ describe("deterministicMessageComposer", () => {
       title: "Promoção válida para São Luís",
       currentPrice: 345.99,
       marketplace: "SHOPEE",
-      trackingUrl: "https://example.com/go/slug",
+      trackingUrl: "https://s.shopee.com.br/produto",
     });
 
     expect(message).toContain("Promoção válida para São Luís");
-    expect(message).toContain("\u{1F525}");
-    expect(message).toContain("\u{1F6D2}");
-    expect(message).not.toContain("Ã°Å¸");
-    expect(message).not.toContain("Ãƒ");
-    expect(message).not.toContain("Ã‚");
+    expect(message).toContain("R$\u00a0345,99");
+    expect(message).toContain("🛒");
+    expect(message).not.toContain("Ã");
   });
 
-  it("omits optional lines when facts are absent", () => {
+  it.each([null, undefined, 0, 80])(
+    "omits original price when it is %s or not greater than current price",
+    (originalPrice) => {
+      const message = deterministicMessageComposer({
+        title: "Sem preço anterior válido",
+        currentPrice: 80,
+        ...(originalPrice === undefined ? {} : { originalPrice }),
+        marketplace: "MERCADO_LIVRE",
+        trackingUrl: "https://meli.la/sem-anterior",
+      });
+
+      expect(message).not.toContain("De:");
+      expect(message).toContain("Por: R$\u00a080,00 ✅");
+    },
+  );
+
+  it.each([
+    [true, "UNKNOWN", true],
+    [false, "UNKNOWN", false],
+    [null, "UNKNOWN", false],
+    [false, "FREE", true],
+  ] as const)(
+    "renders free shipping only from confirmed facts",
+    (freeShipping, shippingStatus, expected) => {
+      const message = deterministicMessageComposer({
+        title: "Produto",
+        currentPrice: 80,
+        freeShipping,
+        shippingStatus,
+        marketplace: "MERCADO_LIVRE",
+        trackingUrl: "https://meli.la/frete",
+      });
+
+      expect(message.includes("🚚 Frete grátis")).toBe(expected);
+    },
+  );
+
+  it("keeps coupon redemption URL and affiliate URL distinct", () => {
     const message = deterministicMessageComposer({
-      title: "Sem opcionais",
-      currentPrice: 80,
-      originalPrice: null,
-      discountPercentage: null,
-      freeShipping: null,
-      shippingStatus: "UNKNOWN",
+      title: "Produto Shopee",
+      originalPrice: 221.78,
+      currentPrice: 84.81,
+      couponDescription: "10 OFF",
+      couponUrl: "https://s.shopee.com.br/CUPOM",
       marketplace: "SHOPEE",
-      trackingUrl: "https://example.com/go/slug",
+      trackingUrl: "https://s.shopee.com.br/PRODUTO",
     });
 
-    expect(message).not.toContain("De ");
-    expect(message).not.toContain("% de desconto");
-    expect(message).not.toContain("Cupom");
-    expect(message).not.toContain("Frete gratis");
+    expect(message).toContain(
+      "🎟️ Use cupom 10 OFF | resgate aqui:\nhttps://s.shopee.com.br/CUPOM",
+    );
+    expect(message).toContain(
+      "🛒 Compre aqui:\nhttps://s.shopee.com.br/PRODUTO",
+    );
+  });
+
+  it("omits the entire coupon block when no coupon exists", () => {
+    const message = deterministicMessageComposer({
+      title: "Sem cupom",
+      currentPrice: 80,
+      marketplace: "MERCADO_LIVRE",
+      trackingUrl: "https://meli.la/sem-cupom",
+    });
+
+    expect(message).not.toContain("🎟️");
+    expect(message).not.toContain("Use o cupom");
+    expect(message).not.toContain("Consulte cupons");
+  });
+
+  it("uses the affiliate URL exactly once and preserves an explicit footer", () => {
+    const message = deterministicMessageComposer({
+      title: "Com rodapé",
+      currentPrice: 80,
+      marketplace: "MERCADO_LIVRE",
+      trackingUrl: "https://meli.la/footer",
+      footer: "Rodapé configurado pelo usuário.",
+    });
+
+    expect(message.match(/https:\/\/meli\.la\/footer/g)).toHaveLength(1);
+    expect(message.endsWith("Rodapé configurado pelo usuário.")).toBe(true);
+  });
+});
+
+describe("promotional headline rotation", () => {
+  it("uses only Mercado Livre or generic headlines for Mercado Livre", () => {
+    const headline = selectPromotionalHeadline({
+      marketplace: "MERCADO_LIVRE",
+      seed: "publication-1",
+    });
+    const allowed = new Set<string>([
+      ...MERCADO_LIVRE_HEADLINES,
+      ...GENERIC_HEADLINES,
+    ]);
+    const shopeeOnly = SHOPEE_HEADLINES.filter(
+      (item) => !new Set<string>(GENERIC_HEADLINES).has(item),
+    );
+
+    expect(allowed.has(headline)).toBe(true);
+    expect(shopeeOnly).not.toContain(headline);
+  });
+
+  it("uses only Shopee or generic headlines for Shopee", () => {
+    const headline = selectPromotionalHeadline({
+      marketplace: "SHOPEE",
+      seed: "publication-2",
+    });
+    const allowed = new Set<string>([
+      ...SHOPEE_HEADLINES,
+      ...GENERIC_HEADLINES,
+    ]);
+    const mercadoLivreOnly = MERCADO_LIVRE_HEADLINES.filter(
+      (item) => !new Set<string>(GENERIC_HEADLINES).has(item),
+    );
+
+    expect(allowed.has(headline)).toBe(true);
+    expect(mercadoLivreOnly).not.toContain(headline);
+  });
+
+  it("does not repeat the immediately previous headline", () => {
+    const previous = selectPromotionalHeadline({
+      marketplace: "MERCADO_LIVRE",
+      seed: "same-seed",
+    });
+    const next = selectPromotionalHeadline({
+      marketplace: "MERCADO_LIVRE",
+      seed: "same-seed",
+      recentHeadlines: [previous],
+    });
+
+    expect(next).not.toBe(previous);
+  });
+
+  it("avoids the five most recent headlines when alternatives exist", () => {
+    const recent = [...MERCADO_LIVRE_HEADLINES].slice(0, 5);
+    const headline = selectPromotionalHeadline({
+      marketplace: "MERCADO_LIVRE",
+      seed: "channel-offer-publication",
+      recentHeadlines: recent,
+    });
+
+    expect(recent).not.toContain(headline);
+  });
+
+  it("accepts only an allowed, non-recent AI headline suggestion", () => {
+    const valid = MERCADO_LIVRE_HEADLINES[0];
+    expect(
+      buildPromoMessage({
+        title: "Produto",
+        currentPrice: 100,
+        marketplace: "MERCADO_LIVRE",
+        trackingUrl: "https://meli.la/safe",
+        seed: "safe",
+        headlineSuggestion: valid,
+      }).headline,
+    ).toBe(valid);
+    expect(
+      buildPromoMessage({
+        title: "Produto",
+        currentPrice: 100,
+        marketplace: "MERCADO_LIVRE",
+        trackingUrl: "https://meli.la/safe",
+        seed: "safe",
+        headlineSuggestion: "SHÔ PIROU DE VEZ 🥵",
+      }).headline,
+    ).not.toContain("SHÔ");
   });
 });
 
