@@ -208,14 +208,27 @@ When `AI_PROVIDER="ollama"`, no OpenAI key is required and no OpenAI provider is
 
 ### Structured Copy
 
-Both providers use structured JSON output:
-
-- `headline`
-- `body`
-- `callToAction`
-- `disclosure`
-- `hashtags`
-
-The worker sends only confirmed offer facts and the generated tracking URL. Deterministic post-validation rejects inconsistent prices, discounts, coupon claims, free-shipping claims, missing affiliate disclosure, extra URLs and unsupported urgency. Any failure uses the deterministic composer and records `DETERMINISTIC_FALLBACK` on `Publication`.
+Both providers use structured JSON output containing only `headline` and an
+optional `optionalHook`. The deterministic message builder reconstructs title,
+prices, coupon, shipping and affiliate URL from persisted Offer facts. Any
+provider failure or ineligible headline uses the local rotating headline pool
+and records `DETERMINISTIC_FALLBACK` on `Publication`.
 
 `/integracoes` can test Ollama or OpenAI server-side without publishing a message. Secrets are never returned to the browser.
+
+## Continuous integration scheduling
+
+`npm run worker` periodically invokes the same
+`MercadoLivreDiscoveryService` used by the dashboard. Continuous operation does
+not introduce another connector or discovery implementation. Configuration,
+category filters, thresholds, candidate limits, Redis discovery lock and
+item-level isolation remain owned by that service.
+
+Discovery reuses a valid affiliate URL for the same Product identity and
+canonical PDP. `affiliateLinksReused` and `affiliateLinksGenerated` are exposed
+in the worker operational counters. A synchronization never regenerates a link
+merely because its interval elapsed.
+
+Ollama availability does not control marketplace synchronization or publishing.
+An unavailable model increments deterministic fallback metrics while the fixed
+message builder continues.

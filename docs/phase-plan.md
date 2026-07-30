@@ -119,10 +119,24 @@ Status: implemented.
 - Documented score versus completeness; no minimum-completeness policy was added.
 - Did not add Shopee, scraping, WhatsApp or automatic category-search fallback.
 
-## Phase 4 - Publication Expansion
+## Phase 4 - Continuous Worker Operations
 
-- Add additional official publisher adapters when credentials and APIs are available.
-- Expand scheduling controls and approval-free retry observability.
+Status: implemented.
+
+- Added the official `npm run worker` continuous command while preserving
+  `worker:once`.
+- Added independent discovery, publication, retry and maintenance cadences.
+- Added timezone-correct daily boundaries and publication windows.
+- Added deterministic priority, one-publication-per-channel cadence and
+  multi-channel Offer scheduling.
+- Added restart-safe backlog distribution, bounded Telegram retry/backoff,
+  `Retry-After` support and permanent failure classification.
+- Added component Redis locks and `WORKER_REQUIRE_REDIS`.
+- Added cooperative SIGINT/SIGTERM shutdown.
+- Added singleton heartbeat, ONLINE/OFFLINE/STALE status, pause/resume and
+  bounded operational counters in `/automacoes`.
+- Reused the existing Mercado Livre service and valid affiliate links.
+- Did not add Shopee, WhatsApp or new marketplace authentication.
 
 ## Phase 5 - Tracking and Attribution
 

@@ -40,6 +40,10 @@ import { redirect } from "next/navigation";
 import { z } from "zod";
 import { TelegramPublisher } from "@affiliate/publisher-connectors";
 import { createSession, destroySession } from "./session";
+import {
+  WORKER_CONTROLS_KEY,
+  workerControlsFromValue,
+} from "./worker-operations";
 
 const loginSchema = z.object({
   email: z.string().email(),
@@ -1213,4 +1217,33 @@ export async function acknowledgeAlertAction(formData: FormData) {
     data: { acknowledged: true },
   });
   revalidatePath("/logs");
+}
+
+export async function updateWorkerPauseAction(formData: FormData) {
+  const scope = formData.get("scope")?.toString();
+  const paused = formData.get("paused")?.toString() === "true";
+
+  if (scope !== "discovery" && scope !== "publication") {
+    throw new Error("Controle de automacao invalido.");
+  }
+
+  const existing = await prisma.systemSetting.findUnique({
+    where: { key: WORKER_CONTROLS_KEY },
+    select: { value: true },
+  });
+  const controls = workerControlsFromValue(existing?.value);
+  const next = {
+    ...controls,
+    ...(scope === "discovery"
+      ? { discoveryPaused: paused }
+      : { publicationPaused: paused }),
+  };
+
+  await prisma.systemSetting.upsert({
+    where: { key: WORKER_CONTROLS_KEY },
+    update: { value: next },
+    create: { key: WORKER_CONTROLS_KEY, value: next },
+  });
+
+  revalidatePath("/automacoes");
 }

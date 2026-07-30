@@ -24,6 +24,12 @@ Daily limits and allowed publication windows use `Channel.timezone`. The worker
 converts the local midnight boundaries to UTC for PostgreSQL queries, so a UTC
 server does not reset an `America/Sao_Paulo` channel at UTC midnight.
 
+Operational state is stored in two bounded `SystemSetting` singletons: one for
+heartbeat/status/aggregate counters and one for pause controls. This avoids an
+unbounded heartbeat table. `/automacoes` derives ONLINE, STALE or OFFLINE from
+the saved state and heartbeat age and exposes independent discovery/publication
+controls.
+
 Phase 2C adds multi-provider copy generation between channel selection and publication creation. The worker requests structured JSON copy from the configured provider, validates the returned text against confirmed offer facts, persists message metadata on `Publication`, and falls back to the deterministic composer without blocking Telegram, manual export, tracking or Redis locks. Ollama is the default provider and is called over HTTP at the configured `OLLAMA_BASE_URL`; OpenAI remains optional.
 
 Phase 3A adds the official Mercado Livre connector. OAuth starts from `/integracoes`, returns to `/api/integrations/mercadolivre/callback`, validates a server-side `state` cookie, exchanges the code for tokens and stores encrypted rotating credentials in `MarketplaceAccount`. Discovery is configured in `/integracoes/mercado-livre` and uses official categories, `/highlights/{siteId}/category/{categoryId}`, catalog `/products/{PRODUCT_ID}` resolution, multiget `/items?ids=...` and `/items/{ITEM_ID}/prices`.
@@ -93,9 +99,12 @@ Redis selection is server-only: Upstash is used when `UPSTASH_REDIS_REST_URL` an
 
 ## AI Boundary
 
-The selected AI provider receives only confirmed offer facts: title, marketplace, category, prices, discount, coupon, shipping flag, rating, sales count and tracking URL. AI output uses Structured Outputs with `headline`, `body`, `callToAction`, `disclosure` and `hashtags`.
-
-The selected AI provider receives only confirmed offer facts. Optional values that are unavailable are passed as unavailable, not as zero. The deterministic validator rejects generated copy that changes prices, discount, coupon, shipping status, affiliate disclosure or tracking URL, or that adds unsupported urgency/promises. Rejected, timed out, errored, disabled or unconfigured AI generation falls back to `deterministicMessageComposer`, which omits coupon, discount, original price and free-shipping lines when those facts are missing. Publication adapters consume the same saved payload regardless of provider.
+The selected AI provider can suggest only `headline` and an optional
+`optionalHook`. It cannot provide prices, coupons, shipping claims or URLs.
+`PromoMessageBuilder` reconstructs the final message from persisted facts.
+Rejected, repeated, timed out, errored, disabled or unconfigured generation
+falls back to the local marketplace-aware headline pool. Publication adapters
+consume the same saved payload regardless of provider.
 
 ## Security Boundary
 

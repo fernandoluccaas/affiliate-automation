@@ -113,10 +113,17 @@ describe("runContinuousWorker", () => {
   it("runs components on independent cadences without catch-up bursts", async () => {
     const { upsert } = await mockSettings();
     const jobs = dependencies();
+    jobs.discovery = vi.fn().mockResolvedValue({
+      discoveryStatus: "PARTIAL",
+      operationalMetrics: {
+        offersDiscovered: 20,
+        affiliateLinksReused: 17,
+      },
+    });
     const controller = new AbortController();
     let currentMs = Date.parse("2026-07-30T12:00:00.000Z");
 
-    await runContinuousWorker({
+    const result = await runContinuousWorker({
       dependencies: jobs,
       signal: controller.signal,
       cadences: {
@@ -140,6 +147,12 @@ describe("runContinuousWorker", () => {
     expect(jobs.publication).toHaveBeenCalledTimes(3);
     expect(jobs.retry).toHaveBeenCalledTimes(2);
     expect(jobs.maintenance).toHaveBeenCalledTimes(1);
+    expect(result.metrics).toMatchObject({
+      discoveryRuns: 2,
+      discoveryPartial: 2,
+      offersDiscovered: 40,
+      affiliateLinksReused: 34,
+    });
     expect(upsert).toHaveBeenLastCalledWith(
       expect.objectContaining({
         update: {

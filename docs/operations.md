@@ -158,6 +158,62 @@ passes. Permanent failures become `PUBLICATION_FAILED` immediately; transient
 failures stop after four attempts. Only one failed row per Channel is requeued
 in a retry cadence.
 
+## Running the automation continuously
+
+### Windows development
+
+Terminal A:
+
+```powershell
+docker compose up -d
+```
+
+Terminal B:
+
+```powershell
+npm run dev
+```
+
+Terminal C:
+
+```powershell
+$env:WORKER_DISCOVERY_INTERVAL_MINUTES="5"
+$env:WORKER_PUBLICATION_INTERVAL_MINUTES="2"
+$env:WORKER_RETRY_INTERVAL_MINUTES="2"
+$env:WORKER_MAINTENANCE_INTERVAL_MINUTES="15"
+$env:WORKER_REQUIRE_REDIS="true"
+npm run worker
+```
+
+Use `/automacoes` to confirm the heartbeat, next executions and counters.
+Pause publication before testing discovery alone. Stop with Ctrl+C and confirm
+that the status changes to OFFLINE after the active component finishes.
+
+### Linux service
+
+Provide the same variables through the process manager and execute:
+
+```bash
+npm run worker
+```
+
+The process manager should restart unexpected exits and send SIGTERM during
+deployments. PostgreSQL and Redis must be reachable before starting when
+`WORKER_REQUIRE_REDIS=true`.
+
+### Manual verification checklist
+
+With a dedicated Telegram test Channel:
+
+1. Confirm that discovery updates offers at the configured cadence.
+2. Confirm that at most one message per Channel is sent in each publication
+   cadence.
+3. Confirm that different headlines and valid `meli.la` URLs are preserved.
+4. Stop and restart the worker with a backlog; confirm there is no burst.
+5. Pause only publication and confirm discovery continues.
+6. Resume publication and confirm normal cadence instead of backlog draining.
+7. Stop Ollama and confirm `aiFallbackUsed` increases without stopping delivery.
+
 ## Safety boundary
 
 Continuous operation must reuse the validated Mercado Livre discovery service

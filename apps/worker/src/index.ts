@@ -51,6 +51,8 @@ type JobMetrics = {
   retried: number;
   expired: number;
   skipped: number;
+  aiGenerated: number;
+  aiFallbackUsed: number;
   skipReasons: Record<string, number>;
 };
 
@@ -89,6 +91,8 @@ function emptyMetrics(): JobMetrics {
     retried: 0,
     expired: 0,
     skipped: 0,
+    aiGenerated: 0,
+    aiFallbackUsed: 0,
     skipReasons: {},
   };
 }
@@ -103,10 +107,15 @@ function mergeMetrics(target: JobMetrics, source: JobMetrics) {
     "retried",
     "expired",
     "skipped",
+    "aiGenerated",
+    "aiFallbackUsed",
   ];
 
   for (const key of numericKeys) {
-    target[key] += source[key];
+    const value = source[key];
+    if (typeof value === "number" && Number.isFinite(value)) {
+      target[key] += value;
+    }
   }
 
   for (const [reason, count] of Object.entries(source.skipReasons)) {
@@ -537,6 +546,11 @@ export async function scheduleReadyOffers(now = new Date()) {
         recordSkip(metrics, "OFFER_MISSING_AFFILIATE_LINK");
         continue;
       }
+      if (payload.messageSource === "AI_GENERATED") {
+        metrics.aiGenerated += 1;
+      } else {
+        metrics.aiFallbackUsed += 1;
+      }
 
       const lock = await acquireLock(
         `publication:${channel.id}:${offer.id}`,
@@ -690,8 +704,7 @@ export function publicationRetryDelayMs(
     0,
     Math.min(PUBLICATION_RETRY_MINUTES.length - 1, attemptNumber - 1),
   );
-  const backoffMs =
-    (PUBLICATION_RETRY_MINUTES[position] ?? 30) * 60_000;
+  const backoffMs = (PUBLICATION_RETRY_MINUTES[position] ?? 30) * 60_000;
   const retryAfterMs =
     retryAfterSeconds && retryAfterSeconds > 0 ? retryAfterSeconds * 1000 : 0;
   return Math.max(backoffMs, retryAfterMs);
@@ -1189,9 +1202,10 @@ export async function startWorker(
 
   const independently = async (operations: Array<() => Promise<unknown>>) => {
     const failures: unknown[] = [];
+    const results: unknown[] = [];
     for (const operation of operations) {
       try {
-        await operation();
+        results.push(await operation());
       } catch (error) {
         failures.push(error);
       }
@@ -1199,25 +1213,64 @@ export async function startWorker(
     if (failures.length > 0) {
       throw new Error("One or more worker component operations failed.");
     }
+    return results;
   };
 
   const rawDependencies: ContinuousWorkerDependencies =
     options.dependencies ?? {
-      discovery: (now) =>
-        independently([
+      discovery: async (now) => {
+        const [discovery, , refresh] = (await independently([
           () => collectMercadoLivreCandidates(now),
           () =>
             processAffiliateLinkJobs({
               limit: pendingAffiliateBatchLimit(),
             }),
           () => refreshMercadoLivreOffers(now),
-        ]),
-      publication: (now) =>
-        independently([
+        ])) as [
+          MercadoLivreDiscoveryCycleResult,
+          MercadoLivreAffiliateCycleResult,
+          MercadoLivreRefreshCycleMetrics,
+        ];
+        return {
+          discoveryStatus: discovery.status,
+          operationalMetrics: {
+            offersDiscovered: discovery.metrics.candidatesFound,
+            offersUpdated:
+              discovery.metrics.updatedOffers +
+              discovery.metrics.newOfferVersions +
+              refresh.newVersions,
+            affiliateLinksGenerated: discovery.metrics.affiliateLinksGenerated,
+            affiliateLinksReused: discovery.metrics.affiliateLinksReused,
+          },
+        };
+      },
+      publication: async (now) => {
+        const [scheduled, published] = (await independently([
           () => scheduleReadyOffers(now),
           () => publishScheduledOffers(now),
-        ]),
-      retry: (now) => retryFailedPublications(now),
+        ])) as [JobMetrics, JobMetrics];
+        return {
+          operationalMetrics: {
+            offersEvaluated: scheduled.readyOffersFound,
+            offersScheduled: scheduled.scheduled,
+            offersSkipped: scheduled.skipped,
+            publicationsAttempted:
+              published.published + published.exported + published.failed,
+            publicationsSucceeded: published.published,
+            publicationsFailed: published.failed,
+            aiGenerated: scheduled.aiGenerated,
+            aiFallbackUsed: scheduled.aiFallbackUsed,
+          },
+        };
+      },
+      retry: async (now) => {
+        const result = await retryFailedPublications(now);
+        return {
+          operationalMetrics: {
+            publicationsRetried: result.retried,
+          },
+        };
+      },
       maintenance: (now) => expireInvalidOffers(now),
     };
   const cadences = options.cadences ?? getWorkerCadences();

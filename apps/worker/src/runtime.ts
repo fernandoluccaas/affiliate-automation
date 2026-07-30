@@ -16,6 +16,26 @@ export type WorkerControls = {
   publicationPaused: boolean;
 };
 
+export type WorkerOperationalMetrics = {
+  discoveryRuns: number;
+  discoverySucceeded: number;
+  discoveryPartial: number;
+  discoveryFailed: number;
+  offersDiscovered: number;
+  offersUpdated: number;
+  affiliateLinksGenerated: number;
+  affiliateLinksReused: number;
+  offersEvaluated: number;
+  offersScheduled: number;
+  offersSkipped: number;
+  publicationsAttempted: number;
+  publicationsSucceeded: number;
+  publicationsFailed: number;
+  publicationsRetried: number;
+  aiGenerated: number;
+  aiFallbackUsed: number;
+};
+
 export type WorkerOperationalStatus = {
   state: "ONLINE" | "OFFLINE";
   startedAt: string;
@@ -38,6 +58,7 @@ export type WorkerOperationalStatus = {
     at: string;
     code: "WORKER_COMPONENT_FAILED";
   } | null;
+  metrics: WorkerOperationalMetrics;
 };
 
 export type ContinuousWorkerDependencies = Record<
@@ -175,6 +196,46 @@ const COMPONENTS: WorkerComponent[] = [
   "maintenance",
 ];
 
+function emptyOperationalMetrics(): WorkerOperationalMetrics {
+  return {
+    discoveryRuns: 0,
+    discoverySucceeded: 0,
+    discoveryPartial: 0,
+    discoveryFailed: 0,
+    offersDiscovered: 0,
+    offersUpdated: 0,
+    affiliateLinksGenerated: 0,
+    affiliateLinksReused: 0,
+    offersEvaluated: 0,
+    offersScheduled: 0,
+    offersSkipped: 0,
+    publicationsAttempted: 0,
+    publicationsSucceeded: 0,
+    publicationsFailed: 0,
+    publicationsRetried: 0,
+    aiGenerated: 0,
+    aiFallbackUsed: 0,
+  };
+}
+
+function mergeOperationalMetrics(
+  target: WorkerOperationalMetrics,
+  result: unknown,
+) {
+  if (!result || typeof result !== "object" || Array.isArray(result)) return;
+  const metrics = (result as Record<string, unknown>).operationalMetrics;
+  if (!metrics || typeof metrics !== "object" || Array.isArray(metrics)) return;
+
+  for (const key of Object.keys(target) as Array<
+    keyof WorkerOperationalMetrics
+  >) {
+    const value = (metrics as Record<string, unknown>)[key];
+    if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+      target[key] += value;
+    }
+  }
+}
+
 export async function runContinuousWorker(options: ContinuousWorkerOptions) {
   const now = options.now ?? (() => new Date());
   const sleep = options.sleep ?? defaultSleep;
@@ -188,6 +249,7 @@ export async function runContinuousWorker(options: ContinuousWorkerOptions) {
   ) as Record<WorkerComponent, Date>;
   const lastRuns: WorkerOperationalStatus["lastRuns"] = {};
   let lastError: WorkerOperationalStatus["lastError"] = null;
+  const metrics = emptyOperationalMetrics();
   let nextHeartbeatAt = startedAt;
 
   const status = (
@@ -207,6 +269,7 @@ export async function runContinuousWorker(options: ContinuousWorkerOptions) {
     ) as Record<WorkerComponent, string>,
     lastRuns,
     lastError,
+    metrics,
   });
 
   while (!options.signal.aborted) {
@@ -226,13 +289,32 @@ export async function runContinuousWorker(options: ContinuousWorkerOptions) {
         };
       } else {
         try {
-          await options.dependencies[component](tickAt);
+          const result = await options.dependencies[component](tickAt);
+          mergeOperationalMetrics(metrics, result);
+          if (component === "discovery") {
+            metrics.discoveryRuns += 1;
+            const discoveryStatus =
+              result && typeof result === "object" && !Array.isArray(result)
+                ? (result as Record<string, unknown>).discoveryStatus
+                : null;
+            if (discoveryStatus === "PARTIAL") {
+              metrics.discoveryPartial += 1;
+            } else if (discoveryStatus === "FAILED") {
+              metrics.discoveryFailed += 1;
+            } else {
+              metrics.discoverySucceeded += 1;
+            }
+          }
           lastRuns[component] = {
             status: "SUCCEEDED",
             at: tickAt.toISOString(),
             durationMs: Math.max(0, Date.now() - componentStartedAt),
           };
         } catch {
+          if (component === "discovery") {
+            metrics.discoveryRuns += 1;
+            metrics.discoveryFailed += 1;
+          }
           lastRuns[component] = {
             status: "FAILED",
             at: tickAt.toISOString(),
