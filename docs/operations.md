@@ -68,6 +68,37 @@ No migration is required for the initial continuous-worker implementation.
 Retry scheduling can use the existing `Publication.scheduledAt`, and operational
 state can use stable `SystemSetting` keys.
 
+## Continuous runtime
+
+Run the production-style local process with:
+
+```powershell
+npm run worker
+```
+
+The runtime maintains four independent clocks:
+
+| Component   | Environment variable                  | Default    |
+| ----------- | ------------------------------------- | ---------- |
+| Discovery   | `WORKER_DISCOVERY_INTERVAL_MINUTES`   | 30 minutes |
+| Publication | `WORKER_PUBLICATION_INTERVAL_MINUTES` | 5 minutes  |
+| Retry       | `WORKER_RETRY_INTERVAL_MINUTES`       | 10 minutes |
+| Maintenance | `WORKER_MAINTENANCE_INTERVAL_MINUTES` | 60 minutes |
+
+Each clock is advanced from the actual execution time. Intervals missed while
+the process is offline are not replayed, preventing catch-up loops after a
+restart. A failure is isolated to its component and later clocks still run.
+
+The singleton `worker:continuous:status` `SystemSetting` stores heartbeat,
+process state, last component outcomes and estimated next executions. The
+singleton `worker:continuous:controls` setting stores `discoveryPaused` and
+`publicationPaused`. Publication pause also pauses retry delivery, but
+maintenance continues.
+
+SIGINT and SIGTERM stop admission of new components, wait for the active
+component to settle, persist an `OFFLINE` heartbeat and only then disconnect
+Prisma.
+
 ## Safety boundary
 
 Continuous operation must reuse the validated Mercado Livre discovery service

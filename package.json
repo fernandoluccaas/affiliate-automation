@@ -10,6 +10,7 @@
   "scripts": {
     "dev": "npm run dev -w apps/dashboard",
     "worker:dev": "npm run dev -w apps/worker",
+    "worker": "npm run start -w apps/worker",
     "worker:once": "npm run once -w apps/worker",
     "worker:start": "npm run start -w apps/worker",
     "build": "npm run build --workspaces --if-present",

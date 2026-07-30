@@ -30,8 +30,12 @@ import {
 } from "@affiliate/marketplace-discovery";
 import { sanitizeMercadoLivreAffiliateError } from "@affiliate/marketplace-connectors";
 import { validateMarketplaceAffiliateUrl } from "@affiliate/validation";
+import {
+  runContinuousWorker,
+  type ContinuousWorkerDependencies,
+  type WorkerCadences,
+} from "./runtime";
 
-const DEFAULT_POLL_INTERVAL_MS = 60_000;
 const DEFAULT_MAX_ATTEMPTS = 3;
 
 type JobMetrics = {
@@ -1085,7 +1089,13 @@ export async function runWorkerCycle(
 let loopStarted = false;
 
 export async function startWorker(
-  options: { once?: boolean; pollIntervalMs?: number } = {},
+  options: {
+    once?: boolean;
+    cadences?: WorkerCadences;
+    heartbeatIntervalMs?: number;
+    signal?: AbortSignal;
+    dependencies?: ContinuousWorkerDependencies;
+  } = {},
 ) {
   if (loopStarted) {
     throw new Error("Worker loop already started in this process.");
@@ -1096,32 +1106,75 @@ export async function startWorker(
   }
 
   loopStarted = true;
-  const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
-  let stopping = false;
-
-  const stop = async () => {
-    stopping = true;
-    await prisma.$disconnect();
+  const shutdownController = new AbortController();
+  const stop = () => {
+    shutdownController.abort();
   };
 
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
 
-  while (!stopping) {
-    await runWorkerCycle();
-    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+  if (options.signal) {
+    options.signal.addEventListener("abort", stop, { once: true });
   }
 
-  return emptyMetrics();
+  const independently = async (operations: Array<() => Promise<unknown>>) => {
+    const failures: unknown[] = [];
+    for (const operation of operations) {
+      try {
+        await operation();
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    if (failures.length > 0) {
+      throw new Error("One or more worker component operations failed.");
+    }
+  };
+
+  const dependencies: ContinuousWorkerDependencies = options.dependencies ?? {
+    discovery: (now) =>
+      independently([
+        () => collectMercadoLivreCandidates(now),
+        () =>
+          processAffiliateLinkJobs({
+            limit: pendingAffiliateBatchLimit(),
+          }),
+        () => refreshMercadoLivreOffers(now),
+      ]),
+    publication: (now) =>
+      independently([
+        () => scheduleReadyOffers(now),
+        () => publishScheduledOffers(now),
+      ]),
+    retry: (now) =>
+      independently([
+        () => retryFailedPublications(now),
+        () => publishScheduledOffers(now),
+      ]),
+    maintenance: (now) => expireInvalidOffers(now),
+  };
+
+  try {
+    return await runContinuousWorker({
+      dependencies,
+      signal: shutdownController.signal,
+      ...(options.cadences ? { cadences: options.cadences } : {}),
+      ...(options.heartbeatIntervalMs
+        ? { heartbeatIntervalMs: options.heartbeatIntervalMs }
+        : {}),
+    });
+  } finally {
+    process.removeListener("SIGINT", stop);
+    process.removeListener("SIGTERM", stop);
+    await prisma.$disconnect();
+  }
 }
 
 if (process.env.NODE_ENV !== "test") {
   const once = process.argv.includes("--once");
-  const pollIntervalMs = Number(
-    process.env.WORKER_POLL_INTERVAL_MS ?? DEFAULT_POLL_INTERVAL_MS,
-  );
 
-  startWorker({ once, pollIntervalMs }).catch(() => {
+  startWorker({ once }).catch(() => {
     console.error(
       JSON.stringify({
         event: "worker_failed",

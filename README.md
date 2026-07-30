@@ -149,12 +149,28 @@ To test tracking manually, open the generated tracking URL shown in the publicat
 ## Worker Commands
 
 ```powershell
+npm run worker
 npm run worker:once
 npm run worker:dev
 npm run worker:start
 ```
 
-`worker:once` runs one cycle. `worker:dev` and `worker:start` poll continuously using `WORKER_POLL_INTERVAL_MS`, defaulting to 60000 ms. Affiliate-link batches above `AFFILIATE_LINK_JOB_INLINE_LIMIT` are queued and processed independently by the worker.
+`worker` is the official continuous process. `worker:once` remains a controlled
+diagnostic cycle. `worker:dev` and `worker:start` are workspace-level aliases.
+Continuous jobs use independent conservative cadences:
+
+```env
+WORKER_DISCOVERY_INTERVAL_MINUTES="30"
+WORKER_PUBLICATION_INTERVAL_MINUTES="5"
+WORKER_RETRY_INTERVAL_MINUTES="10"
+WORKER_MAINTENANCE_INTERVAL_MINUTES="60"
+```
+
+The process updates a singleton database heartbeat every 30 seconds. Global
+discovery and publication pause flags are persisted separately, so pausing
+publication does not stop discovery. Missed intervals are not replayed after a
+restart. Affiliate-link batches above `AFFILIATE_LINK_JOB_INLINE_LIMIT` are
+queued and processed independently by the worker.
 
 ## Quality Commands
 
