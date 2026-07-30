@@ -1,3 +1,8 @@
+import {
+  DEFAULT_WORKER_STALE_AFTER_MS,
+  resolveWorkerHealthStatus,
+} from "@affiliate/shared";
+
 export const WORKER_STATUS_KEY = "worker:continuous:status";
 export const WORKER_CONTROLS_KEY = "worker:continuous:controls";
 
@@ -20,22 +25,17 @@ export function workerControlsFromValue(value: unknown) {
 export function workerStatusFromValue(
   value: unknown,
   now = new Date(),
-  staleAfterMs = 120_000,
+  staleAfterMs = DEFAULT_WORKER_STALE_AFTER_MS,
 ) {
   const record = asRecord(value);
   const heartbeatAt =
     typeof record.heartbeatAt === "string" ? record.heartbeatAt : null;
-  const storedState = record.state;
-  const heartbeatTime = heartbeatAt
-    ? new Date(heartbeatAt).getTime()
-    : Number.NaN;
-  const elapsed = now.getTime() - heartbeatTime;
-  const state =
-    storedState === "OFFLINE" || !Number.isFinite(heartbeatTime)
-      ? ("OFFLINE" as const)
-      : elapsed > staleAfterMs
-        ? ("STALE" as const)
-        : ("ONLINE" as const);
+  const state = resolveWorkerHealthStatus({
+    storedState: record.state,
+    heartbeatAt,
+    now,
+    staleAfterMs,
+  });
   const nextRuns = asRecord(record.nextRuns);
   const lastError = asRecord(record.lastError);
   const metrics = asRecord(record.metrics);

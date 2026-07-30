@@ -27,8 +27,10 @@ server does not reset an `America/Sao_Paulo` channel at UTC midnight.
 Operational state is stored in two bounded `SystemSetting` singletons: one for
 heartbeat/status/aggregate counters and one for pause controls. This avoids an
 unbounded heartbeat table. `/automacoes` derives ONLINE, STALE or OFFLINE from
-the saved state and heartbeat age and exposes independent discovery/publication
-controls.
+the saved state through the shared `resolveWorkerHealthStatus` rule and exposes
+independent discovery/publication controls. The worker writes every 30 seconds;
+three missed heartbeats (90 seconds) are `STALE`. Explicit graceful shutdown is
+`OFFLINE`, while missing or invalid heartbeat data fails safely to `STALE`.
 
 Phase 2C adds multi-provider copy generation between channel selection and publication creation. The worker requests structured JSON copy from the configured provider, validates the returned text against confirmed offer facts, persists message metadata on `Publication`, and falls back to the deterministic composer without blocking Telegram, manual export, tracking or Redis locks. Ollama is the default provider and is called over HTTP at the configured `OLLAMA_BASE_URL`; OpenAI remains optional.
 

@@ -30,6 +30,42 @@ export const channelTypes = [
 ] as const;
 export type ChannelType = (typeof channelTypes)[number];
 
+export const DEFAULT_WORKER_HEARTBEAT_INTERVAL_MS = 30_000;
+export const DEFAULT_WORKER_STALE_AFTER_MS =
+  DEFAULT_WORKER_HEARTBEAT_INTERVAL_MS * 3;
+
+export type WorkerHealthStatus = "ONLINE" | "OFFLINE" | "STALE";
+
+export function resolveWorkerHealthStatus(input: {
+  storedState: unknown;
+  heartbeatAt: Date | string | null | undefined;
+  now?: Date;
+  staleAfterMs?: number;
+}): WorkerHealthStatus {
+  if (input.storedState === "OFFLINE") {
+    return "OFFLINE";
+  }
+
+  const now = input.now ?? new Date();
+  const staleAfterMs =
+    input.staleAfterMs ?? DEFAULT_WORKER_STALE_AFTER_MS;
+  const heartbeatTime = input.heartbeatAt
+    ? new Date(input.heartbeatAt).getTime()
+    : Number.NaN;
+  const elapsed = now.getTime() - heartbeatTime;
+
+  if (
+    !Number.isFinite(heartbeatTime) ||
+    !Number.isFinite(elapsed) ||
+    elapsed < 0 ||
+    elapsed > staleAfterMs
+  ) {
+    return "STALE";
+  }
+
+  return "ONLINE";
+}
+
 export function isSupportedMarketplace(value: string): value is Marketplace {
   return marketplaces.includes(value as Marketplace);
 }

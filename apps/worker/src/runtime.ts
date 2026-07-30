@@ -1,10 +1,15 @@
 import { prisma, type Prisma } from "@affiliate/database";
+import {
+  DEFAULT_WORKER_HEARTBEAT_INTERVAL_MS,
+  DEFAULT_WORKER_STALE_AFTER_MS,
+  resolveWorkerHealthStatus,
+} from "@affiliate/shared";
 
 export const WORKER_STATUS_KEY = "worker:continuous:status";
 export const WORKER_CONTROLS_KEY = "worker:continuous:controls";
 
 const MINUTE_MS = 60_000;
-const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000;
+const DEFAULT_SHUTDOWN_TIMEOUT_MS = 5_000;
 
 export type WorkerComponent =
   "discovery" | "publication" | "retry" | "maintenance";
@@ -72,6 +77,7 @@ export type ContinuousWorkerOptions = {
   env?: NodeJS.ProcessEnv;
   cadences?: WorkerCadences;
   heartbeatIntervalMs?: number;
+  shutdownTimeoutMs?: number;
   now?: () => Date;
   sleep?: (durationMs: number, signal: AbortSignal) => Promise<void>;
   processId?: number;
@@ -146,11 +152,15 @@ export async function readWorkerOperationalStatus() {
 export function classifyWorkerStatus(
   heartbeatAt: Date | string | null | undefined,
   now = new Date(),
-  staleAfterMs = 120_000,
+  staleAfterMs = DEFAULT_WORKER_STALE_AFTER_MS,
+  storedState: unknown = "ONLINE",
 ) {
-  if (!heartbeatAt) return "OFFLINE" as const;
-  const elapsed = now.getTime() - new Date(heartbeatAt).getTime();
-  return elapsed <= staleAfterMs ? ("ONLINE" as const) : ("STALE" as const);
+  return resolveWorkerHealthStatus({
+    storedState,
+    heartbeatAt,
+    now,
+    staleAfterMs,
+  });
 }
 
 async function persistStatus(status: WorkerOperationalStatus) {
@@ -180,6 +190,28 @@ function defaultSleep(durationMs: number, signal: AbortSignal) {
       resolve();
     }
   });
+}
+
+async function settleWithin<T>(
+  operation: Promise<T>,
+  timeoutMs: number,
+): Promise<T> {
+  let timeout: NodeJS.Timeout | undefined;
+
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error("Worker shutdown timed out.")),
+          timeoutMs,
+        );
+        timeout.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 function isPaused(component: WorkerComponent, controls: WorkerControls) {
@@ -243,7 +275,9 @@ export async function runContinuousWorker(options: ContinuousWorkerOptions) {
   const cadences =
     options.cadences ?? getWorkerCadences(options.env ?? process.env);
   const heartbeatIntervalMs =
-    options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
+    options.heartbeatIntervalMs ?? DEFAULT_WORKER_HEARTBEAT_INTERVAL_MS;
+  const shutdownTimeoutMs =
+    options.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
   const startedAt = now();
   const processId = options.processId ?? process.pid;
   const runId = `continuous:${startedAt.toISOString()}:${processId}`;
@@ -277,6 +311,8 @@ export async function runContinuousWorker(options: ContinuousWorkerOptions) {
     lastError,
     metrics,
   });
+
+  await persistStatus(status("ONLINE", startedAt));
 
   while (!options.signal.aborted) {
     const tickAt = now();
@@ -390,6 +426,17 @@ export async function runContinuousWorker(options: ContinuousWorkerOptions) {
   }
 
   const stoppedAt = now();
-  await persistStatus(status("OFFLINE", stoppedAt));
-  return status("OFFLINE", stoppedAt);
+  const offlineStatus = status("OFFLINE", stoppedAt);
+  try {
+    await settleWithin(persistStatus(offlineStatus), shutdownTimeoutMs);
+  } catch {
+    logger({
+      timestamp: stoppedAt.toISOString(),
+      component: "worker",
+      runId,
+      status: "FAILED",
+      errorCode: "WORKER_OFFLINE_PERSIST_FAILED",
+    });
+  }
+  return offlineStatus;
 }

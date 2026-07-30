@@ -101,11 +101,20 @@ describe("continuous worker configuration", () => {
 
   it("classifies a missing, fresh and stale heartbeat", () => {
     const now = new Date("2026-07-30T12:02:00.000Z");
-    expect(classifyWorkerStatus(null, now)).toBe("OFFLINE");
+    expect(classifyWorkerStatus(null, now)).toBe("STALE");
+    expect(classifyWorkerStatus("invalid", now)).toBe("STALE");
     expect(classifyWorkerStatus("2026-07-30T12:01:30.000Z", now)).toBe(
       "ONLINE",
     );
     expect(classifyWorkerStatus("2026-07-30T11:59:00.000Z", now)).toBe("STALE");
+    expect(
+      classifyWorkerStatus(
+        "2026-07-30T12:01:30.000Z",
+        now,
+        90_000,
+        "OFFLINE",
+      ),
+    ).toBe("OFFLINE");
   });
 });
 
@@ -216,6 +225,99 @@ describe("runContinuousWorker", () => {
     expect(completed).toBe(true);
     expect(result.state).toBe("OFFLINE");
     expect(jobs.publication).not.toHaveBeenCalled();
+  });
+
+  it("marks a restarted worker ONLINE before running components", async () => {
+    const { upsert } = await mockSettings({
+      state: "ONLINE",
+      heartbeatAt: "2026-07-30T11:00:00.000Z",
+    });
+    const controller = new AbortController();
+
+    await runContinuousWorker({
+      dependencies: dependencies(),
+      signal: controller.signal,
+      now: () => new Date("2026-07-30T12:00:00.000Z"),
+      sleep: async () => controller.abort(),
+      logger: vi.fn(),
+    });
+
+    expect(upsert.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({
+        update: {
+          value: expect.objectContaining({
+            state: "ONLINE",
+            heartbeatAt: "2026-07-30T12:00:00.000Z",
+          }),
+        },
+      }),
+    );
+  });
+
+  it("renews ONLINE heartbeat while a long component is active", async () => {
+    vi.useFakeTimers();
+    try {
+      const { upsert } = await mockSettings();
+      const controller = new AbortController();
+      let finishDiscovery: (() => void) | undefined;
+      const jobs = dependencies();
+      jobs.discovery = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            finishDiscovery = resolve;
+          }),
+      );
+
+      const running = runContinuousWorker({
+        dependencies: jobs,
+        signal: controller.signal,
+        heartbeatIntervalMs: 1_000,
+        now: () => new Date(),
+        sleep: async () => controller.abort(),
+        logger: vi.fn(),
+      });
+
+      await vi.advanceTimersByTimeAsync(2_100);
+      expect(
+        upsert.mock.calls.filter(
+          (call) =>
+            (call[0] as { update?: { value?: { state?: string } } }).update
+              ?.value?.state === "ONLINE",
+        ).length,
+      ).toBeGreaterThanOrEqual(3);
+
+      finishDiscovery?.();
+      await running;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not block shutdown when OFFLINE persistence fails", async () => {
+    const { upsert } = await mockSettings();
+    const controller = new AbortController();
+    const jobs = dependencies();
+    const logger = vi.fn();
+    upsert
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
+      .mockImplementation(() => new Promise(() => undefined));
+
+    const result = await runContinuousWorker({
+      dependencies: jobs,
+      signal: controller.signal,
+      now: () => new Date("2026-07-30T12:00:00.000Z"),
+      sleep: async () => controller.abort(),
+      shutdownTimeoutMs: 5,
+      logger,
+    });
+
+    expect(result.state).toBe("OFFLINE");
+    expect(logger).toHaveBeenCalledWith(
+      expect.objectContaining({
+        errorCode: "WORKER_OFFLINE_PERSIST_FAILED",
+      }),
+    );
   });
 
   it("isolates a failed component and does not persist secret errors", async () => {

@@ -24,8 +24,17 @@ describe("worker operational view", () => {
       workerStatusFromValue(
         { state: "OFFLINE", heartbeatAt: "2026-07-30T12:01:59.000Z" },
         now,
-      ).state,
+    ).state,
     ).toBe("OFFLINE");
+    expect(workerStatusFromValue({ state: "ONLINE" }, now).state).toBe(
+      "STALE",
+    );
+    expect(
+      workerStatusFromValue(
+        { state: "ONLINE", heartbeatAt: "invalid" },
+        now,
+      ).state,
+    ).toBe("STALE");
   });
 
   it("reads pause flags without trusting malformed values", () => {

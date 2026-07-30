@@ -95,14 +95,37 @@ singleton `worker:continuous:controls` setting stores `discoveryPaused` and
 `publicationPaused`. Publication pause also pauses retry delivery, but
 maintenance continues.
 
+Operational health is derived centrally from the persisted state and heartbeat:
+
+- `ONLINE`: stored state is not `OFFLINE` and the heartbeat is at most 90
+  seconds old;
+- `OFFLINE`: a graceful shutdown explicitly persisted `OFFLINE`;
+- `STALE`: the process last claimed to be online, but the heartbeat is missing,
+  invalid, in the future or older than 90 seconds.
+
+The default heartbeat is 30 seconds, so `STALE` represents three missed
+heartbeats. An abrupt process termination cannot persist `OFFLINE`; the
+dashboard therefore changes it to `STALE` after that threshold. A restart
+persists `ONLINE` before admitting the first component.
+
 SIGINT and SIGTERM stop admission of new components, wait for the active
 component to settle, persist an `OFFLINE` heartbeat and only then disconnect
-Prisma.
+Prisma. Persisting the final state has a five-second bound; a sanitized
+`WORKER_OFFLINE_PERSIST_FAILED` event is emitted if that write fails or times
+out, so shutdown is not held indefinitely.
 
 Long-running components refresh the heartbeat while their operation is active.
 Each component emits one bounded JSON event with timestamp, component, run ID,
 status and duration. Failure events use a fixed error code and never serialize
 the thrown error, cookies, tokens, headers or session values.
+
+Manual health check:
+
+1. run `npm run worker` and confirm `/automacoes` shows `ONLINE`;
+2. stop that exact process with Ctrl+C and confirm `OFFLINE`;
+3. for abrupt-exit testing, terminate only the PID displayed by the worker
+   status (never use a broad `taskkill /IM node.exe`) and wait 90 seconds;
+4. confirm `STALE`, restart `npm run worker`, and confirm `ONLINE`.
 
 ## Restart and delivery guarantees
 
