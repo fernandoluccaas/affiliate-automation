@@ -38,6 +38,10 @@ export function workerStatusFromValue(
   });
   const nextRuns = asRecord(record.nextRuns);
   const lastError = asRecord(record.lastError);
+  const lockBackend =
+    record.lockBackend === "AVAILABLE" || record.lockBackend === "UNAVAILABLE"
+      ? record.lockBackend
+      : ("UNKNOWN" as const);
   const metrics = asRecord(record.metrics);
   const metric = (key: string) =>
     typeof metrics[key] === "number" ? metrics[key] : 0;
@@ -52,6 +56,11 @@ export function workerStatusFromValue(
     lastErrorComponent:
       typeof lastError.component === "string" ? lastError.component : null,
     lastErrorAt: typeof lastError.at === "string" ? lastError.at : null,
+    lastErrorCode:
+      typeof lastError.code === "string" ? lastError.code : null,
+    lastErrorRootCause:
+      typeof lastError.rootCause === "string" ? lastError.rootCause : null,
+    lockBackend,
     metrics: {
       discoveryRuns: metric("discoveryRuns"),
       discoverySucceeded: metric("discoverySucceeded"),

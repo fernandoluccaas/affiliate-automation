@@ -4,6 +4,7 @@ import { createMercadoLivreDiscoveryMetrics } from "@affiliate/marketplace-disco
 import { generateMessageForOffer } from "@affiliate/ai-copywriter";
 import {
   compareReadyOfferPriority,
+  createLockedWorkerDependencies,
   createPublicationIdempotently,
   getChannelMessageFooter,
   headlineFromMessagePayload,
@@ -633,6 +634,122 @@ function workerJobMetrics(
     ...overrides,
   };
 }
+
+describe("continuous worker Redis coordination", () => {
+  function rawDependencies() {
+    return {
+      discovery: vi.fn().mockResolvedValue({ operationalMetrics: {} }),
+      publication: vi.fn().mockResolvedValue({}),
+      retry: vi.fn().mockResolvedValue({}),
+      maintenance: vi.fn().mockResolvedValue({}),
+    };
+  }
+
+  const cadences = {
+    discovery: 60_000,
+    publication: 60_000,
+    retry: 60_000,
+    maintenance: 60_000,
+  };
+
+  it("blocks required workloads while Redis is down and recovers without restart", async () => {
+    const raw = rawDependencies();
+    const recordOutcome = vi.fn().mockResolvedValue(undefined);
+    const release = vi.fn().mockResolvedValue(undefined);
+    const acquire = vi
+      .fn()
+      .mockResolvedValueOnce({
+        key: "worker:continuous:discovery",
+        token: "down",
+        acquired: false,
+        mode: "redis-url",
+        failureReason: "REDIS_UNAVAILABLE",
+        extend: vi.fn().mockResolvedValue(false),
+        release: vi.fn().mockResolvedValue(undefined),
+      })
+      .mockResolvedValueOnce({
+        key: "worker:continuous:discovery",
+        token: "recovered",
+        acquired: true,
+        mode: "redis-url",
+        extend: vi.fn().mockResolvedValue(true),
+        release,
+      });
+    const locked = createLockedWorkerDependencies(raw, cadences, {
+      acquireLock: acquire,
+      requireRedis: true,
+      recordOutcome,
+    });
+    const now = new Date("2026-07-30T16:00:00.000Z");
+
+    await expect(locked.discovery(now)).resolves.toMatchObject({
+      workerComponentOutcome: {
+        status: "FAILED",
+        lockBackend: "UNAVAILABLE",
+        rootCause: "REDIS_UNAVAILABLE",
+      },
+    });
+    expect(raw.discovery).not.toHaveBeenCalled();
+    await expect(locked.discovery(now)).resolves.toMatchObject({
+      workerComponentOutcome: {
+        status: "SUCCEEDED",
+        lockBackend: "AVAILABLE",
+      },
+    });
+    expect(raw.discovery).toHaveBeenCalledTimes(1);
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(recordOutcome).toHaveBeenCalledWith(
+      "discovery",
+      now,
+      expect.objectContaining({ rootCause: "REDIS_UNAVAILABLE" }),
+    );
+  });
+
+  it("classifies an occupied lock as SKIPPED instead of Redis unavailable", async () => {
+    const raw = rawDependencies();
+    const recordOutcome = vi.fn().mockResolvedValue(undefined);
+    const locked = createLockedWorkerDependencies(raw, cadences, {
+      requireRedis: true,
+      recordOutcome,
+      acquireLock: vi.fn().mockResolvedValue({
+        key: "worker:continuous:publication",
+        token: "held",
+        acquired: false,
+        mode: "redis-url",
+        failureReason: "LOCK_ALREADY_HELD",
+        extend: vi.fn().mockResolvedValue(false),
+        release: vi.fn().mockResolvedValue(undefined),
+      }),
+    });
+
+    await expect(locked.publication(new Date())).resolves.toMatchObject({
+      workerComponentOutcome: {
+        status: "SKIPPED",
+        lockBackend: "AVAILABLE",
+        rootCause: "LOCK_ALREADY_HELD",
+      },
+    });
+    expect(raw.publication).not.toHaveBeenCalled();
+  });
+
+  it("keeps optional development mode permissive when lock acquisition fails", async () => {
+    const raw = rawDependencies();
+    const locked = createLockedWorkerDependencies(raw, cadences, {
+      requireRedis: false,
+      recordOutcome: vi.fn(),
+      acquireLock: vi.fn().mockRejectedValue(new Error("connection failed")),
+    });
+
+    await expect(locked.maintenance(new Date())).resolves.toMatchObject({
+      workerComponentOutcome: {
+        status: "SUCCEEDED",
+        lockBackend: "UNAVAILABLE",
+        rootCause: "REDIS_UNAVAILABLE",
+      },
+    });
+    expect(raw.maintenance).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe("runWorkerCycle", () => {
   it("records a partial cycle and continues refresh, scheduling, retries and publishing after discovery fails", async () => {

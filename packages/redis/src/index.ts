@@ -15,6 +15,7 @@ export type LockHandle = {
   token: string;
   acquired: boolean;
   mode: RedisMode;
+  failureReason?: "REDIS_UNAVAILABLE" | "LOCK_ALREADY_HELD";
   extend(ttlMs: number): Promise<boolean>;
   release(): Promise<void>;
 };
@@ -156,73 +157,105 @@ export async function acquireLock(
       token,
       acquired: !requireRedis,
       mode: "unavailable",
+      failureReason: "REDIS_UNAVAILABLE",
       extend: async () => !requireRedis,
       release: async () => undefined,
     };
   }
 
   if (config.mode === "upstash") {
-    const redis = new Redis({ url: config.url, token: config.token });
-    const result = await redis.set(key, token, { nx: true, px: ttlMs });
+    try {
+      const redis = new Redis({ url: config.url, token: config.token });
+      const result = await redis.set(key, token, { nx: true, px: ttlMs });
+
+      return {
+        key,
+        token,
+        acquired: result === "OK",
+        mode: "upstash",
+        ...(result === "OK"
+          ? {}
+          : { failureReason: "LOCK_ALREADY_HELD" as const }),
+        extend: async (nextTtlMs) => {
+          const extended = await redis.eval(
+            "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('pexpire', KEYS[1], ARGV[2]) else return 0 end",
+            [key],
+            [token, nextTtlMs],
+          );
+
+          return Number(extended) === 1;
+        },
+        release: async () => {
+          const current = await redis.get<string>(key);
+
+          if (current === token) {
+            await redis.del(key);
+          }
+        },
+      };
+    } catch {
+      return unavailableLock(key, token, "upstash", requireRedis);
+    }
+  }
+
+  try {
+    const result = await redisUrlCommand(config.url, [
+      "SET",
+      key,
+      token,
+      "NX",
+      "PX",
+      ttlMs,
+    ]);
 
     return {
       key,
       token,
-      acquired: result === "OK",
-      mode: "upstash",
+      acquired: result.startsWith("+OK"),
+      mode: "redis-url",
+      ...(result.startsWith("+OK")
+        ? {}
+        : { failureReason: "LOCK_ALREADY_HELD" as const }),
       extend: async (nextTtlMs) => {
-        const extended = await redis.eval(
+        const reply = await redisUrlCommand(config.url, [
+          "EVAL",
           "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('pexpire', KEYS[1], ARGV[2]) else return 0 end",
-          [key],
-          [token, nextTtlMs],
-        );
+          1,
+          key,
+          token,
+          nextTtlMs,
+        ]);
 
-        return Number(extended) === 1;
+        return reply.startsWith(":1");
       },
       release: async () => {
-        const current = await redis.get<string>(key);
-
-        if (current === token) {
-          await redis.del(key);
-        }
+        await redisUrlCommand(config.url, [
+          "EVAL",
+          "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
+          1,
+          key,
+          token,
+        ]);
       },
     };
+  } catch {
+    return unavailableLock(key, token, "redis-url", requireRedis);
   }
+}
 
-  const result = await redisUrlCommand(config.url, [
-    "SET",
-    key,
-    token,
-    "NX",
-    "PX",
-    ttlMs,
-  ]);
-
+function unavailableLock(
+  key: string,
+  token: string,
+  mode: RedisMode,
+  requireRedis: boolean,
+): LockHandle {
   return {
     key,
     token,
-    acquired: result.startsWith("+OK"),
-    mode: "redis-url",
-    extend: async (nextTtlMs) => {
-      const reply = await redisUrlCommand(config.url, [
-        "EVAL",
-        "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('pexpire', KEYS[1], ARGV[2]) else return 0 end",
-        1,
-        key,
-        token,
-        nextTtlMs,
-      ]);
-
-      return reply.startsWith(":1");
-    },
-    release: async () => {
-      await redisUrlCommand(config.url, [
-        "EVAL",
-        "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
-        1,
-        key,
-        token,
-      ]);
-    },
+    acquired: !requireRedis,
+    mode,
+    failureReason: "REDIS_UNAVAILABLE",
+    extend: async () => !requireRedis,
+    release: async () => undefined,
   };
 }

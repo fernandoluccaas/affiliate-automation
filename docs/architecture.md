@@ -31,6 +31,12 @@ the saved state through the shared `resolveWorkerHealthStatus` rule and exposes
 independent discovery/publication controls. The worker writes every 30 seconds;
 three missed heartbeats (90 seconds) are `STALE`. Explicit graceful shutdown is
 `OFFLINE`, while missing or invalid heartbeat data fails safely to `STALE`.
+The same status JSON retains the last known distributed-lock backend and a
+bounded root-cause code. Redis connection failures are
+`FAILED / REDIS_UNAVAILABLE`; a healthy backend with an owned lock is
+`SKIPPED / LOCK_ALREADY_HELD`. The worker retries acquisition on every cadence,
+which enables recovery without restarting the process. AutomationRun reuses
+its JSON metrics for these fields, so no schema change is required.
 
 Phase 2C adds multi-provider copy generation between channel selection and publication creation. The worker requests structured JSON copy from the configured provider, validates the returned text against confirmed offer facts, persists message metadata on `Publication`, and falls back to the deterministic composer without blocking Telegram, manual export, tracking or Redis locks. Ollama is the default provider and is called over HTTP at the configured `OLLAMA_BASE_URL`; OpenAI remains optional.
 

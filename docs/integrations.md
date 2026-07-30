@@ -118,6 +118,14 @@ operational error reasons. If every selected identity fails operationally the
 AutomationRun is `FAILED`; mixed success is `PARTIAL`. Verified not-found
 responses remain a valid completed outcome and are reported separately.
 
+Continuous Mercado Livre discovery and refresh remain protected by the shared
+worker lock policy. In required mode, Redis unavailability prevents the
+protected operation and records the sanitized `REDIS_UNAVAILABLE` root cause;
+a lock held by another worker is the non-error
+`SKIPPED / LOCK_ALREADY_HELD` outcome. Temporary Redis failures are retried on
+the next cadence without reconnecting OAuth or the independent affiliate
+session.
+
 `bestSellersEnabled=true` enables the highlights source. When it is false, discovery returns `DISCOVERY_SOURCE_DISABLED` and does not call highlights. No automatic category-search fallback exists yet.
 
 The manual category-search probe is available only for a validated leaf category and remains `EXPERIMENTAL`. It reports the logical endpoint and parameters, authentication mode, HTTP status, total results, usable item IDs and up to five ID/title samples. Non-2xx responses preserve only the sanitized Mercado Livre fields `error`, `code`, `message`, `cause` and `blocked_by`. Authorization headers, access tokens, refresh tokens and client secrets are never included in the result or logs.

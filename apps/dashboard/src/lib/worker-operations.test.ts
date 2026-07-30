@@ -66,7 +66,10 @@ describe("worker operational view", () => {
           lastError: {
             component: "retry",
             at: "2026-07-30T11:50:00.000Z",
+            code: "WORKER_COMPONENT_FAILED",
+            rootCause: "REDIS_UNAVAILABLE",
           },
+          lockBackend: "UNAVAILABLE",
         },
         now,
       ),
@@ -74,6 +77,9 @@ describe("worker operational view", () => {
       nextDiscovery: "2026-07-30T12:30:00.000Z",
       nextPublication: "2026-07-30T12:05:00.000Z",
       lastErrorComponent: "retry",
+      lastErrorCode: "WORKER_COMPONENT_FAILED",
+      lastErrorRootCause: "REDIS_UNAVAILABLE",
+      lockBackend: "UNAVAILABLE",
     });
   });
 });

@@ -105,6 +105,9 @@ export default async function AutomationsPage() {
                 ? formatDateTime(new Date(status.heartbeatAt))
                 : "-"}
             </p>
+            <p className="text-xs text-[var(--muted-foreground)]">
+              Lock backend: {status.lockBackend}
+            </p>
           </CardContent>
         </Card>
         <Card>
@@ -208,7 +211,11 @@ export default async function AutomationsPage() {
               ? formatDateTime(new Date(status.nextPublication))
               : "-"}
             {status.lastErrorComponent
-              ? ` · Último erro: ${status.lastErrorComponent}`
+              ? ` · Último erro: ${
+                  status.lastErrorRootCause ??
+                  status.lastErrorCode ??
+                  status.lastErrorComponent
+                }`
               : ""}
           </div>
           <div className="w-full text-xs text-[var(--muted-foreground)]">

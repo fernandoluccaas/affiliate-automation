@@ -40,6 +40,7 @@ describe("redis abstraction", () => {
 
     expect(lock.acquired).toBe(true);
     expect(lock.mode).toBe("unavailable");
+    expect(lock.failureReason).toBe("REDIS_UNAVAILABLE");
     await expect(lock.extend(1000)).resolves.toBe(true);
     await expect(lock.release()).resolves.toBeUndefined();
 
@@ -56,7 +57,39 @@ describe("redis abstraction", () => {
     expect(lock).toMatchObject({
       acquired: false,
       mode: "unavailable",
+      failureReason: "REDIS_UNAVAILABLE",
     });
     await expect(lock.extend(1000)).resolves.toBe(false);
+  });
+
+  it("identifies an unavailable configured backend without exposing its URL", async () => {
+    const lock = await acquireLock("required-lock", 1000, {
+      env: {
+        WORKER_REQUIRE_REDIS: "true",
+        REDIS_URL: "redis://127.0.0.1:1/secret-database",
+      },
+    });
+
+    expect(lock).toMatchObject({
+      acquired: false,
+      mode: "redis-url",
+      failureReason: "REDIS_UNAVAILABLE",
+    });
+    expect(JSON.stringify(lock)).not.toContain("secret-database");
+  });
+
+  it("keeps configured Redis permissive in optional development mode", async () => {
+    const lock = await acquireLock("optional-lock", 1000, {
+      env: {
+        WORKER_REQUIRE_REDIS: "false",
+        REDIS_URL: "redis://127.0.0.1:1",
+      },
+    });
+
+    expect(lock).toMatchObject({
+      acquired: true,
+      mode: "redis-url",
+      failureReason: "REDIS_UNAVAILABLE",
+    });
   });
 });

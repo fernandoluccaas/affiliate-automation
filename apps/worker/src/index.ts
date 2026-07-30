@@ -16,7 +16,7 @@ import {
   type PublisherAdapter,
   type PublisherResult,
 } from "@affiliate/publisher-connectors";
-import { acquireLock } from "@affiliate/redis";
+import { acquireLock, type LockHandle } from "@affiliate/redis";
 import {
   prisma,
   type Channel,
@@ -35,6 +35,7 @@ import {
   getWorkerCadences,
   runContinuousWorker,
   type ContinuousWorkerDependencies,
+  type WorkerComponentOutcome,
   type WorkerCadences,
   type WorkerComponent,
 } from "./runtime";
@@ -1170,6 +1171,168 @@ export async function runWorkerCycle(
 
 let loopStarted = false;
 
+type AcquireWorkerLock = (
+  key: string,
+  ttlMs: number,
+) => Promise<LockHandle>;
+
+function withWorkerComponentOutcome(
+  result: unknown,
+  workerComponentOutcome: WorkerComponentOutcome,
+) {
+  return result && typeof result === "object" && !Array.isArray(result)
+    ? { ...(result as Record<string, unknown>), workerComponentOutcome }
+    : { result, workerComponentOutcome };
+}
+
+async function recordContinuousWorkerLockOutcome(
+  component: WorkerComponent,
+  at: Date,
+  outcome: WorkerComponentOutcome,
+) {
+  if (outcome.status === "SUCCEEDED") return;
+
+  const failed = outcome.status === "FAILED";
+  await prisma.automationRun
+    .create({
+      data: {
+        name: `worker-${component}-lock`,
+        status: failed ? "FAILED" : "SUCCEEDED",
+        idempotencyKey: `worker-lock:${component}:${at.toISOString()}:${process.pid}`,
+        startedAt: at,
+        finishedAt: new Date(),
+        metrics: {
+          component,
+          status: outcome.status,
+          errorCode: failed
+            ? "WORKER_COMPONENT_FAILED"
+            : "WORKER_COMPONENT_SKIPPED",
+          rootCause: outcome.rootCause ?? null,
+          lockBackend: outcome.lockBackend,
+        },
+        errorMessage: failed
+          ? "Protected workload did not run because the lock backend was unavailable."
+          : null,
+      },
+    })
+    .catch(() => undefined);
+}
+
+export function createLockedWorkerDependencies(
+  dependencies: ContinuousWorkerDependencies,
+  cadences: WorkerCadences,
+  options: {
+    acquireLock?: AcquireWorkerLock;
+    requireRedis?: boolean;
+    recordOutcome?: (
+      component: WorkerComponent,
+      at: Date,
+      outcome: WorkerComponentOutcome,
+    ) => Promise<void>;
+  } = {},
+): ContinuousWorkerDependencies {
+  const acquire = options.acquireLock ?? acquireLock;
+  const requireRedis =
+    options.requireRedis ?? process.env.WORKER_REQUIRE_REDIS === "true";
+  const recordOutcome =
+    options.recordOutcome ?? recordContinuousWorkerLockOutcome;
+  const components: WorkerComponent[] = [
+    "discovery",
+    "publication",
+    "retry",
+    "maintenance",
+  ];
+
+  return Object.fromEntries(
+    components.map((component) => [
+      component,
+      async (now: Date) => {
+        let lock: LockHandle;
+
+        try {
+          lock = await acquire(
+            `worker:continuous:${component}`,
+            Math.max(60_000, cadences[component]),
+          );
+        } catch {
+          if (!requireRedis) {
+            const result = await dependencies[component](now);
+            return withWorkerComponentOutcome(result, {
+              status: "SUCCEEDED",
+              lockBackend: "UNAVAILABLE",
+              rootCause: "REDIS_UNAVAILABLE",
+            });
+          }
+
+          const outcome: WorkerComponentOutcome = {
+            status: "FAILED",
+            lockBackend: "UNAVAILABLE",
+            rootCause: "REDIS_UNAVAILABLE",
+          };
+          await recordOutcome(component, now, outcome);
+          return withWorkerComponentOutcome(null, outcome);
+        }
+
+        if (!lock.acquired) {
+          const redisUnavailable =
+            lock.failureReason === "REDIS_UNAVAILABLE" ||
+            lock.mode === "unavailable";
+          const outcome: WorkerComponentOutcome = redisUnavailable
+            ? {
+                status: "FAILED",
+                lockBackend: "UNAVAILABLE",
+                rootCause: "REDIS_UNAVAILABLE",
+              }
+            : {
+                status: "SKIPPED",
+                lockBackend: "AVAILABLE",
+                rootCause: "LOCK_ALREADY_HELD",
+              };
+          await recordOutcome(component, now, outcome);
+          return withWorkerComponentOutcome(null, outcome);
+        }
+
+        let result: unknown;
+        try {
+          result = await dependencies[component](now);
+        } catch (error) {
+          await lock.release().catch(() => undefined);
+          throw error;
+        }
+        let outcome: WorkerComponentOutcome = {
+          status: "SUCCEEDED",
+          lockBackend:
+            lock.failureReason === "REDIS_UNAVAILABLE"
+              ? "UNAVAILABLE"
+              : "AVAILABLE",
+          ...(lock.failureReason === "REDIS_UNAVAILABLE"
+            ? { rootCause: "REDIS_UNAVAILABLE" as const }
+            : {}),
+        };
+
+        try {
+          await lock.release();
+        } catch {
+          outcome = requireRedis
+            ? {
+                status: "FAILED",
+                lockBackend: "UNAVAILABLE",
+                rootCause: "REDIS_UNAVAILABLE",
+              }
+            : {
+                status: "SUCCEEDED",
+                lockBackend: "UNAVAILABLE",
+                rootCause: "REDIS_UNAVAILABLE",
+              };
+          await recordOutcome(component, now, outcome);
+        }
+
+        return withWorkerComponentOutcome(result, outcome);
+      },
+    ]),
+  ) as ContinuousWorkerDependencies;
+}
+
 export async function startWorker(
   options: {
     once?: boolean;
@@ -1274,38 +1437,10 @@ export async function startWorker(
       maintenance: (now) => expireInvalidOffers(now),
     };
   const cadences = options.cadences ?? getWorkerCadences();
-  const components: WorkerComponent[] = [
-    "discovery",
-    "publication",
-    "retry",
-    "maintenance",
-  ];
-  const dependencies = Object.fromEntries(
-    components.map((component) => [
-      component,
-      async (now: Date) => {
-        const lock = await acquireLock(
-          `worker:continuous:${component}`,
-          Math.max(60_000, cadences[component]),
-        );
-        if (!lock.acquired) {
-          if (
-            lock.mode === "unavailable" &&
-            process.env.WORKER_REQUIRE_REDIS === "true"
-          ) {
-            throw new Error("Required Redis lock is unavailable.");
-          }
-          return { skipped: true, reason: "LOCK_NOT_ACQUIRED" };
-        }
-
-        try {
-          return await rawDependencies[component](now);
-        } finally {
-          await lock.release();
-        }
-      },
-    ]),
-  ) as ContinuousWorkerDependencies;
+  const dependencies = createLockedWorkerDependencies(
+    rawDependencies,
+    cadences,
+  );
 
   try {
     return await runContinuousWorker({

@@ -182,6 +182,40 @@ With required mode enabled, an unavailable Redis instance never returns a
 successful lock. The affected component fails safely and is reflected in the
 worker heartbeat instead of running without distributed coordination.
 
+Lock outcomes are deliberately distinct:
+
+- `REDIS_UNAVAILABLE`: backend missing, unreachable or failing; the protected
+  workload is `FAILED` and does not execute when Redis is required;
+- `LOCK_ALREADY_HELD`: Redis answered normally but another worker owns the
+  component lock; the workload is `SKIPPED`;
+- acquired lock: workload executes and the backend is `AVAILABLE`.
+
+The process stays alive after `REDIS_UNAVAILABLE`. Every cadence performs a new
+bounded acquisition, so restoring Redis lets the next cycle run without a
+worker restart. `/automacoes` shows the last known lock backend as `AVAILABLE`,
+`UNAVAILABLE` or `UNKNOWN` and preserves the sanitized root cause in the worker
+status. Lock-failure AutomationRuns store `WORKER_COMPONENT_FAILED` plus
+`rootCause: REDIS_UNAVAILABLE` in metrics; held-lock runs store a skipped
+outcome rather than an infrastructure failure. Redis URLs, credentials and
+connection strings are never included.
+
+`WORKER_REQUIRE_REDIS=false` is the permissive development mode. If Redis is
+not configured or becomes unreachable, the local workload may run without a
+distributed lock and the status reports an unavailable backend. With
+`WORKER_REQUIRE_REDIS=true`, a protected workload never runs unless a real lock
+was acquired.
+
+Manual recovery check:
+
+1. start Redis and the worker with `WORKER_REQUIRE_REDIS=true`;
+2. confirm a protected component succeeds;
+3. run `docker compose stop redis` and wait for the next cadence;
+4. confirm `FAILED`, `REDIS_UNAVAILABLE`, and that the workload did not run;
+5. run `docker compose start redis` without restarting the worker;
+6. confirm the following cadence acquires its lock and succeeds;
+7. run a second worker against the same component lock and confirm
+   `SKIPPED / LOCK_ALREADY_HELD`, not `REDIS_UNAVAILABLE`.
+
 ## Telegram retry policy
 
 Telegram timeouts, network failures, HTTP 429 and HTTP 5xx are transient.

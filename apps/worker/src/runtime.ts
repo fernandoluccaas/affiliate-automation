@@ -14,6 +14,12 @@ const DEFAULT_SHUTDOWN_TIMEOUT_MS = 5_000;
 export type WorkerComponent =
   "discovery" | "publication" | "retry" | "maintenance";
 
+export type WorkerComponentOutcome = {
+  status: "SUCCEEDED" | "SKIPPED" | "FAILED";
+  lockBackend: "AVAILABLE" | "UNAVAILABLE" | "UNKNOWN";
+  rootCause?: "REDIS_UNAVAILABLE" | "LOCK_ALREADY_HELD";
+};
+
 export type WorkerCadences = Record<WorkerComponent, number>;
 
 export type WorkerControls = {
@@ -52,7 +58,7 @@ export type WorkerOperationalStatus = {
     Record<
       WorkerComponent,
       {
-        status: "SUCCEEDED" | "PARTIAL" | "FAILED" | "PAUSED";
+        status: "SUCCEEDED" | "SKIPPED" | "PARTIAL" | "FAILED" | "PAUSED";
         at: string;
         durationMs: number;
       }
@@ -62,7 +68,12 @@ export type WorkerOperationalStatus = {
     component: WorkerComponent;
     at: string;
     code: "WORKER_COMPONENT_FAILED";
+    rootCause:
+      | "REDIS_UNAVAILABLE"
+      | "LOCK_ALREADY_HELD"
+      | "COMPONENT_EXECUTION_FAILED";
   } | null;
+  lockBackend: "AVAILABLE" | "UNAVAILABLE" | "UNKNOWN";
   metrics: WorkerOperationalMetrics;
 };
 
@@ -269,6 +280,40 @@ function mergeOperationalMetrics(
   }
 }
 
+function componentOutcome(result: unknown): WorkerComponentOutcome | null {
+  if (!result || typeof result !== "object" || Array.isArray(result)) {
+    return null;
+  }
+
+  const outcome = (result as Record<string, unknown>).workerComponentOutcome;
+  if (!outcome || typeof outcome !== "object" || Array.isArray(outcome)) {
+    return null;
+  }
+
+  const record = outcome as Record<string, unknown>;
+  if (
+    !["SUCCEEDED", "SKIPPED", "FAILED"].includes(String(record.status)) ||
+    !["AVAILABLE", "UNAVAILABLE", "UNKNOWN"].includes(
+      String(record.lockBackend),
+    )
+  ) {
+    return null;
+  }
+
+  const rootCause =
+    record.rootCause === "REDIS_UNAVAILABLE" ||
+    record.rootCause === "LOCK_ALREADY_HELD"
+      ? record.rootCause
+      : undefined;
+
+  return {
+    status: record.status as WorkerComponentOutcome["status"],
+    lockBackend:
+      record.lockBackend as WorkerComponentOutcome["lockBackend"],
+    ...(rootCause ? { rootCause } : {}),
+  };
+}
+
 export async function runContinuousWorker(options: ContinuousWorkerOptions) {
   const now = options.now ?? (() => new Date());
   const sleep = options.sleep ?? defaultSleep;
@@ -289,6 +334,7 @@ export async function runContinuousWorker(options: ContinuousWorkerOptions) {
   ) as Record<WorkerComponent, Date>;
   const lastRuns: WorkerOperationalStatus["lastRuns"] = {};
   let lastError: WorkerOperationalStatus["lastError"] = null;
+  let lockBackend: WorkerOperationalStatus["lockBackend"] = "UNKNOWN";
   const metrics = emptyOperationalMetrics();
   let nextHeartbeatAt = startedAt;
 
@@ -309,6 +355,7 @@ export async function runContinuousWorker(options: ContinuousWorkerOptions) {
     ) as Record<WorkerComponent, string>,
     lastRuns,
     lastError,
+    lockBackend,
     metrics,
   });
 
@@ -344,14 +391,26 @@ export async function runContinuousWorker(options: ContinuousWorkerOptions) {
         try {
           const result = await options.dependencies[component](tickAt);
           mergeOperationalMetrics(metrics, result);
-          let componentStatus: "SUCCEEDED" | "PARTIAL" | "FAILED" = "SUCCEEDED";
+          const outcome = componentOutcome(result);
+          if (outcome) {
+            lockBackend = outcome.lockBackend;
+          }
+          let componentStatus:
+            | "SUCCEEDED"
+            | "SKIPPED"
+            | "PARTIAL"
+            | "FAILED" = outcome?.status ?? "SUCCEEDED";
           if (component === "discovery") {
             metrics.discoveryRuns += 1;
             const discoveryStatus =
               result && typeof result === "object" && !Array.isArray(result)
                 ? (result as Record<string, unknown>).discoveryStatus
                 : null;
-            if (discoveryStatus === "PARTIAL") {
+            if (outcome?.status === "FAILED") {
+              metrics.discoveryFailed += 1;
+            } else if (outcome?.status === "SKIPPED") {
+              // A held lock is an expected no-op, not a successful discovery.
+            } else if (discoveryStatus === "PARTIAL") {
               metrics.discoveryPartial += 1;
               componentStatus = "PARTIAL";
             } else if (discoveryStatus === "FAILED") {
@@ -371,6 +430,8 @@ export async function runContinuousWorker(options: ContinuousWorkerOptions) {
               component,
               at: tickAt.toISOString(),
               code: "WORKER_COMPONENT_FAILED",
+              rootCause:
+                outcome?.rootCause ?? "COMPONENT_EXECUTION_FAILED",
             };
           }
           logger({
@@ -379,6 +440,9 @@ export async function runContinuousWorker(options: ContinuousWorkerOptions) {
             runId,
             status: componentStatus,
             durationMs: lastRuns[component].durationMs,
+            ...(outcome?.rootCause
+              ? { rootCause: outcome.rootCause }
+              : {}),
           });
         } catch {
           if (component === "discovery") {
@@ -394,6 +458,7 @@ export async function runContinuousWorker(options: ContinuousWorkerOptions) {
             component,
             at: tickAt.toISOString(),
             code: "WORKER_COMPONENT_FAILED",
+            rootCause: "COMPONENT_EXECUTION_FAILED",
           };
           logger({
             timestamp: tickAt.toISOString(),
@@ -402,6 +467,7 @@ export async function runContinuousWorker(options: ContinuousWorkerOptions) {
             status: "FAILED",
             durationMs: lastRuns[component].durationMs,
             errorCode: "WORKER_COMPONENT_FAILED",
+            rootCause: "COMPONENT_EXECUTION_FAILED",
           });
         } finally {
           clearInterval(activeHeartbeat);

@@ -352,4 +352,42 @@ describe("runContinuousWorker", () => {
       }),
     );
   });
+
+  it("persists a specific Redis root cause without exposing backend details", async () => {
+    const { upsert } = await mockSettings();
+    const controller = new AbortController();
+    const jobs = dependencies();
+    const logger = vi.fn();
+    for (const component of Object.keys(jobs) as Array<keyof typeof jobs>) {
+      jobs[component] = vi.fn().mockResolvedValue({
+        workerComponentOutcome: {
+          status: "FAILED",
+          lockBackend: "UNAVAILABLE",
+          rootCause: "REDIS_UNAVAILABLE",
+        },
+      });
+    }
+
+    const result = await runContinuousWorker({
+      dependencies: jobs,
+      signal: controller.signal,
+      now: () => new Date("2026-07-30T12:00:00.000Z"),
+      sleep: async () => controller.abort(),
+      logger,
+    });
+
+    expect(result.lockBackend).toBe("UNAVAILABLE");
+    expect(result.lastError).toMatchObject({
+      component: "maintenance",
+      code: "WORKER_COMPONENT_FAILED",
+      rootCause: "REDIS_UNAVAILABLE",
+    });
+    expect(JSON.stringify(upsert.mock.calls)).toContain("REDIS_UNAVAILABLE");
+    expect(logger).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "FAILED",
+        rootCause: "REDIS_UNAVAILABLE",
+      }),
+    );
+  });
 });
