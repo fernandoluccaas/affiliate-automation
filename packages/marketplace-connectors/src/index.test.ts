@@ -27,6 +27,7 @@ import {
   encryptSecret,
   isSafeMercadoLivreProductPermalink,
   parseMercadoLivreCatalogProductItemSummary,
+  resolveMercadoLivreCatalogProductUrl,
   resolveMercadoLivreItemCondition,
   selectBestMercadoLivreCatalogProductSummary,
   type ApiFetch,
@@ -582,6 +583,52 @@ describe("MercadoLivreConnector", () => {
         "https://mercadolivre.com.br.evil.example/p/MLB100",
       ),
     ).toBe(false);
+  });
+
+  it("resolves a strictly scoped MLB catalog PRODUCT URL", () => {
+    expect(
+      resolveMercadoLivreCatalogProductUrl({
+        productId: "MLB62081577",
+        productPermalink: null,
+        productStatus: "active",
+      }),
+    ).toEqual({
+      productUrl: "https://www.mercadolivre.com.br/p/MLB62081577",
+      source: "CANONICAL_CATALOG_PDP",
+    });
+    expect(
+      resolveMercadoLivreCatalogProductUrl({
+        productId: "MLB62081577",
+        productPermalink:
+          "https://www.mercadolivre.com.br/smartphone/p/MLB62081577",
+        productStatus: "active",
+      }),
+    ).toEqual({
+      productUrl:
+        "https://www.mercadolivre.com.br/smartphone/p/MLB62081577",
+      source: "API_PERMALINK",
+    });
+    expect(
+      resolveMercadoLivreCatalogProductUrl({
+        productId: "MLBU62081577",
+        productPermalink: null,
+        productStatus: "active",
+      }),
+    ).toBeNull();
+    expect(
+      resolveMercadoLivreCatalogProductUrl({
+        productId: "mlb62081577",
+        productPermalink: null,
+        productStatus: "active",
+      }),
+    ).toBeNull();
+    expect(
+      resolveMercadoLivreCatalogProductUrl({
+        productId: "MLB62081577",
+        productPermalink: null,
+        productStatus: "inactive",
+      }),
+    ).toBeNull();
   });
 
   it("resolves item_condition before condition and ITEM_CONDITION attributes", () => {

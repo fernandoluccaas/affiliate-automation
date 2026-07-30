@@ -57,21 +57,23 @@ hydrates parsed ITEM IDs, and displays counts, rejection reasons and at most
 three sanitized samples. The probe does not generate an affiliate link, ingest
 an offer, create an import job or otherwise mutate application data.
 
-A catalog-PDP fallback may use only an HTTPS `permalink` returned by the
-official `GET /products/{PRODUCT_ID}` response. When that field is absent or
-invalid, the PRODUCT remains unresolved: the application must not construct an
-item URL, invent a slug, or treat a catalog ID as an item permalink. Affiliate
-link testing and automatic ingestion stay disabled until the exact API-provided
-PDP URL passes the official affiliate provider.
+A catalog PRODUCT URL is resolved centrally. A valid HTTPS `permalink` returned
+by the official `GET /products/{PRODUCT_ID}` response has precedence and is
+marked `API_PERMALINK`. When it is absent, an active MLB catalog PRODUCT whose
+ID matches the strict `MLB`-plus-digits format uses the fixed canonical route
+`https://www.mercadolivre.com.br/p/{PRODUCT_ID}`, marked
+`CANONICAL_CATALOG_PDP`. This rule does not accept user hosts, arbitrary IDs,
+ITEM-style URLs, seller IDs or generated slugs.
 
-When that gate is satisfied, `PRODUCT_CATALOG_PDP_FALLBACK` keeps the catalog
-PRODUCT ID as the marketplace identity and uses the selected product-item
-summary only for commercial facts such as price, seller and shipping. ITEM
-detail hydration remains the preferred enrichment path; a per-item 401/403 can
-be recorded as `DETAIL_ENRICHMENT_UNAVAILABLE` without invalidating an
-otherwise eligible catalog PDP. The selected ITEM and seller are retained in
-the import-job metadata, while offer fingerprinting remains based on material
-price, link, shipping and stock facts rather than seller/ranking churn.
+`PRODUCT_CATALOG_CANONICAL_PDP` keeps the catalog PRODUCT ID as the marketplace
+identity and uses the deterministically selected product-item summary for
+commercial facts such as price, seller and shipping. ITEM detail hydration is
+optional enrichment; a per-item 401/403 is recorded as
+`DETAIL_ENRICHMENT_UNAVAILABLE` without invalidating an otherwise eligible
+catalog PRODUCT. When enrichment exists, its proven Price API/item facts take
+precedence over summary facts. The selected ITEM and seller are retained in
+import metadata, while offer fingerprinting remains based on material price,
+link, shipping and stock facts rather than seller/ranking churn.
 
 The PRODUCT diagnostic shows the sanitized PDP status/name, safe permalink,
 picture count, selected summary facts, ITEM hydration availability and PDP

@@ -53,6 +53,7 @@ export type MarketplaceOfferCandidate = {
   candidateKind?: MercadoLivreResolvedCandidateKind;
   selectedCatalogItemId?: string;
   resolutionStrategy?: MercadoLivreResolutionStrategy;
+  productUrlSource?: MercadoLivreCatalogProductUrlSource;
   priceSource?: MercadoLivrePriceSource;
   collectedAt?: Date;
 };
@@ -346,6 +347,7 @@ export type MercadoLivreHighlightSkipReason =
   | "PRODUCT_ITEMS_NO_USABLE_ITEM"
   | "PRODUCT_ITEMS_API_ERROR"
   | "PRODUCT_PDP_PERMALINK_MISSING"
+  | "PRODUCT_CATALOG_URL_UNAVAILABLE"
   | "PRODUCT_PDP_FALLBACK_INELIGIBLE"
   | "USER_PRODUCT_NOT_FOUND"
   | "USER_PRODUCT_NO_USER"
@@ -359,7 +361,17 @@ export type MercadoLivreResolutionStrategy =
   | "PRODUCT_CHILD_BUY_BOX"
   | "PRODUCT_ITEMS_FALLBACK"
   | "PRODUCT_CATALOG_PDP_FALLBACK"
+  | "PRODUCT_CATALOG_CANONICAL_PDP"
   | "USER_PRODUCT_ACTIVE_ITEM";
+
+export type MercadoLivreCatalogProductUrlSource =
+  | "API_PERMALINK"
+  | "CANONICAL_CATALOG_PDP";
+
+export type MercadoLivreCatalogProductUrlResolution = {
+  productUrl: string;
+  source: MercadoLivreCatalogProductUrlSource;
+};
 
 export type MercadoLivreProductResolutionDiagnostics = {
   productDirectWinnerCount: number;
@@ -404,6 +416,7 @@ export type MercadoLivreResolvedCandidate = {
   resolvedItemId?: string;
   selectedItemId?: string;
   selectedSellerId?: string;
+  productUrlSource?: MercadoLivreCatalogProductUrlSource;
   offerCandidate?: MarketplaceOfferCandidate;
   resolutionStrategy: MercadoLivreResolutionStrategy;
   position: number;
@@ -1420,6 +1433,42 @@ export function isSafeMercadoLivreProductPermalink(value: string | null) {
   } catch {
     return false;
   }
+}
+
+export function resolveMercadoLivreCatalogProductUrl(input: {
+  productId: string;
+  productPermalink: string | null;
+  productStatus: string | null;
+}): MercadoLivreCatalogProductUrlResolution | null {
+  if (isSafeMercadoLivreProductPermalink(input.productPermalink)) {
+    return {
+      productUrl: input.productPermalink as string,
+      source: "API_PERMALINK",
+    };
+  }
+
+  const normalizedStatus = input.productStatus?.trim().toLowerCase() ?? null;
+  const explicitlyInactiveStatuses = new Set([
+    "inactive",
+    "paused",
+    "closed",
+    "deleted",
+    "archived",
+    "disabled",
+  ]);
+
+  if (
+    !/^MLB\d+$/.test(input.productId) ||
+    (normalizedStatus !== null &&
+      explicitlyInactiveStatuses.has(normalizedStatus))
+  ) {
+    return null;
+  }
+
+  return {
+    productUrl: `https://www.mercadolivre.com.br/p/${input.productId}`,
+    source: "CANONICAL_CATALOG_PDP",
+  };
 }
 
 function summaryFieldsPresent(item: Record<string, unknown>) {

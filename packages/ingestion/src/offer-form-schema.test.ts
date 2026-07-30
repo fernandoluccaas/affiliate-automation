@@ -86,6 +86,20 @@ describe("ingestion offer schema", () => {
     expect(parsed.resolutionStrategy).toBe("PRODUCT_CATALOG_PDP_FALLBACK");
   });
 
+  it("accepts the canonical catalog PDP resolution strategy", () => {
+    const parsed = offerFormSchema.parse({
+      marketplace: "MERCADO_LIVRE",
+      externalProductId: "MLB62081577",
+      title: "Smartphone de catalogo",
+      productUrl: "https://www.mercadolivre.com.br/p/MLB62081577",
+      currentPrice: 1429,
+      sourceHighlightType: "PRODUCT",
+      resolutionStrategy: "PRODUCT_CATALOG_CANONICAL_PDP",
+    });
+
+    expect(parsed.resolutionStrategy).toBe("PRODUCT_CATALOG_CANONICAL_PDP");
+  });
+
   it("redacts secrets at the ingestion boundary before persistence", () => {
     const parsed = offerFormSchema.parse({
       marketplace: "MERCADO_LIVRE",

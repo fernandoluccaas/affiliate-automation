@@ -557,8 +557,7 @@ describe("MercadoLivreHighlightResolver", () => {
           catalogProduct({
             id: "MLB62081577",
             name: "Smartphone de catalogo",
-            permalink:
-              "https://www.mercadolivre.com.br/smartphone/p/MLB62081577",
+            permalink: null,
             pictureUrls: ["https://http2.mlstatic.com/picture.jpg"],
           }),
         ),
@@ -614,15 +613,17 @@ describe("MercadoLivreHighlightResolver", () => {
           kind: "CATALOG_PRODUCT",
           marketplaceExternalId: "MLB62081577",
           selectedItemId: "MLB4827891325",
-          resolutionStrategy: "PRODUCT_CATALOG_PDP_FALLBACK",
+          productUrlSource: "CANONICAL_CATALOG_PDP",
+          resolutionStrategy: "PRODUCT_CATALOG_CANONICAL_PDP",
           offerCandidate: {
             externalProductId: "MLB62081577",
             productUrl:
-              "https://www.mercadolivre.com.br/smartphone/p/MLB62081577",
+              "https://www.mercadolivre.com.br/p/MLB62081577",
             currentPrice: 1429,
             stockStatus: "UNKNOWN",
             candidateKind: "CATALOG_PRODUCT",
             selectedCatalogItemId: "MLB4827891325",
+            productUrlSource: "CANONICAL_CATALOG_PDP",
           },
         },
         diagnostics: {
@@ -636,31 +637,33 @@ describe("MercadoLivreHighlightResolver", () => {
 
   it.each([
     {
-      label: "missing permalink",
+      label: "invalid PRODUCT id",
+      productId: "MLBU62081577",
       product: {
         name: "Smartphone de catalogo",
         permalink: null,
         pictureUrls: ["https://http2.mlstatic.com/picture.jpg"],
       },
-      reason: "PRODUCT_PDP_PERMALINK_MISSING",
+      reason: "PRODUCT_CATALOG_URL_UNAVAILABLE",
     },
     {
       label: "inactive product",
+      productId: "MLB62081577",
       product: {
         name: "Smartphone de catalogo",
         status: "inactive",
-        permalink: "https://www.mercadolivre.com.br/smartphone/p/MLB62081577",
+        permalink: null,
         pictureUrls: ["https://http2.mlstatic.com/picture.jpg"],
       },
-      reason: "PRODUCT_PDP_FALLBACK_INELIGIBLE",
+      reason: "PRODUCT_CATALOG_URL_UNAVAILABLE",
     },
   ])(
     "does not use catalog PDP fallback for $label",
-    async ({ product, reason }) => {
+    async ({ productId, product, reason }) => {
       const marketplace = connector({
         getProduct: vi
           .fn()
-          .mockResolvedValue(catalogProduct({ id: "MLB62081577", ...product })),
+          .mockResolvedValue(catalogProduct({ id: productId, ...product })),
         getProductItems: vi.fn().mockResolvedValue(
           productItemsResolution(
             [
@@ -682,7 +685,7 @@ describe("MercadoLivreHighlightResolver", () => {
 
       await expect(
         new MercadoLivreHighlightResolver(marketplace).resolveCandidate({
-          id: "MLB62081577",
+          id: productId,
           position: 1,
           type: "PRODUCT",
           rawType: "PRODUCT",
@@ -695,6 +698,58 @@ describe("MercadoLivreHighlightResolver", () => {
       });
     },
   );
+
+  it("prefers an official API permalink over the canonical catalog PDP", async () => {
+    const apiPermalink =
+      "https://www.mercadolivre.com.br/smartphone/p/MLB62081577";
+    const marketplace = connector({
+      getProduct: vi.fn().mockResolvedValue(
+        catalogProduct({
+          id: "MLB62081577",
+          name: "Smartphone de catalogo",
+          permalink: apiPermalink,
+          pictureUrls: ["https://http2.mlstatic.com/picture.jpg"],
+        }),
+      ),
+      getProductItems: vi.fn().mockResolvedValue(
+        productItemsResolution(
+          [
+            {
+              itemId: "MLB4827891325",
+              condition: "new",
+              price: 1429,
+            },
+          ],
+          [],
+          {
+            productItemsHydrated: 0,
+            productItemsUsable: 0,
+            rejectionReasons: { PRODUCT_ITEM_DETAIL_HTTP_ERROR: 1 },
+          },
+        ),
+      ),
+    });
+
+    await expect(
+      new MercadoLivreHighlightResolver(marketplace).resolveCandidate({
+        id: "MLB62081577",
+        position: 1,
+        type: "PRODUCT",
+        rawType: "PRODUCT",
+        categoryId: "MLB1055",
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      candidate: {
+        productUrlSource: "API_PERMALINK",
+        resolutionStrategy: "PRODUCT_CATALOG_PDP_FALLBACK",
+        offerCandidate: {
+          productUrl: apiPermalink,
+          productUrlSource: "API_PERMALINK",
+        },
+      },
+    });
+  });
 
   it("selects a PRODUCT fallback item deterministically by business preferences", async () => {
     const getProductItems = vi.fn().mockResolvedValue(

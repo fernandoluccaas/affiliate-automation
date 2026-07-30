@@ -12,6 +12,7 @@ import {
   isSafeMercadoLivreProductPermalink,
   normalizeMercadoLivreCookie,
   parseMercadoLivreCookie,
+  resolveMercadoLivreCatalogProductUrl,
   sanitizeMercadoLivreAffiliateError,
   selectBestMercadoLivreCatalogProductSummary,
   type CreateMercadoLivreAffiliateLinkInput,
@@ -24,6 +25,7 @@ import {
   type MercadoLivreOperationalEvent,
   type MercadoLivreProduct,
   type MercadoLivreCatalogProductItemSummary,
+  type MercadoLivreCatalogProductUrlResolution,
   type MercadoLivreProductItem,
   type MercadoLivreProductResolutionDiagnostics,
   type MercadoLivreResolutionStrategy,
@@ -1243,37 +1245,51 @@ function catalogProductOfferCandidate(
   highlight: MercadoLivreHighlightCandidate,
   product: MercadoLivreProduct,
   summary: MercadoLivreCatalogProductItemSummary,
+  productUrl: MercadoLivreCatalogProductUrlResolution,
+  enrichment: MarketplaceOfferCandidate | null = null,
 ): MarketplaceOfferCandidate | null {
   const title = (product.name ?? product.familyName)?.trim() ?? "";
+  const currentPrice =
+    enrichment && enrichment.currentPrice > 0
+      ? enrichment.currentPrice
+      : summary.price;
 
   if (
-    product.childrenIds.length > 0 ||
-    product.status !== "active" ||
+    (product.status !== null && product.status !== "active") ||
     title.length < 3 ||
-    !isSafeMercadoLivreProductPermalink(product.permalink) ||
     product.pictureUrls.length === 0 ||
-    summary.price === undefined ||
-    summary.price <= 0
+    currentPrice === undefined ||
+    currentPrice <= 0
   ) {
     return null;
   }
 
+  const enrichedOriginalPrice = enrichment?.originalPrice ?? null;
   const originalPrice =
-    summary.originalPrice !== undefined && summary.originalPrice > summary.price
-      ? summary.originalPrice
-      : null;
+    enrichedOriginalPrice !== null && enrichedOriginalPrice > currentPrice
+      ? enrichedOriginalPrice
+      : summary.originalPrice !== undefined &&
+          summary.originalPrice > currentPrice
+        ? summary.originalPrice
+        : null;
   const stockStatus =
-    summary.availableQuantity === undefined
+    enrichment?.stockStatus ??
+    (summary.availableQuantity === undefined
       ? ("UNKNOWN" as const)
       : summary.availableQuantity > 0
         ? ("IN_STOCK" as const)
-        : ("OUT_OF_STOCK" as const);
+        : ("OUT_OF_STOCK" as const));
   const shippingStatus =
-    summary.freeShipping === undefined
+    enrichment?.shippingStatus ??
+    (summary.freeShipping === undefined
       ? ("UNKNOWN" as const)
       : summary.freeShipping
         ? ("FREE" as const)
-        : ("NOT_FREE" as const);
+        : ("NOT_FREE" as const));
+  const resolutionStrategy =
+    productUrl.source === "CANONICAL_CATALOG_PDP"
+      ? ("PRODUCT_CATALOG_CANONICAL_PDP" as const)
+      : ("PRODUCT_CATALOG_PDP_FALLBACK" as const);
 
   return {
     marketplace: "MERCADO_LIVRE",
@@ -1282,16 +1298,18 @@ function catalogProductOfferCandidate(
     description: null,
     category: summary.categoryId ?? highlight.categoryId,
     imageUrl: product.pictureUrls[0] as string,
-    productUrl: product.permalink as string,
+    productUrl: productUrl.productUrl,
     affiliateUrl: null,
-    currentPrice: summary.price,
+    currentPrice,
     originalPrice,
     stockStatus,
     shippingStatus,
-    freeShipping: summary.freeShipping ?? null,
-    availableQuantity: summary.availableQuantity ?? null,
-    sellerReputation: summary.sellerReputation ?? null,
-    rating: null,
+    freeShipping: enrichment?.freeShipping ?? summary.freeShipping ?? null,
+    availableQuantity:
+      enrichment?.availableQuantity ?? summary.availableQuantity ?? null,
+    sellerReputation:
+      enrichment?.sellerReputation ?? summary.sellerReputation ?? null,
+    rating: enrichment?.rating ?? null,
     salesCount: product.soldQuantity,
     sellerId: summary.sellerId ?? null,
     officialStoreId: summary.officialStoreId ?? null,
@@ -1303,8 +1321,9 @@ function catalogProductOfferCandidate(
     resolvedItemId: summary.itemId,
     candidateKind: "CATALOG_PRODUCT",
     selectedCatalogItemId: summary.itemId,
-    resolutionStrategy: "PRODUCT_CATALOG_PDP_FALLBACK",
-    priceSource: "CATALOG_SUMMARY",
+    resolutionStrategy,
+    productUrlSource: productUrl.source,
+    priceSource: enrichment?.priceSource ?? "CATALOG_SUMMARY",
     collectedAt: new Date(),
   };
 }
@@ -1327,8 +1346,12 @@ function resolvedCatalogProduct(
       resolvedItemId: summary.itemId,
       selectedItemId: summary.itemId,
       ...(summary.sellerId ? { selectedSellerId: summary.sellerId } : {}),
+      ...(offerCandidate.productUrlSource
+        ? { productUrlSource: offerCandidate.productUrlSource }
+        : {}),
       offerCandidate,
-      resolutionStrategy: "PRODUCT_CATALOG_PDP_FALLBACK",
+      resolutionStrategy:
+        offerCandidate.resolutionStrategy as MercadoLivreResolutionStrategy,
       position: candidate.position,
       categoryId: candidate.categoryId,
     },
@@ -1498,8 +1521,15 @@ export async function diagnoseMercadoLivreProduct(
     product && isSafeMercadoLivreProductPermalink(product.permalink)
       ? product.permalink
       : null;
+  const catalogProductUrl = product
+    ? resolveMercadoLivreCatalogProductUrl({
+        productId: product.id,
+        productPermalink: product.permalink,
+        productStatus: product.status,
+      })
+    : null;
   const pdpCandidate =
-    product && selectedSummary
+    product && selectedSummary && catalogProductUrl
       ? catalogProductOfferCandidate(
           {
             id: productId,
@@ -1510,6 +1540,7 @@ export async function diagnoseMercadoLivreProduct(
           },
           product,
           selectedSummary,
+          catalogProductUrl,
         )
       : null;
 
@@ -1741,65 +1772,79 @@ export class MercadoLivreHighlightResolver {
     const productItemById = new Map(
       productItems.summaries.map((item) => [item.itemId, item]),
     );
+    const selectedSummary = selectBestMercadoLivreCatalogProductSummary(
+      productItems.summaries,
+    );
     const chosen = selectBestMercadoLivreProductItem(
       productItems.candidates,
       productItemById,
     );
+    const detailFailureCount =
+      (productItemDiagnostics.rejectionReasons
+        .PRODUCT_ITEM_DETAIL_HTTP_ERROR ?? 0) +
+      (productItemDiagnostics.rejectionReasons.PRODUCT_ITEM_DETAIL_NOT_FOUND ??
+        0) +
+      (productItemDiagnostics.rejectionReasons.PRODUCT_ITEM_SCHEMA_MISMATCH ??
+        0);
+    const detailEnrichmentUnavailable =
+      productItemDiagnostics.productItemsUniqueIds > 0 &&
+      productItemDiagnostics.productItemsHydrated === 0 &&
+      detailFailureCount >= productItemDiagnostics.productItemsUniqueIds;
+    diagnostics.productDetailEnrichmentUnavailable =
+      detailEnrichmentUnavailable;
+    const catalogProductUrl = resolveMercadoLivreCatalogProductUrl({
+      productId: product.id,
+      productPermalink: product.permalink,
+      productStatus: product.status,
+    });
+    const selectedEnrichment = selectedSummary
+      ? (productItems.candidates.find(
+          (item) => item.externalProductId === selectedSummary.itemId,
+        ) ?? null)
+      : null;
+
+    if (
+      selectedSummary &&
+      catalogProductUrl &&
+      (catalogProductUrl.source === "CANONICAL_CATALOG_PDP" || !chosen)
+    ) {
+      const offerCandidate = catalogProductOfferCandidate(
+        candidate,
+        product,
+        selectedSummary,
+        catalogProductUrl,
+        selectedEnrichment,
+      );
+      diagnostics.productPdpFallbackEligible = Boolean(offerCandidate);
+
+      if (offerCandidate) {
+        diagnostics.productResolvedViaCatalogPdp += 1;
+        return resolvedCatalogProduct(
+          candidate,
+          product,
+          selectedSummary,
+          offerCandidate,
+          diagnostics,
+        );
+      }
+
+      return skippedHighlight(
+        candidate,
+        "PRODUCT_PDP_FALLBACK_INELIGIBLE",
+        diagnostics,
+      );
+    }
 
     if (!chosen) {
-      const detailFailureCount =
-        (productItemDiagnostics.rejectionReasons
-          .PRODUCT_ITEM_DETAIL_HTTP_ERROR ?? 0) +
-        (productItemDiagnostics.rejectionReasons
-          .PRODUCT_ITEM_DETAIL_NOT_FOUND ?? 0) +
-        (productItemDiagnostics.rejectionReasons.PRODUCT_ITEM_SCHEMA_MISMATCH ??
-          0);
-      const detailEnrichmentUnavailable =
-        productItemDiagnostics.productItemsUniqueIds > 0 &&
-        productItemDiagnostics.productItemsHydrated === 0 &&
-        detailFailureCount >= productItemDiagnostics.productItemsUniqueIds;
-      diagnostics.productDetailEnrichmentUnavailable =
-        detailEnrichmentUnavailable;
+      if (selectedSummary && !catalogProductUrl) {
+        return skippedHighlight(
+          candidate,
+          "PRODUCT_CATALOG_URL_UNAVAILABLE",
+          diagnostics,
+        );
+      }
 
       if (detailEnrichmentUnavailable) {
-        const selectedSummary = selectBestMercadoLivreCatalogProductSummary(
-          productItems.summaries,
-        );
-
-        if (selectedSummary) {
-          const offerCandidate = catalogProductOfferCandidate(
-            candidate,
-            product,
-            selectedSummary,
-          );
-          diagnostics.productPdpFallbackEligible = Boolean(offerCandidate);
-
-          if (offerCandidate) {
-            diagnostics.productResolvedViaCatalogPdp += 1;
-            return resolvedCatalogProduct(
-              candidate,
-              product,
-              selectedSummary,
-              offerCandidate,
-              diagnostics,
-            );
-          }
-
-          if (!isSafeMercadoLivreProductPermalink(product.permalink)) {
-            return skippedHighlight(
-              candidate,
-              "PRODUCT_PDP_PERMALINK_MISSING",
-              diagnostics,
-            );
-          }
-
-          return skippedHighlight(
-            candidate,
-            "PRODUCT_PDP_FALLBACK_INELIGIBLE",
-            diagnostics,
-          );
-        }
-
         return skippedHighlight(
           candidate,
           "PRODUCT_ITEMS_HYDRATION_FAILED",

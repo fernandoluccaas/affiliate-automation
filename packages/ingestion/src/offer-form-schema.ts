@@ -216,6 +216,7 @@ export const offerFormSchema = z.object({
       "PRODUCT_CHILD_BUY_BOX",
       "PRODUCT_ITEMS_FALLBACK",
       "PRODUCT_CATALOG_PDP_FALLBACK",
+      "PRODUCT_CATALOG_CANONICAL_PDP",
       "USER_PRODUCT_ACTIVE_ITEM",
     ])
     .optional(),
