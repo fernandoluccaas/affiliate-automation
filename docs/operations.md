@@ -216,6 +216,34 @@ Manual recovery check:
 7. run a second worker against the same component lock and confirm
    `SKIPPED / LOCK_ALREADY_HELD`, not `REDIS_UNAVAILABLE`.
 
+### Local verification record (2026-07-31)
+
+A local PostgreSQL/Redis Docker environment was used with isolated no-op worker
+dependencies, so no discovery, affiliate generation, scheduling or publication
+was triggered by the operational probes.
+
+- heartbeat start: `ONLINE`, lock backend `AVAILABLE`;
+- graceful abort: `OFFLINE` persisted immediately;
+- self-terminated probe: stored state remained `ONLINE`, and the shared resolver
+  returned `STALE` at the 90,000 ms threshold;
+- restart after the abrupt probe: `ONLINE`, followed by a graceful `OFFLINE`;
+- Redis available: protected maintenance workload `SUCCEEDED`;
+- Redis stopped: `FAILED / REDIS_UNAVAILABLE`, workload count unchanged;
+- Redis started in the same process: next invocation `SUCCEEDED`, no restart;
+- deliberately held lock: `SKIPPED / LOCK_ALREADY_HELD`, not an infrastructure
+  failure.
+
+The corresponding lock AutomationRuns contained only fixed operational fields:
+`WORKER_COMPONENT_FAILED + REDIS_UNAVAILABLE + UNAVAILABLE` and
+`WORKER_COMPONENT_SKIPPED + LOCK_ALREADY_HELD + AVAILABLE`.
+
+An isolated real Mercado Livre refresh selected 25 current Offers, all classified
+as catalog PRODUCT identities. It refreshed all 25, preserved 25 affiliate URLs,
+reused 16 Offer versions, created 9 new commercial versions, used catalog-summary
+price fallback 25 times and reported zero not-found, zero unavailable prices and
+zero failures. Optional detail enrichment was unavailable for all 25 and did not
+prevent a `SUCCEEDED` AutomationRun.
+
 ## Telegram retry policy
 
 Telegram timeouts, network failures, HTTP 429 and HTTP 5xx are transient.
