@@ -3,6 +3,7 @@ import {
   getWhatsAppWebRuntimeConfig,
   resolveWhatsAppWebProfilePath,
   sanitizeWhatsAppWebProfileKey,
+  validateRealSendEligibility,
   validateWhatsAppWebPublication,
   WhatsAppGroupsWebPublisher,
   WhatsAppWebStageError,
@@ -118,7 +119,18 @@ function adapter(
       usedSetInputFiles: true,
       previewDetected: true,
     }),
-    fillCaption: vi.fn().mockResolvedValue({ captionDetected: true }),
+    fillCaption: vi.fn().mockResolvedValue({
+      captionDetected: true,
+      captionInputFound: true,
+      captionInputVisible: true,
+      captionInputEditable: true,
+      captionFillAttempts: 1,
+      captionStable: true,
+      captionLengthExpected: 56,
+      captionLengthObserved: 56,
+      affiliateUrlOccurrenceCount: 1,
+      titleSnippetConfirmed: true,
+    }),
     fillText: vi.fn().mockResolvedValue(undefined),
     inspectPreparedDraft: vi.fn().mockResolvedValue({
       affiliateUrlFound: true,
@@ -126,6 +138,10 @@ function adapter(
       textSnippetFound: true,
       mediaFound: true,
       uploadErrorVisible: false,
+      uploadInProgressVisible: false,
+      captionStable: true,
+      captionLengthExpected: 56,
+      captionLengthObserved: 56,
     }),
     inspectSendTrigger: vi.fn().mockResolvedValue({
       found: true,
@@ -837,6 +853,10 @@ describe("WhatsAppGroupsWebPublisher dry run", () => {
         textSnippetFound: true,
         mediaFound: true,
         uploadErrorVisible: false,
+        uploadInProgressVisible: false,
+        captionStable: true,
+        captionLengthExpected: 56,
+        captionLengthObserved: 56,
       }),
     });
     const result = await new WhatsAppGroupsWebPublisher({
@@ -858,6 +878,111 @@ describe("WhatsAppGroupsWebPublisher dry run", () => {
 });
 
 describe("WhatsAppGroupsWebPublisher protected send", () => {
+  it.each([
+    {
+      name: "global feature disabled",
+      config: { enabled: false, dryRun: false },
+      mutate: () => undefined,
+      reason: "WHATSAPP_WEB_GLOBAL_FEATURE_DISABLED",
+    },
+    {
+      name: "dry run enabled",
+      config: { dryRun: true },
+      mutate: () => undefined,
+      reason: "WHATSAPP_WEB_REAL_SEND_DISABLED_BY_DRY_RUN",
+    },
+    {
+      name: "channel disabled",
+      config: { dryRun: false },
+      mutate: (value: WhatsAppWebPublicationInput) => {
+        value.channel.channelEnabled = false;
+      },
+      reason: "WHATSAPP_WEB_CHANNEL_DISABLED",
+    },
+    {
+      name: "channel paused",
+      config: { dryRun: false },
+      mutate: (value: WhatsAppWebPublicationInput) => {
+        value.channel.channelPaused = true;
+      },
+      reason: "WHATSAPP_WEB_CHANNEL_PAUSED",
+    },
+    {
+      name: "automation disabled",
+      config: { dryRun: false },
+      mutate: (value: WhatsAppWebPublicationInput) => {
+        value.channel.webAutomationEnabled = false;
+      },
+      reason: "WHATSAPP_WEB_AUTOMATION_DISABLED",
+    },
+    {
+      name: "ownership missing",
+      config: { dryRun: false },
+      mutate: (value: WhatsAppWebPublicationInput) => {
+        value.channel.webAutomationOwnershipConfirmed = false;
+      },
+      reason: "WHATSAPP_WEB_OWNERSHIP_NOT_CONFIRMED",
+    },
+    {
+      name: "dry-run fingerprint invalid",
+      config: { dryRun: false },
+      mutate: (value: WhatsAppWebPublicationInput) => {
+        value.channel.lastSuccessfulDryRunConfigurationFingerprint = "stale";
+      },
+      reason: "WHATSAPP_WEB_DRY_RUN_FINGERPRINT_INVALID",
+    },
+  ])(
+    "blocks $name before media, profile lock or browser",
+    async ({ config: configOverride, mutate, reason }) => {
+      const value = input();
+      value.channel.sendImage = true;
+      value.imageUrl = "https://cdn.example/image.jpg";
+      mutate(value);
+      const browser = launcher();
+      const profileLock = lock();
+      const prepareImage = vi.fn();
+      const result = await new WhatsAppGroupsWebPublisher({
+        config: config(configOverride),
+        launcher: browser,
+        profileLock,
+        prepareImage,
+        recordSendState: vi.fn(),
+      }).publish(value);
+
+      expect(result).toMatchObject({
+        status: "FAILED",
+        sendWasClicked: false,
+        errorCode: reason,
+      });
+      expect(prepareImage).not.toHaveBeenCalled();
+      expect(profileLock.acquire).not.toHaveBeenCalled();
+      expect(browser.isAvailable).not.toHaveBeenCalled();
+      expect(browser.launchPersistent).not.toHaveBeenCalled();
+    },
+  );
+
+  it("reports sanitized eligibility without overriding an uncertain marker", () => {
+    const value = input();
+    const result = validateRealSendEligibility({
+      config: config(),
+      channel: value.channel,
+      publication: {
+        status: "PUBLICATION_FAILED",
+        metadata: {
+          sendClickStartedAt: "2026-08-02T15:25:21.782Z",
+          retryAuthorized: false,
+        },
+      },
+      confirmSend: true,
+    });
+    expect(result).toMatchObject({
+      dryRunEnabled: true,
+      publicationEligible: false,
+      realSendEligible: false,
+      blockingReason: "WHATSAPP_WEB_REAL_SEND_DISABLED_BY_DRY_RUN",
+    });
+  });
+
   it("preflights the exact draft and send trigger without clicking", async () => {
     const page = adapter();
     const result = await new WhatsAppGroupsWebPublisher({
@@ -947,6 +1072,83 @@ describe("WhatsAppGroupsWebPublisher protected send", () => {
     expect(page.clearDraft).toHaveBeenCalledOnce();
   });
 
+  it("revalidates the caption immediately before click and blocks lost content", async () => {
+    const stableInspection = {
+      affiliateUrlFound: true,
+      affiliateUrlOccurrences: 1,
+      textSnippetFound: true,
+      mediaFound: true,
+      uploadErrorVisible: false,
+      uploadInProgressVisible: false,
+      captionStable: true,
+      captionLengthExpected: 56,
+      captionLengthObserved: 56,
+    };
+    const page = adapter({
+      inspectPreparedDraft: vi
+        .fn()
+        .mockResolvedValueOnce(stableInspection)
+        .mockResolvedValueOnce({
+          ...stableInspection,
+          affiliateUrlFound: false,
+          affiliateUrlOccurrences: 0,
+          textSnippetFound: false,
+          captionStable: false,
+          captionLengthObserved: 0,
+        }),
+    });
+    const recordSendState = vi.fn().mockResolvedValue(undefined);
+    const result = await new WhatsAppGroupsWebPublisher({
+      config: config({ dryRun: false }),
+      launcher: launcher(page),
+      profileLock: lock(),
+      recordSendState,
+    }).publish(input());
+
+    expect(result).toMatchObject({
+      status: "FAILED",
+      sendWasClicked: false,
+      stage: "PRE_SEND_CAPTION_MISSING",
+    });
+    expect(page.clickSendTrigger).not.toHaveBeenCalled();
+    expect(recordSendState).not.toHaveBeenCalledWith(
+      expect.objectContaining({ stage: "SEND_CLICK_STARTED" }),
+    );
+    expect(page.clearDraft).toHaveBeenCalledOnce();
+  });
+
+  it.each([0, 2])(
+    "blocks affiliate URL occurrence count %s before click",
+    async (affiliateUrlOccurrences) => {
+      const page = adapter({
+        inspectPreparedDraft: vi.fn().mockResolvedValue({
+          affiliateUrlFound: false,
+          affiliateUrlOccurrences,
+          textSnippetFound: true,
+          mediaFound: true,
+          uploadErrorVisible: false,
+          uploadInProgressVisible: false,
+          captionStable: true,
+          captionLengthExpected: 56,
+          captionLengthObserved: 56,
+        }),
+      });
+      const result = await new WhatsAppGroupsWebPublisher({
+        config: config({ dryRun: false }),
+        launcher: launcher(page),
+        profileLock: lock(),
+        recordSendState: vi.fn().mockResolvedValue(undefined),
+      }).publish(input());
+
+      expect(result).toMatchObject({
+        status: "FAILED",
+        sendWasClicked: false,
+        stage: "PRE_SEND_AFFILIATE_URL_MISSING",
+      });
+      expect(page.clickSendTrigger).not.toHaveBeenCalled();
+    },
+  );
+
   it("refuses real send while dry-run protection is active", async () => {
     const page = adapter();
     const result = await new WhatsAppGroupsWebPublisher({
@@ -954,7 +1156,7 @@ describe("WhatsAppGroupsWebPublisher protected send", () => {
       launcher: launcher(page),
       profileLock: lock(),
     }).publish(input());
-    expect(result.errorCode).toBe("WHATSAPP_WEB_DISABLED");
+    expect(result.errorCode).toBe("WHATSAPP_WEB_REAL_SEND_DISABLED_BY_DRY_RUN");
     expect(page.clickSendTrigger).not.toHaveBeenCalled();
   });
 
@@ -967,7 +1169,7 @@ describe("WhatsAppGroupsWebPublisher protected send", () => {
       profileLock: lock(),
       recordSendState: vi.fn().mockResolvedValue(undefined),
     }).publish(value);
-    expect(result.errorCode).toBe("WHATSAPP_WEB_DRAFT_VALIDATION_FAILED");
+    expect(result.errorCode).toBe("WHATSAPP_WEB_DRY_RUN_FINGERPRINT_INVALID");
   });
 
   it("publishes only after visual confirmation", async () => {

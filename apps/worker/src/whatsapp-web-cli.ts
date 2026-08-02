@@ -6,6 +6,7 @@ import {
   resolveWhatsAppWebProfilePath,
   sanitizeWhatsAppWebProfileKey,
   WhatsAppGroupsWebPublisher,
+  validateRealSendEligibility,
   type WhatsAppWebChannelConfiguration,
   type WhatsAppWebPublicationInput,
   type WhatsAppWebSendStateUpdate,
@@ -80,6 +81,8 @@ async function publicationInput(publicationId: string) {
       title: publication.offerTitleSnapshot,
       currentPrice: publication.currentPriceSnapshot.toString(),
       imageUrl: publication.imageUrlSnapshot,
+      publicationStatus: publication.status,
+      publicationMetadata: publication.metadata,
       channel: channelInput(publication.channel),
     } satisfies WhatsAppWebPublicationInput,
   };
@@ -342,13 +345,56 @@ async function main() {
     return;
   }
 
+  if (command === "config-check") {
+    const publicationId = option("--publication-id");
+    if (!publicationId) throw new Error("PUBLICATION_ID_REQUIRED");
+    const { input } = await publicationInput(publicationId);
+    const result = validateRealSendEligibility({
+      config: runtimeConfig,
+      channel: input.channel,
+      publication: {
+        status: input.publicationStatus ?? "SCHEDULED",
+        metadata: input.publicationMetadata,
+      },
+      confirmSend: true,
+    });
+    process.stdout.write(
+      `${JSON.stringify({ ...result, browserOpened: false })}\n`,
+    );
+    return;
+  }
+
   if (command === "publish") {
-    if (!process.argv.includes("--confirm-send"))
-      throw new Error("CONFIRM_SEND_REQUIRED");
     const publicationId = option("--publication-id");
     if (!publicationId) throw new Error("PUBLICATION_ID_REQUIRED");
     const { publication, input } = await publicationInput(publicationId);
-    const result = await publisher.publish(input);
+    const confirmSend = process.argv.includes("--confirm-send");
+    const eligibility = validateRealSendEligibility({
+      config: runtimeConfig,
+      channel: input.channel,
+      publication: {
+        status: publication.status,
+        metadata: publication.metadata,
+      },
+      confirmSend,
+    });
+    if (!eligibility.realSendEligible) {
+      process.stdout.write(
+        `${JSON.stringify({
+          status: "FAILED",
+          errorCode: eligibility.blockingReason,
+          browserOpened: false,
+          mediaPrepared: false,
+          draftCreated: false,
+          sendCalled: false,
+        })}\n`,
+      );
+      return;
+    }
+    const result = await publisher.publish({
+      ...input,
+      confirmSend,
+    });
     const uncertain = result.status === "DELIVERY_UNCERTAIN";
     const attemptNumber = await prisma.publicationAttempt.count({
       where: { publicationId: publication.id },
@@ -413,7 +459,7 @@ async function main() {
   }
 
   throw new Error(
-    "USAGE: login|health|diagnose|locate|dry-run|preflight|publish",
+    "USAGE: login|health|diagnose|locate|dry-run|preflight|config-check|publish",
   );
 }
 

@@ -52,6 +52,9 @@ export type WhatsAppWebPublicationInput = {
   title: string;
   currentPrice?: string;
   imageUrl?: string | null;
+  publicationStatus?: string;
+  publicationMetadata?: unknown;
+  confirmSend?: boolean;
   channel: WhatsAppWebChannelConfiguration;
 };
 
@@ -97,6 +100,8 @@ export type WhatsAppWebPreflightResult = {
   sendTriggerEnabled: boolean;
   sendCalled: false;
   draftCleared: boolean;
+  captionStable: boolean;
+  affiliateUrlOccurrenceCount: number;
   stage: WhatsAppWebDiagnosticStage;
   errorCode?: string;
   diagnostics: WhatsAppWebSafeDiagnostics;
@@ -110,6 +115,101 @@ export type WhatsAppWebSendStateUpdate = {
   sendClickedAt?: string;
   deliveryUncertain: boolean;
 };
+
+export type WhatsAppWebRealSendEligibilityResult = {
+  globalExperimentalEnabled: boolean;
+  dryRunEnabled: boolean;
+  channelEnabled: boolean;
+  channelPaused: boolean;
+  publicationMode: string;
+  webAutomationEnabled: boolean;
+  ownershipConfirmed: boolean;
+  dryRunFingerprintValid: boolean;
+  publicationEligible: boolean;
+  realSendEligible: boolean;
+  blockingReason: WhatsAppWebErrorCode | null;
+};
+
+export function validateRealSendEligibility(input: {
+  config: WhatsAppWebRuntimeConfig;
+  channel: WhatsAppWebChannelConfiguration;
+  publication: { status: string; metadata: unknown };
+  confirmSend: boolean;
+}): WhatsAppWebRealSendEligibilityResult {
+  const metadata =
+    input.publication.metadata &&
+    typeof input.publication.metadata === "object" &&
+    !Array.isArray(input.publication.metadata)
+      ? (input.publication.metadata as Record<string, unknown>)
+      : {};
+  const dryRunFingerprintValid = Boolean(
+    input.channel.lastSuccessfulDryRunAt &&
+    input.channel.lastSuccessfulDryRunConfigurationFingerprint ===
+      whatsappWebConfigurationFingerprint(input.channel),
+  );
+  const deliveryStateRequiresAuthorization =
+    metadata.deliveryUncertain === true ||
+    typeof metadata.sendClickStartedAt === "string";
+  const retryAuthorized = metadata.retryAuthorized === true;
+  const publicationEligible =
+    input.publication.status !== "PUBLISHED" &&
+    (!deliveryStateRequiresAuthorization || retryAuthorized) &&
+    (input.publication.status !== "PUBLICATION_FAILED" || retryAuthorized);
+
+  let blockingReason: WhatsAppWebErrorCode | null = null;
+  if (!input.confirmSend) {
+    blockingReason = "WHATSAPP_WEB_CONFIRM_SEND_REQUIRED";
+  } else if (!input.config.enabled) {
+    blockingReason = "WHATSAPP_WEB_GLOBAL_FEATURE_DISABLED";
+  } else if (input.config.dryRun) {
+    blockingReason = "WHATSAPP_WEB_REAL_SEND_DISABLED_BY_DRY_RUN";
+  } else if (input.channel.channelType !== "WHATSAPP_GROUPS") {
+    blockingReason = "WHATSAPP_WEB_CHANNEL_TYPE_INVALID";
+  } else if (input.channel.publicationMode !== "WEB_EXPERIMENTAL") {
+    blockingReason = "WHATSAPP_WEB_PUBLICATION_MODE_INVALID";
+  } else if (!input.channel.channelEnabled) {
+    blockingReason = "WHATSAPP_WEB_CHANNEL_DISABLED";
+  } else if (input.channel.channelPaused) {
+    blockingReason = "WHATSAPP_WEB_CHANNEL_PAUSED";
+  } else if (!input.channel.webAutomationEnabled) {
+    blockingReason = "WHATSAPP_WEB_AUTOMATION_DISABLED";
+  } else if (
+    !input.channel.webAutomationOwnershipConfirmed ||
+    !input.channel.webAutomationConfirmedAt
+  ) {
+    blockingReason = "WHATSAPP_WEB_OWNERSHIP_NOT_CONFIRMED";
+  } else if (!dryRunFingerprintValid) {
+    blockingReason = "WHATSAPP_WEB_DRY_RUN_FINGERPRINT_INVALID";
+  } else if (input.publication.status === "PUBLISHED") {
+    blockingReason = "WHATSAPP_WEB_PUBLICATION_ALREADY_PUBLISHED";
+  } else if (deliveryStateRequiresAuthorization && !retryAuthorized) {
+    blockingReason = "WHATSAPP_WEB_DELIVERY_UNCERTAIN";
+  } else if (
+    input.publication.status === "PUBLICATION_FAILED" &&
+    !retryAuthorized
+  ) {
+    blockingReason = "WHATSAPP_WEB_RETRY_NOT_AUTHORIZED";
+  } else if (!publicationEligible) {
+    blockingReason = "WHATSAPP_WEB_PUBLICATION_INELIGIBLE";
+  }
+
+  return {
+    globalExperimentalEnabled: input.config.enabled,
+    dryRunEnabled: input.config.dryRun,
+    channelEnabled: input.channel.channelEnabled,
+    channelPaused: input.channel.channelPaused,
+    publicationMode: input.channel.publicationMode,
+    webAutomationEnabled: input.channel.webAutomationEnabled,
+    ownershipConfirmed: Boolean(
+      input.channel.webAutomationOwnershipConfirmed &&
+      input.channel.webAutomationConfirmedAt,
+    ),
+    dryRunFingerprintValid,
+    publicationEligible,
+    realSendEligible: blockingReason === null,
+    blockingReason,
+  };
+}
 
 export interface WhatsAppGroupsWebPublisherContract {
   healthCheck(input: { profileKey: string }): Promise<WhatsAppWebHealthResult>;
@@ -452,7 +552,11 @@ export class WhatsAppGroupsWebPublisher implements WhatsAppGroupsWebPublisherCon
                 const attachment = await adapter.attachImage(media.path);
                 Object.assign(diagnostics, attachment);
                 progress.mediaPrepared = true;
-                const caption = await adapter.fillCaption(input.message);
+                const caption = await adapter.fillCaption({
+                  text: input.message,
+                  affiliateUrl: input.affiliateUrl,
+                  textSnippet: uniqueSnippet(input.title),
+                });
                 Object.assign(diagnostics, caption);
               } else {
                 await adapter.fillText(input.message);
@@ -466,7 +570,9 @@ export class WhatsAppGroupsWebPublisher implements WhatsAppGroupsWebPublisherCon
               if (
                 !inspection.affiliateUrlFound ||
                 !inspection.textSnippetFound ||
-                !inspection.mediaFound
+                !inspection.mediaFound ||
+                !inspection.captionStable ||
+                inspection.uploadInProgressVisible
               ) {
                 throw new WhatsAppWebStageError(
                   "DRAFT_VALIDATION_FAILED",
@@ -562,6 +668,8 @@ export class WhatsAppGroupsWebPublisher implements WhatsAppGroupsWebPublisherCon
       sendTriggerEnabled: false,
       sendCalled: false as const,
       draftCleared: false,
+      captionStable: false,
+      affiliateUrlOccurrenceCount: 0,
     };
     const diagnostics: WhatsAppWebSafeDiagnostics = {
       currentOrigin: "https://web.whatsapp.com",
@@ -592,7 +700,20 @@ export class WhatsAppGroupsWebPublisher implements WhatsAppGroupsWebPublisherCon
           let cleanupError: unknown;
           try {
             try {
-              await this.prepareDraft(adapter, input, media.path);
+              const prepared = await this.prepareDraft(
+                adapter,
+                input,
+                media.path,
+              );
+              if (prepared.attachment) {
+                Object.assign(diagnostics, prepared.attachment);
+              }
+              if (prepared.caption) {
+                Object.assign(diagnostics, prepared.caption);
+                progress.captionStable = prepared.caption.captionStable;
+                progress.affiliateUrlOccurrenceCount =
+                  prepared.caption.affiliateUrlOccurrenceCount;
+              }
               progress.mediaPrepared = Boolean(media.path) || media.fallback;
               const trigger = await this.validatePreSend(
                 adapter,
@@ -674,14 +795,20 @@ export class WhatsAppGroupsWebPublisher implements WhatsAppGroupsWebPublisherCon
       ),
     };
     try {
-      this.assertChannelEnabled(input.channel);
-      if (this.config.dryRun) throw new Error("WHATSAPP_WEB_DISABLED");
-      if (
-        !input.channel.lastSuccessfulDryRunAt ||
-        input.channel.lastSuccessfulDryRunConfigurationFingerprint !==
-          whatsappWebConfigurationFingerprint(input.channel)
-      )
-        throw new Error("WHATSAPP_WEB_DRAFT_VALIDATION_FAILED");
+      const eligibility = validateRealSendEligibility({
+        config: this.config,
+        channel: input.channel,
+        publication: {
+          status: input.publicationStatus ?? "SCHEDULED",
+          metadata: input.publicationMetadata,
+        },
+        confirmSend: input.confirmSend ?? true,
+      });
+      if (!eligibility.realSendEligible) {
+        throw new Error(
+          eligibility.blockingReason ?? "WHATSAPP_WEB_PUBLICATION_INELIGIBLE",
+        );
+      }
       validateWhatsAppWebPublication(input);
       return await this.withConnectedSession(
         input.channel.webProfileKey,
@@ -704,13 +831,18 @@ export class WhatsAppGroupsWebPublisher implements WhatsAppGroupsWebPublisherCon
                 sendWasClicked: false,
                 deliveryUncertain: false,
               });
-              const trigger = await this.validatePreSend(
+              let trigger = await this.validatePreSend(
                 adapter,
                 input,
                 Boolean(media.path),
               );
               currentStage = trigger.stage;
               await this.captureDebugDraft(adapter, "publish-ready");
+              trigger = await this.validatePreSend(
+                adapter,
+                input,
+                Boolean(media.path),
+              );
               currentStage = "SEND_CLICK_STARTED";
               sendClickStartedAt = this.now();
               await this.persistSendState({
@@ -922,6 +1054,19 @@ export class WhatsAppGroupsWebPublisher implements WhatsAppGroupsWebPublisherCon
       expectedText: input.message,
       mediaExpected,
     });
+    if (inspection.uploadInProgressVisible) {
+      throw new WhatsAppWebStageError(
+        "PRE_SEND_MEDIA_UPLOAD_IN_PROGRESS",
+        {
+          currentOrigin: "https://web.whatsapp.com",
+          ...diagnostics,
+          uploadInProgressVisible: true,
+          rootCause: "PRE_SEND_MEDIA_UPLOAD_IN_PROGRESS",
+          errorCode: "WHATSAPP_WEB_PRE_SEND_VALIDATION_FAILED",
+        },
+        "WHATSAPP_WEB_PRE_SEND_VALIDATION_FAILED",
+      );
+    }
     if (
       inspection.uploadErrorVisible ||
       (mediaExpected && !inspection.mediaFound)
@@ -952,6 +1097,25 @@ export class WhatsAppGroupsWebPublisher implements WhatsAppGroupsWebPublisherCon
         "WHATSAPP_WEB_PRE_SEND_VALIDATION_FAILED",
       );
     }
+    if (!inspection.captionStable) {
+      const captionStage: WhatsAppWebDiagnosticStage =
+        inspection.captionLengthObserved === 0
+          ? "CAPTION_CONTENT_LOST"
+          : "CAPTION_CONTENT_MISMATCH";
+      throw new WhatsAppWebStageError(
+        captionStage,
+        {
+          currentOrigin: "https://web.whatsapp.com",
+          ...diagnostics,
+          captionStable: false,
+          captionLengthExpected: inspection.captionLengthExpected,
+          captionLengthObserved: inspection.captionLengthObserved,
+          rootCause: captionStage,
+          errorCode: "WHATSAPP_WEB_DRAFT_VALIDATION_FAILED",
+        },
+        "WHATSAPP_WEB_DRAFT_VALIDATION_FAILED",
+      );
+    }
     if (
       !inspection.affiliateUrlFound ||
       inspection.affiliateUrlOccurrences !== 1
@@ -971,6 +1135,15 @@ export class WhatsAppGroupsWebPublisher implements WhatsAppGroupsWebPublisherCon
     if (diagnostics) {
       diagnostics.previewDetected = inspection.mediaFound;
       diagnostics.captionDetected = inspection.textSnippetFound;
+      diagnostics.captionInputFound = inspection.captionLengthObserved > 0;
+      diagnostics.captionInputVisible = inspection.captionLengthObserved > 0;
+      diagnostics.captionInputEditable = true;
+      diagnostics.captionStable = inspection.captionStable;
+      diagnostics.captionLengthExpected = inspection.captionLengthExpected;
+      diagnostics.captionLengthObserved = inspection.captionLengthObserved;
+      diagnostics.affiliateUrlOccurrenceCount =
+        inspection.affiliateUrlOccurrences;
+      diagnostics.titleSnippetConfirmed = inspection.textSnippetFound;
       diagnostics.draftValidated = true;
       diagnostics.uploadErrorVisible = false;
     }
@@ -1038,10 +1211,16 @@ export class WhatsAppGroupsWebPublisher implements WhatsAppGroupsWebPublisherCon
     mediaPath: string | null,
   ) {
     if (mediaPath) {
-      await adapter.attachImage(mediaPath);
-      await adapter.fillCaption(input.message);
+      const attachment = await adapter.attachImage(mediaPath);
+      const caption = await adapter.fillCaption({
+        text: input.message,
+        affiliateUrl: input.affiliateUrl,
+        textSnippet: uniqueSnippet(input.title),
+      });
+      return { attachment, caption };
     } else {
       await adapter.fillText(input.message);
+      return { attachment: null, caption: null };
     }
   }
 

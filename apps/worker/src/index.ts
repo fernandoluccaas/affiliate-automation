@@ -1206,6 +1206,8 @@ export async function publishScheduledOffers(now = new Date()) {
           title: publication.offerTitleSnapshot,
           currentPrice: publication.currentPriceSnapshot.toString(),
           imageUrl: publication.imageUrlSnapshot,
+          publicationStatus: publication.status,
+          publicationMetadata: publication.metadata,
           channel: whatsappWebChannelConfiguration(publication.channel),
         });
         metrics.whatsappWebAttempts += 1;

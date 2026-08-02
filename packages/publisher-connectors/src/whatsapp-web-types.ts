@@ -2,6 +2,19 @@ import type { LockHandle } from "@affiliate/redis";
 
 export type WhatsAppWebErrorCode =
   | "WHATSAPP_WEB_DISABLED"
+  | "WHATSAPP_WEB_GLOBAL_FEATURE_DISABLED"
+  | "WHATSAPP_WEB_REAL_SEND_DISABLED_BY_DRY_RUN"
+  | "WHATSAPP_WEB_CHANNEL_DISABLED"
+  | "WHATSAPP_WEB_CHANNEL_PAUSED"
+  | "WHATSAPP_WEB_AUTOMATION_DISABLED"
+  | "WHATSAPP_WEB_CHANNEL_TYPE_INVALID"
+  | "WHATSAPP_WEB_PUBLICATION_MODE_INVALID"
+  | "WHATSAPP_WEB_CONFIRM_SEND_REQUIRED"
+  | "WHATSAPP_WEB_DRY_RUN_REQUIRED"
+  | "WHATSAPP_WEB_DRY_RUN_FINGERPRINT_INVALID"
+  | "WHATSAPP_WEB_PUBLICATION_ALREADY_PUBLISHED"
+  | "WHATSAPP_WEB_PUBLICATION_INELIGIBLE"
+  | "WHATSAPP_WEB_RETRY_NOT_AUTHORIZED"
   | "WHATSAPP_WEB_BROWSER_UNAVAILABLE"
   | "WHATSAPP_WEB_PROFILE_NOT_INITIALIZED"
   | "WHATSAPP_WEB_LOGIN_REQUIRED"
@@ -74,6 +87,9 @@ export type WhatsAppWebDiagnosticStage =
   | "MEDIA_PREVIEW_NOT_FOUND"
   | "CAPTION_INPUT_NOT_FOUND"
   | "CAPTION_NOT_EDITABLE"
+  | "CAPTION_INPUT_RECREATED"
+  | "CAPTION_CONTENT_LOST"
+  | "CAPTION_CONTENT_MISMATCH"
   | "DRAFT_VALIDATION_FAILED"
   | "DRAFT_CLEANUP_FAILED"
   | "PUBLISH_PERMISSION_UNDETERMINED"
@@ -84,6 +100,7 @@ export type WhatsAppWebDiagnosticStage =
   | "PRE_SEND_VALIDATION_STARTED"
   | "PRE_SEND_GROUP_MISMATCH"
   | "PRE_SEND_MEDIA_PREVIEW_MISSING"
+  | "PRE_SEND_MEDIA_UPLOAD_IN_PROGRESS"
   | "PRE_SEND_CAPTION_MISSING"
   | "PRE_SEND_AFFILIATE_URL_MISSING"
   | "SEND_TRIGGER_NOT_FOUND"
@@ -128,6 +145,16 @@ export type WhatsAppWebSafeDiagnostics = {
   tempFileExtension?: string;
   previewDetected?: boolean;
   captionDetected?: boolean;
+  captionInputFound?: boolean;
+  captionInputVisible?: boolean;
+  captionInputEditable?: boolean;
+  captionFillAttempts?: number;
+  captionStable?: boolean;
+  captionLengthExpected?: number;
+  captionLengthObserved?: number;
+  affiliateUrlOccurrenceCount?: number;
+  titleSnippetConfirmed?: boolean;
+  uploadInProgressVisible?: boolean;
   draftValidated?: boolean;
   draftCleared?: boolean;
   uploadErrorVisible?: boolean;
@@ -149,6 +176,15 @@ export type WhatsAppWebMediaAttachmentResult = {
 
 export type WhatsAppWebCaptionResult = {
   captionDetected: true;
+  captionInputFound: true;
+  captionInputVisible: true;
+  captionInputEditable: true;
+  captionFillAttempts: number;
+  captionStable: true;
+  captionLengthExpected: number;
+  captionLengthObserved: number;
+  affiliateUrlOccurrenceCount: number;
+  titleSnippetConfirmed: true;
 };
 
 export type WhatsAppWebDraftCleanupResult = {
@@ -211,10 +247,19 @@ export type PreparedDraftInspection = {
   textSnippetFound: boolean;
   mediaFound: boolean;
   uploadErrorVisible: boolean;
+  uploadInProgressVisible: boolean;
+  captionStable: boolean;
+  captionLengthExpected: number;
+  captionLengthObserved: number;
 };
 
-export type OutgoingMessageConfirmation = PreparedDraftInspection & {
+export type OutgoingMessageConfirmation = {
   confirmed: boolean;
+  affiliateUrlFound: boolean;
+  affiliateUrlOccurrences: number;
+  textSnippetFound: boolean;
+  mediaFound: boolean;
+  uploadErrorVisible: boolean;
   stage: WhatsAppWebDiagnosticStage;
 };
 
@@ -243,7 +288,11 @@ export interface WhatsAppWebPageAdapter {
   verifyOpenedGroup(name: string): Promise<boolean>;
   verifyPublishPermission(): Promise<boolean>;
   attachImage(path: string): Promise<WhatsAppWebMediaAttachmentResult>;
-  fillCaption(text: string): Promise<WhatsAppWebCaptionResult>;
+  fillCaption(input: {
+    text: string;
+    affiliateUrl: string;
+    textSnippet: string;
+  }): Promise<WhatsAppWebCaptionResult>;
   fillText(text: string): Promise<void>;
   inspectPreparedDraft(input: {
     affiliateUrl: string;

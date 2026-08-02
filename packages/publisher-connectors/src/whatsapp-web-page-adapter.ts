@@ -60,6 +60,9 @@ function errorCodeForDiagnosticStage(
   if (
     stage === "CAPTION_INPUT_NOT_FOUND" ||
     stage === "CAPTION_NOT_EDITABLE" ||
+    stage === "CAPTION_INPUT_RECREATED" ||
+    stage === "CAPTION_CONTENT_LOST" ||
+    stage === "CAPTION_CONTENT_MISMATCH" ||
     stage === "DRAFT_VALIDATION_FAILED"
   ) {
     return "WHATSAPP_WEB_DRAFT_VALIDATION_FAILED";
@@ -494,44 +497,147 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
     throw await this.stageError("FILE_CHOOSER_NOT_OPENED", {}, diagnostic);
   }
 
-  async fillCaption(text: string) {
-    const deadline = Date.now() + this.actionTimeoutMs;
-    let caption: Locator | null = null;
-    do {
-      caption = await this.findCaptionInput();
-      if (caption) break;
-      await this.page.waitForTimeout(150);
-    } while (Date.now() < deadline);
-    if (!caption) {
-      throw await this.stageError(
-        "CAPTION_INPUT_NOT_FOUND",
-        {},
-        {
-          captionDetected: false,
-        },
-      );
+  async fillCaption(input: {
+    text: string;
+    affiliateUrl: string;
+    textSnippet: string;
+  }) {
+    await this.waitForStableMediaEditor();
+    const expected = normalizedText(input.text);
+    let lastStage: WhatsAppWebDiagnosticStage = "CAPTION_INPUT_NOT_FOUND";
+    let observedLength = 0;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const caption = await this.findCaptionInput();
+      if (!caption) {
+        lastStage = "CAPTION_INPUT_NOT_FOUND";
+        await this.page.waitForTimeout(200);
+        continue;
+      }
+      const visible = await caption.isVisible().catch(() => false);
+      const editable = await caption.isEditable().catch(() => false);
+      if (!visible || !editable) {
+        lastStage = "CAPTION_NOT_EDITABLE";
+        if (attempt < 2) {
+          await this.page.waitForTimeout(200);
+          continue;
+        }
+        throw await this.stageError(
+          lastStage,
+          {},
+          {
+            captionDetected: true,
+            captionInputFound: true,
+            captionInputVisible: visible,
+            captionInputEditable: editable,
+            captionFillAttempts: attempt,
+            captionStable: false,
+            captionLengthExpected: expected.length,
+            captionLengthObserved: 0,
+          },
+        );
+      }
+      try {
+        const originalElement = await caption.elementHandle();
+        await caption.focus();
+        await caption.fill("");
+        await caption.fill(input.text);
+        await this.page.waitForTimeout(250);
+        const stillAttached = originalElement
+          ? await originalElement
+              .evaluate((element) => element.isConnected)
+              .catch(() => false)
+          : false;
+        await originalElement?.dispose().catch(() => undefined);
+        const currentCaption = await this.findCaptionInput();
+        const observed = currentCaption
+          ? await this.readEditableText(currentCaption)
+          : "";
+        observedLength = observed.length;
+        const affiliateUrlOccurrenceCount =
+          observed.split(input.affiliateUrl).length - 1;
+        const titleSnippetConfirmed = observed.includes(
+          normalizedText(input.textSnippet),
+        );
+
+        if (!stillAttached) {
+          lastStage = "CAPTION_INPUT_RECREATED";
+        } else if (!observed) {
+          lastStage = "CAPTION_CONTENT_LOST";
+        } else if (
+          observed !== expected ||
+          affiliateUrlOccurrenceCount !== 1 ||
+          !titleSnippetConfirmed
+        ) {
+          lastStage = "CAPTION_CONTENT_MISMATCH";
+        } else {
+          await this.page.waitForTimeout(250);
+          const stableCaption = await this.findCaptionInput();
+          const stableText = stableCaption
+            ? await this.readEditableText(stableCaption)
+            : "";
+          const stableAffiliateUrlOccurrenceCount =
+            stableText.split(input.affiliateUrl).length - 1;
+          if (
+            stableText === expected &&
+            stableAffiliateUrlOccurrenceCount === 1 &&
+            stableText.includes(normalizedText(input.textSnippet))
+          ) {
+            return {
+              captionDetected: true as const,
+              captionInputFound: true as const,
+              captionInputVisible: true as const,
+              captionInputEditable: true as const,
+              captionFillAttempts: attempt,
+              captionStable: true as const,
+              captionLengthExpected: expected.length,
+              captionLengthObserved: expected.length,
+              affiliateUrlOccurrenceCount: stableAffiliateUrlOccurrenceCount,
+              titleSnippetConfirmed: true as const,
+            };
+          }
+          lastStage = stableText
+            ? "CAPTION_CONTENT_MISMATCH"
+            : "CAPTION_CONTENT_LOST";
+          observedLength = stableText.length;
+        }
+      } catch {
+        lastStage = "CAPTION_NOT_EDITABLE";
+        if (attempt < 2) continue;
+        throw await this.stageError(
+          lastStage,
+          {},
+          {
+            captionDetected: true,
+            captionInputFound: true,
+            captionInputVisible: true,
+            captionInputEditable: true,
+            captionFillAttempts: attempt,
+            captionStable: false,
+            captionLengthExpected: expected.length,
+            captionLengthObserved: 0,
+          },
+        );
+      }
+
+      if (attempt < 2) await this.page.waitForTimeout(200);
     }
-    if (!(await caption.isEditable().catch(() => false))) {
-      throw await this.stageError(
-        "CAPTION_NOT_EDITABLE",
-        {},
-        {
-          captionDetected: true,
-        },
-      );
-    }
-    try {
-      await caption.fill(text);
-    } catch {
-      throw await this.stageError(
-        "CAPTION_NOT_EDITABLE",
-        {},
-        {
-          captionDetected: true,
-        },
-      );
-    }
-    return { captionDetected: true as const };
+
+    throw await this.stageError(
+      lastStage,
+      {},
+      {
+        captionDetected: true,
+        captionInputFound: lastStage !== "CAPTION_INPUT_NOT_FOUND",
+        captionInputVisible: lastStage !== "CAPTION_INPUT_NOT_FOUND",
+        captionInputEditable:
+          lastStage !== "CAPTION_INPUT_NOT_FOUND" &&
+          lastStage !== "CAPTION_NOT_EDITABLE",
+        captionFillAttempts: 2,
+        captionStable: false,
+        captionLengthExpected: expected.length,
+        captionLengthObserved: observedLength,
+      },
+    );
   }
 
   async fillText(text: string) {
@@ -550,17 +656,7 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
     const draftControl = input.mediaExpected
       ? await this.findCaptionInput()
       : (await this.findWritableComposer()).locator;
-    const lexicalText = draftControl
-      ? await draftControl
-          .locator("[data-lexical-text='true']")
-          .allInnerTexts()
-          .catch(() => [])
-      : [];
-    const text = normalizedText(
-      lexicalText.length > 0
-        ? lexicalText.join("")
-        : ((await draftControl?.innerText().catch(() => "")) ?? ""),
-    );
+    const text = draftControl ? await this.readEditableText(draftControl) : "";
     const mediaFound = Boolean(
       await this.firstVisible(
         whatsappWebStableSelectors.mediaPreview.map((selector) =>
@@ -569,12 +665,11 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
       ),
     );
     const expectedText = normalizedText(input.expectedText);
-    const expectedSnapshotFound = text.includes(expectedText);
-    const logicalText = expectedSnapshotFound ? expectedText : text;
-    const affiliateUrlOccurrences =
-      logicalText.split(input.affiliateUrl).length - 1;
+    const expectedSnapshotFound = text === expectedText;
+    const affiliateUrlOccurrences = text.split(input.affiliateUrl).length - 1;
     const mediaSurface = await this.visibleMediaSurface();
     let uploadErrorVisible = false;
+    const uploadInProgressVisible = await this.hasMediaUploadInProgress();
     if (mediaSurface) {
       for (const alias of whatsappWebAccessibleAliases.uploadError) {
         const candidate = mediaSurface.getByText(alias, { exact: false });
@@ -595,9 +690,15 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
       affiliateUrlOccurrences,
       textSnippetFound:
         expectedSnapshotFound &&
-        logicalText.includes(normalizedText(input.textSnippet)),
+        text.includes(normalizedText(input.textSnippet)),
       mediaFound: input.mediaExpected ? mediaFound : true,
       uploadErrorVisible,
+      uploadInProgressVisible,
+      captionStable: expectedSnapshotFound,
+      captionLengthExpected: expectedText.length,
+      captionLengthObserved: expectedSnapshotFound
+        ? expectedText.length
+        : text.length,
     };
   }
 
@@ -1143,7 +1244,13 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
   private async findCaptionInput() {
     const scoped = await this.findCaptionInputInMediaSurface();
     if (scoped) return scoped;
-    return this.firstVisible([
+    const preview = await this.firstVisible(
+      whatsappWebStableSelectors.mediaPreview.map((selector) =>
+        this.page.locator(selector),
+      ),
+    );
+    if (!preview) return null;
+    const candidate = await this.firstVisible([
       ...whatsappWebAccessibleAliases.caption.map((name) =>
         this.page.getByRole("textbox", { name, exact: false }),
       ),
@@ -1151,6 +1258,13 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
         this.page.locator(selector),
       ),
     ]);
+    if (!candidate) return null;
+    const outsideConversationList =
+      (await candidate
+        .locator("xpath=ancestor::*[@id='side' or @id='pane-side']")
+        .count()
+        .catch(() => 0)) === 0;
+    return outsideConversationList ? candidate : null;
   }
 
   private async findCaptionInputInMediaSurface() {
@@ -1171,6 +1285,68 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
       }
     }
     return null;
+  }
+
+  private async readEditableText(control: Locator) {
+    const lexicalText = await control
+      .locator("[data-lexical-text='true']")
+      .allInnerTexts()
+      .catch(() => []);
+    return normalizedText(
+      lexicalText.length > 0
+        ? lexicalText.join("")
+        : await control.innerText().catch(() => ""),
+    );
+  }
+
+  private async hasMediaUploadInProgress() {
+    for (const surface of await this.visibleMediaSurfaces()) {
+      const loading = await this.firstVisible(
+        whatsappWebStableSelectors.loadingOverlays.map((selector) =>
+          surface.locator(selector),
+        ),
+      );
+      if (loading) return true;
+    }
+    return false;
+  }
+
+  private async waitForStableMediaEditor() {
+    const deadline = Date.now() + this.actionTimeoutMs;
+    let stableObservations = 0;
+    do {
+      const preview = await this.firstVisible(
+        whatsappWebStableSelectors.mediaPreview.map((selector) =>
+          this.page.locator(selector),
+        ),
+      );
+      const loading = await this.hasMediaUploadInProgress();
+      const caption = await this.findCaptionInput();
+      if (
+        preview &&
+        caption &&
+        (await caption.isVisible().catch(() => false)) &&
+        (await caption.isEditable().catch(() => false)) &&
+        !loading
+      ) {
+        stableObservations += 1;
+        if (stableObservations >= 2) return;
+      } else {
+        stableObservations = 0;
+      }
+      await this.page.waitForTimeout(150);
+    } while (Date.now() < deadline);
+    throw await this.stageError(
+      "CAPTION_INPUT_NOT_FOUND",
+      {},
+      {
+        captionInputFound: false,
+        captionInputVisible: false,
+        captionInputEditable: false,
+        captionStable: false,
+        uploadInProgressVisible: await this.hasMediaUploadInProgress(),
+      },
+    );
   }
 
   private async visibleMediaSurface() {
@@ -1275,13 +1451,24 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
       previewDetected: boolean;
     },
   ): Promise<WhatsAppWebMediaAttachmentResult> {
-    const preview = await this.waitForVisible(
-      whatsappWebStableSelectors.mediaPreview.map((selector) =>
-        this.page.locator(selector),
-      ),
-      this.actionTimeoutMs,
-    );
-    if (!preview) {
+    const deadline = Date.now() + this.actionTimeoutMs;
+    let preview: Locator | null = null;
+    let stableObservations = 0;
+    do {
+      preview = await this.firstVisible(
+        whatsappWebStableSelectors.mediaPreview.map((selector) =>
+          this.page.locator(selector),
+        ),
+      );
+      if (preview && !(await this.hasMediaUploadInProgress())) {
+        stableObservations += 1;
+        if (stableObservations >= 2) break;
+      } else {
+        stableObservations = 0;
+      }
+      await this.page.waitForTimeout(150);
+    } while (Date.now() < deadline);
+    if (!preview || stableObservations < 2) {
       throw await this.stageError(
         "MEDIA_PREVIEW_NOT_FOUND",
         {},

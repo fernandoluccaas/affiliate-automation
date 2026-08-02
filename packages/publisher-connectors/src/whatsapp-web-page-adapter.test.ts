@@ -13,6 +13,7 @@ type FakeNode = {
   editable?: boolean;
   text?: string;
   title?: string;
+  attached?: boolean;
   onClick?: () => void;
   onFill?: (value: string) => void;
   onSetInputFiles?: (path: string) => void;
@@ -58,6 +59,7 @@ class FakeLocator {
     this.page.clicks.push(this.key);
     this.node()?.onClick?.();
   }
+  async focus() {}
   async fill(value: string) {
     this.page.fills.push({ key: this.key, value });
     this.node()?.onFill?.(value);
@@ -90,6 +92,14 @@ class FakeLocator {
   }
   async waitFor() {}
   async screenshot() {}
+  async elementHandle() {
+    const node = this.node();
+    if (!node) return null;
+    return {
+      evaluate: async () => node.attached !== false,
+      dispose: async () => undefined,
+    };
+  }
   async setInputFiles(path: string) {
     this.page.files.push({ strategy: "input", path });
     this.node()?.onSetInputFiles?.(path);
@@ -485,7 +495,11 @@ describe("PlaywrightWhatsAppWebPageAdapter media draft", () => {
 
   it("preserves CAPTION_INPUT_NOT_FOUND", async () => {
     await expect(
-      adapter(pageWithShell(), 10).fillCaption("draft"),
+      adapter(pageWithShell(), 10).fillCaption({
+        text: "draft https://meli.la/abc",
+        affiliateUrl: "https://meli.la/abc",
+        textSnippet: "draft",
+      }),
     ).rejects.toMatchObject({
       stage: "CAPTION_INPUT_NOT_FOUND",
       errorCode: "WHATSAPP_WEB_DRAFT_VALIDATION_FAILED",
@@ -591,6 +605,134 @@ describe("PlaywrightWhatsAppWebPageAdapter media send trigger", () => {
       candidateCount: 1,
       stage: "READY_TO_COMMIT_SEND",
     });
+  });
+});
+
+describe("PlaywrightWhatsAppWebPageAdapter stable media caption", () => {
+  const captionKey =
+    "css:[data-testid='media-editor']>>role:textbox:Add a caption:false";
+  const captionInput = {
+    text: "Oferta Produto https://meli.la/abc",
+    affiliateUrl: "https://meli.la/abc",
+    textSnippet: "Produto",
+  };
+
+  function stableCaptionPage(node: FakeNode) {
+    node.visible ??= true;
+    node.enabled ??= true;
+    node.editable ??= true;
+    node.attached ??= true;
+    return pageWithShell()
+      .add("css:[data-testid='media-editor']", { visible: true })
+      .add("css:[data-testid='media-preview']", { visible: true })
+      .add(captionKey, node);
+  }
+
+  it("fills and confirms a caption that remains stable", async () => {
+    const node: FakeNode = {};
+    node.onFill = (value) => {
+      node.text = value;
+    };
+    await expect(
+      adapter(stableCaptionPage(node), 200).fillCaption(captionInput),
+    ).resolves.toMatchObject({
+      captionFillAttempts: 1,
+      captionStable: true,
+      affiliateUrlOccurrenceCount: 1,
+      titleSnippetConfirmed: true,
+    });
+  });
+
+  it("uses a semantic caption sibling when the preview is not its ancestor", async () => {
+    const node: FakeNode = {
+      visible: true,
+      enabled: true,
+      editable: true,
+      attached: true,
+    };
+    node.onFill = (value) => {
+      node.text = value;
+    };
+    const page = pageWithShell()
+      .add("css:[data-testid='media-preview']", { visible: true })
+      .add("role:textbox:Adicionar uma legenda:false", node);
+
+    await expect(
+      adapter(page, 200).fillCaption(captionInput),
+    ).resolves.toMatchObject({
+      captionFillAttempts: 1,
+      captionStable: true,
+      affiliateUrlOccurrenceCount: 1,
+    });
+  });
+
+  it("refills once when WhatsApp recreates the caption input", async () => {
+    const first: FakeNode = {};
+    const second: FakeNode = {};
+    const page = stableCaptionPage(first);
+    let replaceOnWait = false;
+    first.onFill = (value) => {
+      first.text = value;
+      if (value) replaceOnWait = true;
+    };
+    second.onFill = (value) => {
+      second.text = value;
+    };
+    page.onWait = () => {
+      if (!replaceOnWait) return;
+      replaceOnWait = false;
+      first.attached = false;
+      second.visible = true;
+      second.enabled = true;
+      second.editable = true;
+      second.attached = true;
+      page.add(captionKey, second);
+    };
+
+    await expect(
+      adapter(page, 500).fillCaption(captionInput),
+    ).resolves.toMatchObject({
+      captionFillAttempts: 2,
+      captionStable: true,
+    });
+  });
+
+  it("reports CAPTION_CONTENT_LOST after two bounded fills", async () => {
+    const node: FakeNode = {};
+    let clearOnWait = false;
+    node.onFill = (value) => {
+      node.text = value;
+      if (value) clearOnWait = true;
+    };
+    const page = stableCaptionPage(node);
+    page.onWait = () => {
+      if (clearOnWait) node.text = "";
+      clearOnWait = false;
+    };
+
+    await expect(
+      adapter(page, 500).fillCaption(captionInput),
+    ).rejects.toMatchObject({ stage: "CAPTION_CONTENT_LOST" });
+  });
+
+  it("reports CAPTION_CONTENT_MISMATCH for a persistent partial caption", async () => {
+    const node: FakeNode = {};
+    node.onFill = (value) => {
+      node.text = value ? "Oferta parcial" : "";
+    };
+    await expect(
+      adapter(stableCaptionPage(node), 500).fillCaption(captionInput),
+    ).rejects.toMatchObject({ stage: "CAPTION_CONTENT_MISMATCH" });
+  });
+
+  it("reports CAPTION_CONTENT_MISMATCH when the URL is duplicated", async () => {
+    const node: FakeNode = {};
+    node.onFill = (value) => {
+      node.text = value ? `${value} https://meli.la/abc` : "";
+    };
+    await expect(
+      adapter(stableCaptionPage(node), 500).fillCaption(captionInput),
+    ).rejects.toMatchObject({ stage: "CAPTION_CONTENT_MISMATCH" });
   });
 });
 
