@@ -38,7 +38,10 @@ import bcrypt from "bcryptjs";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
-import { TelegramPublisher } from "@affiliate/publisher-connectors";
+import {
+  sanitizeWhatsAppWebProfileKey,
+  TelegramPublisher,
+} from "@affiliate/publisher-connectors";
 import { createSession, destroySession, requireSession } from "./session";
 import {
   WORKER_CONTROLS_KEY,
@@ -163,6 +166,11 @@ const channelSchema = z.object({
   customFooter: z.string().trim().max(500).optional(),
   sendImage: z.boolean().optional(),
   maxPendingPublications: z.coerce.number().int().min(1).max(50).optional(),
+  webProfileKey: z
+    .string()
+    .trim()
+    .regex(/^[A-Za-z0-9_-]+$/)
+    .optional(),
 });
 
 const mercadoLivreConfigSchema = z.object({
@@ -236,6 +244,7 @@ function channelPayload(formData: FormData) {
     customFooter: formData.get("customFooter")?.toString(),
     sendImage: formData.get("sendImage") === "on",
     maxPendingPublications: formData.get("maxPendingPublications") || 3,
+    webProfileKey: formData.get("webProfileKey")?.toString() || "principal",
   });
 
   if (!parsed.success) {
@@ -245,30 +254,32 @@ function channelPayload(formData: FormData) {
   }
 
   const channel = parsed.data;
-  if (
-    channel.type === "WHATSAPP_GROUPS" &&
-    channel.publicationMode === "WEB_EXPERIMENTAL"
-  ) {
-    throw new Error(
-      "A automacao do WhatsApp Web nao esta autorizada pelo AGENTS.md deste repositorio.",
-    );
-  }
-
-  const configuration = channel.type === "TELEGRAM"
-    ? channel.telegramChatId
-      ? { chatId: channel.telegramChatId.trim() }
-      : Prisma.JsonNull
-    : channel.type === "WHATSAPP_GROUPS"
-      ? {
-          publicationMode: "ASSISTED",
-          whatsappDestinationType: "GROUP",
-          groupDisplayName: channel.groupDisplayName || channel.name,
-          customHeader: channel.customHeader || null,
-          customFooter: channel.customFooter || null,
-          sendImage: channel.sendImage ?? true,
-          maxPendingPublications: channel.maxPendingPublications ?? 3,
-        }
-      : Prisma.JsonNull;
+  const configuration =
+    channel.type === "TELEGRAM"
+      ? channel.telegramChatId
+        ? { chatId: channel.telegramChatId.trim() }
+        : Prisma.JsonNull
+      : channel.type === "WHATSAPP_GROUPS"
+        ? {
+            publicationMode: channel.publicationMode ?? "ASSISTED",
+            whatsappDestinationType: "GROUP",
+            groupDisplayName: channel.groupDisplayName || channel.name,
+            webProfileKey: sanitizeWhatsAppWebProfileKey(
+              channel.webProfileKey ?? "principal",
+            ),
+            ...(!channel.id
+              ? {
+                  webAutomationEnabled: false,
+                  webAutomationOwnershipConfirmed: false,
+                  webAutomationPaused: false,
+                }
+              : {}),
+            customHeader: channel.customHeader || null,
+            customFooter: channel.customFooter || null,
+            sendImage: channel.sendImage ?? true,
+            maxPendingPublications: channel.maxPendingPublications ?? 3,
+          }
+        : Prisma.JsonNull;
 
   return {
     channel,
@@ -313,9 +324,197 @@ export async function updateChannelAction(formData: FormData) {
     throw new Error("Canal nao informado.");
   }
 
-  await prisma.channel.update({ where: { id: channel.id }, data });
+  const current = await prisma.channel.findUnique({
+    where: { id: channel.id },
+    select: { configuration: true },
+  });
+  const currentConfiguration =
+    current?.configuration &&
+    typeof current.configuration === "object" &&
+    !Array.isArray(current.configuration)
+      ? (current.configuration as Record<string, unknown>)
+      : {};
+  const submittedConfiguration =
+    data.configuration &&
+    typeof data.configuration === "object" &&
+    !Array.isArray(data.configuration)
+      ? (data.configuration as Record<string, unknown>)
+      : {};
+  const configurationChanged = [
+    "publicationMode",
+    "groupDisplayName",
+    "webProfileKey",
+    "sendImage",
+  ].some((key) => currentConfiguration[key] !== submittedConfiguration[key]);
+  await prisma.channel.update({
+    where: { id: channel.id },
+    data: {
+      ...data,
+      ...(channel.type === "WHATSAPP_GROUPS"
+        ? {
+            configuration: {
+              ...currentConfiguration,
+              ...submittedConfiguration,
+              ...(configurationChanged
+                ? {
+                    lastSuccessfulDryRunAt: null,
+                    lastSuccessfulDryRunConfigurationFingerprint: null,
+                    webLastDryRunStatus: "INVALIDATED",
+                  }
+                : {}),
+            },
+          }
+        : {}),
+    },
+  });
   revalidatePath("/canais");
   redirect("/canais?message=updated");
+}
+
+async function whatsappWebChannel(formData: FormData) {
+  const id = formData.get("id")?.toString();
+  if (!id) throw new Error("Canal nao informado.");
+  const channel = await prisma.channel.findFirst({
+    where: { id, type: "WHATSAPP_GROUPS" },
+  });
+  if (!channel) throw new Error("Grupo do WhatsApp nao encontrado.");
+  const configuration =
+    channel.configuration &&
+    typeof channel.configuration === "object" &&
+    !Array.isArray(channel.configuration)
+      ? (channel.configuration as Record<string, unknown>)
+      : {};
+  return { channel, configuration };
+}
+
+async function updateWhatsAppWebConfiguration(
+  id: string,
+  configuration: Record<string, unknown>,
+  patch: Record<string, unknown>,
+) {
+  await prisma.channel.update({
+    where: { id },
+    data: {
+      configuration: {
+        ...configuration,
+        ...patch,
+      } as Prisma.InputJsonValue,
+    },
+  });
+  revalidatePath("/canais");
+}
+
+export async function confirmWhatsAppWebOwnershipAction(formData: FormData) {
+  const user = await requireSession();
+  const { channel, configuration } = await whatsappWebChannel(formData);
+  if (formData.get("ownershipConfirmed") !== "on") {
+    throw new Error("Confirme a autorizacao para este grupo.");
+  }
+  await updateWhatsAppWebConfiguration(channel.id, configuration, {
+    webAutomationOwnershipConfirmed: true,
+    webAutomationConfirmedAt: new Date().toISOString(),
+    webAutomationConfirmedBy: user.id,
+  });
+  redirect("/canais?message=web-ownership-confirmed");
+}
+
+export async function setWhatsAppWebEnabledAction(formData: FormData) {
+  await requireSession();
+  const { channel, configuration } = await whatsappWebChannel(formData);
+  const enabled = formData.get("enabled") === "true";
+  if (enabled && configuration.webAutomationOwnershipConfirmed !== true) {
+    throw new Error("WHATSAPP_WEB_OWNERSHIP_NOT_CONFIRMED");
+  }
+  await updateWhatsAppWebConfiguration(channel.id, configuration, {
+    webAutomationEnabled: enabled,
+    publicationMode: enabled ? "WEB_EXPERIMENTAL" : "ASSISTED",
+  });
+  redirect(`/canais?message=${enabled ? "web-enabled" : "web-disabled"}`);
+}
+
+export async function setWhatsAppWebPausedAction(formData: FormData) {
+  await requireSession();
+  const { channel, configuration } = await whatsappWebChannel(formData);
+  const paused = formData.get("paused") === "true";
+  await updateWhatsAppWebConfiguration(channel.id, configuration, {
+    webAutomationPaused: paused,
+    webAutomationPauseReason: paused ? "MANUAL_PAUSE" : null,
+  });
+  redirect(`/canais?message=${paused ? "web-paused" : "web-resumed"}`);
+}
+
+export async function invalidateWhatsAppWebAuthorizationAction(
+  formData: FormData,
+) {
+  await requireSession();
+  const { channel, configuration } = await whatsappWebChannel(formData);
+  await updateWhatsAppWebConfiguration(channel.id, configuration, {
+    webAutomationEnabled: false,
+    webAutomationOwnershipConfirmed: false,
+    webAutomationConfirmedAt: null,
+    webAutomationConfirmedBy: null,
+    publicationMode: "ASSISTED",
+    lastSuccessfulDryRunAt: null,
+    lastSuccessfulDryRunConfigurationFingerprint: null,
+  });
+  redirect("/canais?message=web-invalidated");
+}
+
+export async function reviewWhatsAppWebDeliveryAction(formData: FormData) {
+  const user = await requireSession();
+  const publicationId = formData.get("publicationId")?.toString();
+  const decision = formData.get("decision")?.toString();
+  if (
+    !publicationId ||
+    !["DELIVERED", "NOT_DELIVERED", "CANCEL_RETRY", "AUTHORIZE_RETRY"].includes(
+      decision || "",
+    )
+  ) {
+    throw new Error("Revisao invalida.");
+  }
+  const publication = await prisma.publication.findUnique({
+    where: { id: publicationId },
+  });
+  const metadata =
+    publication?.metadata &&
+    typeof publication.metadata === "object" &&
+    !Array.isArray(publication.metadata)
+      ? (publication.metadata as Record<string, unknown>)
+      : {};
+  if (!publication || metadata.deliveryUncertain !== true)
+    throw new Error("DELIVERY_UNCERTAIN_NOT_FOUND");
+  const now = new Date();
+  await prisma.$transaction(async (tx) => {
+    await tx.publication.update({
+      where: { id: publication.id },
+      data: {
+        status:
+          decision === "DELIVERED"
+            ? "PUBLISHED"
+            : decision === "AUTHORIZE_RETRY"
+              ? "SCHEDULED"
+              : "PUBLICATION_FAILED",
+        scheduledAt:
+          decision === "AUTHORIZE_RETRY" ? now : publication.scheduledAt,
+        publishedAt: decision === "DELIVERED" ? now : null,
+        metadata: {
+          ...metadata,
+          deliveryUncertain: false,
+          deliveryUncertainReviewedAt: now.toISOString(),
+          deliveryUncertainReviewedBy: user.id,
+          deliveryUncertainDecision: decision,
+          retryAuthorized: decision === "AUTHORIZE_RETRY",
+        },
+      },
+    });
+    if (decision === "DELIVERED") {
+      await tx.offer.update({
+        where: { id: publication.offerId },
+        data: { status: "PUBLISHED", publishedAt: now },
+      });
+    }
+  });
+  revalidatePath("/publicacoes");
 }
 
 export async function toggleChannelAction(formData: FormData) {
@@ -371,7 +570,8 @@ export async function convertLegacyWhatsAppChannelAction(formData: FormData) {
     where: { id, type: "WHATSAPP_CHANNEL" },
     select: { id: true, name: true, configuration: true },
   });
-  if (!legacy) throw new Error("Registro WHATSAPP_CHANNEL legado nao encontrado.");
+  if (!legacy)
+    throw new Error("Registro WHATSAPP_CHANNEL legado nao encontrado.");
 
   await prisma.channel.update({
     where: { id: legacy.id },
