@@ -178,7 +178,9 @@ Prepared adapters:
 
 Each `WHATSAPP_GROUPS` Channel represents one group administered by the owner. In stable `ASSISTED` mode, the worker prepares deterministic message and image snapshots while the authenticated operator selects the group and publishes manually. Group name, policies, pending limit and idempotency are independent. The formatter uses WhatsApp-compatible `*bold*` and `~strikethrough~`, includes the affiliate URL exactly once and never adds `#publi` or an invented disclosure.
 
-No invitation link, member list or telephone number is stored. `WHATSAPP_CHANNEL` is legacy and has an explicit conversion action; `WHATSAPP_GROUPS_API` is not used. The UI never receives session files, cookies, QR codes or browser storage. `WEB_EXPERIMENTAL` remains unavailable.
+No invitation link, member list or telephone number is stored. `WHATSAPP_CHANNEL` is legacy and has an explicit conversion action; `WHATSAPP_GROUPS_API` is not used. The UI never receives session files, cookies, QR codes or browser storage.
+
+`WEB_EXPERIMENTAL` is an optional local Playwright experiment, not an official WhatsApp API. It is disabled by default and limited to groups the owner belongs to or administers. Login/QR interaction is manual; the application does not read messages, enumerate groups or members, automate credentials, send to individuals, or export browser state. `ASSISTED` remains the stable fallback and Telegram remains independent.
 
 ## Telegram Setup
 

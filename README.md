@@ -71,7 +71,13 @@ Create one or more `WHATSAPP_GROUPS` records in `/canais` with publication mode 
 
 Use `/publicacoes-assistidas` to filter by group, status, marketplace or date, copy the exact saved message, download the validated image, open WhatsApp Web and manually publish in the intended group. Confirmation records the snapshotted group name, authenticated user and `publishedAt`; it does not fabricate an external message ID.
 
-`WHATSAPP_CHANNEL` is legacy and can be converted explicitly in `/canais` without changing its ID or Publications. `WHATSAPP_GROUPS_API` remains unused. WhatsApp Web automation is not implemented; the experimental contract reports `DISABLED`, and no browser profile, QR code, cookies, local storage or Playwright dependency is used.
+`WHATSAPP_CHANNEL` is legacy and can be converted explicitly in `/canais` without changing its ID or Publications. `WHATSAPP_GROUPS_API` remains unused.
+
+### WhatsApp Groups Web experimental
+
+The optional `WEB_EXPERIMENTAL` mode uses Playwright only against the visual WhatsApp Web interface. It is disabled by default, keeps `WHATSAPP_WEB_DRY_RUN=true`, opens an isolated persistent profile under `.local/whatsapp-web`, and requires a manually authenticated session, explicit group-ownership confirmation, exact group-name matching and Redis locks. The dashboard never opens Chromium or receives QR codes, cookies, local storage, profile paths, member lists or conversations.
+
+Install Chromium explicitly with `npm run whatsapp:web:install-browser`, then use the local `login`, `health`, `locate` and `dry-run` commands documented in [docs/whatsapp-groups.md](docs/whatsapp-groups.md). A dry run prepares and validates the exact immutable Publication draft, clears it and structurally cannot call send. Real send additionally requires `WHATSAPP_WEB_DRY_RUN=false`, a current dry-run fingerprint and `--confirm-send`; the first confirmed success pauses only that group for review. No real send is performed by tests.
 
 Manual export channels create `EXPORTED` publications. They do not count as external publications and do not update the offer as published.
 
@@ -193,7 +199,7 @@ npx prisma migrate status --schema prisma/schema.prisma
 
 ## Guardrails
 
-- Do not implement authenticated scraping, marketplace login automation, CAPTCHA bypasses or WhatsApp Web automation.
+- Do not implement authenticated scraping, marketplace login automation or CAPTCHA bypasses. WhatsApp Web automation is limited to the scoped, owner-administered Groups experiment authorized in `AGENTS.md`.
 - Keep offer validation and scoring deterministic.
 - Store credentials only in environment variables or encrypted server-side database fields.
 - Do not expose secrets to client bundles.

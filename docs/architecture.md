@@ -114,6 +114,12 @@ Manual export is not treated as publication delivery. `ManualExportPublisher` re
 
 `WHATSAPP_GROUPS` represents each owner-administered destination group. Its `publicationMode` is stored in `Channel.configuration`; the supported value is `ASSISTED`. The pipeline remains `Offer -> shared scheduler -> PromoMessageBuilder facts -> WhatsAppMessageFormatter -> WhatsAppChannelPublisher`. Scheduler policy, Redis locking, idempotency and immutable Publication snapshots are shared with Telegram. Multiple groups are independent Channels, so the same Offer version may be prepared once in each group.
 
+## Phase 5B - WhatsApp Groups Web experimental
+
+`WEB_EXPERIMENTAL` adds a delivery layer after the shared scheduler: `WhatsAppGroupsDeliveryService -> WhatsAppGroupsWebPublisher -> WhatsAppWebSessionManager/launcher -> WhatsAppWebPageAdapter -> Playwright Page`. Scheduler and dashboard contain no DOM selectors and never open a browser. Selectors and multilingual accessible aliases are centralized in `whatsapp-web-selectors.ts`.
+
+The publisher dynamically loads Playwright only for an explicit local operation, launches one persistent context per sanitized logical profile key and requires `whatsapp-web:profile:{key}` plus the publication lock in Redis. Dry-run calls only draft preparation/inspection/cleanup. Real delivery calls the separate send operation and marks `PUBLISHED` only after visual outgoing-message confirmation. Inconclusive state after a click is terminal `PUBLICATION_FAILED` with `deliveryUncertain=true`, blocked retry and group-only pause.
+
 The assisted publisher returns `AWAITING_MANUAL_PUBLICATION`, never `PUBLISHED`. Those rows reserve daily capacity, participate in interval/repeat checks and are excluded from automatic delivery. `imageUrlSnapshot` and `messagePayload` keep the preview stable. Manual confirmation is a separate authenticated dashboard transition.
 
 `WHATSAPP_CHANNEL` is a deprecated enum value retained for the already-applied migration and existing data; it cannot schedule new assisted rows. The dashboard provides an explicit same-record conversion to `WHATSAPP_GROUPS`. `WHATSAPP_GROUPS_API` is not used. The Web experimental implementation remains an inert group-oriented adapter with no browser/session code.

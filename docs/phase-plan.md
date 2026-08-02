@@ -147,7 +147,16 @@ Status: implemented.
 - Added uniform assisted/Web publisher contracts and an explicitly disabled Web adapter.
 - Deprecated `WHATSAPP_CHANNEL` for new scheduling and added an explicit same-record conversion that preserves Publications and snapshots.
 - Kept `WHATSAPP_GROUPS_API` unused.
-- Did not add Playwright, QR handling, persistent sessions, selectors, Web login or automatic WhatsApp sending because those remain prohibited by `AGENTS.md`.
+- Kept all Web automation out of Phase 5A; the later repository-level authorization is implemented separately in Phase 5B.
+
+## Phase 5B - WhatsApp Groups Web experimental
+
+- Added Playwright to the publisher workspace with an explicit Chromium install script.
+- Added isolated persistent profiles, manual login, health, exact group location, safe dry run and protected publish commands.
+- Added mandatory Redis profile/publication locks, ownership confirmation, configuration fingerprinting, one-publication limit and first-success auto-pause.
+- Added visual confirmation and `DELIVERY_UNCERTAIN` metadata/review without automatic retry.
+- Preserved assisted groups and Telegram as independent delivery modes.
+- Did not run a real external send and did not add unofficial protocol libraries, individual recipients, credential automation, QR capture or conversation/member collection.
 
 ## Phase 5 - Tracking and Attribution
 

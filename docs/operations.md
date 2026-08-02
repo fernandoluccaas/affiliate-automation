@@ -269,7 +269,20 @@ Telegram `Retry-After` is used whenever it is longer than the normal backoff.
 
 An awaiting item reserves one daily slot and the worker creates no more than `WHATSAPP_ASSISTED_MAX_PENDING_PER_CHANNEL` pending rows (default 5). The image download endpoint permits HTTPS images only, rejects local/private literal addresses and unsafe redirects, validates the media type, enforces timeout and size limits, and does not expose a server path.
 
-The real assisted test already validated copy, image download, opening WhatsApp Web, manual publication, status confirmation and idempotency. There is no automated WhatsApp Web login, group lookup, composer fill, dry run or real-send procedure in this phase. Reserved Web variables remain inert and the disabled adapter reports `WHATSAPP_WEB_AUTOMATION_NOT_AUTHORIZED`.
+The assisted flow remains the stable fallback. The experimental Web flow has a separate local runbook:
+
+1. Start PostgreSQL and Redis and keep the feature disabled while configuring the group.
+2. Install Chromium once with `npm run whatsapp:web:install-browser`.
+3. In `/canais`, set the exact group name and logical profile key, confirm ownership, then activate Web experimental mode.
+4. Set `WHATSAPP_GROUPS_WEB_EXPERIMENTAL_ENABLED=true` and keep `WHATSAPP_WEB_DRY_RUN=true`.
+5. Authenticate manually with `npm run whatsapp:web:login -- --profile principal`. Scan the QR only in the visible browser; it is never captured.
+6. Run `npm run whatsapp:web:health -- --profile principal` and `npm run whatsapp:web:locate -- --channel-id <id>`.
+7. Run `npm run whatsapp:web:dry-run -- --publication-id <id>`. It must return `READY_TO_SEND`; no send button is called and the draft must be cleared.
+8. After human review only, set `WHATSAPP_WEB_DRY_RUN=false` and run `npm run whatsapp:web:publish -- --publication-id <id> --confirm-send`. Omitting `--confirm-send` refuses delivery.
+
+Redis is mandatory for Web mode. Missing Chromium reports `WHATSAPP_WEB_BROWSER_UNAVAILABLE`; missing login, selector mismatch, ambiguity or permission errors pause only the affected group. After the first confirmed success the group auto-pauses with `WHATSAPP_WEB_FIRST_SUCCESS_REVIEW_REQUIRED`. If send was clicked but confirmation is inconclusive, verify the group manually and use the authenticated review actions; retry stays blocked until explicitly authorized.
+
+To recover an expired session, rerun the login command against the same logical profile. To erase a local session, stop every command holding that profile lock and remove only its directory below `.local/whatsapp-web`; never copy, archive or commit it. Debug screenshots are off by default and can expose private content when explicitly enabled.
 The retry timestamp is persisted in `Publication.scheduledAt`. A Channel with a
 pending transient failure is not used for another delivery until that timestamp
 passes. Permanent failures become `PUBLICATION_FAILED` immediately; transient
