@@ -14,6 +14,10 @@ import {
   AssistedWhatsAppGroupsPublisher,
   ManualExportPublisher,
   TelegramPublisher,
+  WhatsAppGroupsWebPublisher,
+  getWhatsAppWebRuntimeConfig,
+  type WhatsAppWebChannelConfiguration,
+  type WhatsAppWebPublishResult,
   type PublicationPayload,
   type PublisherAdapter,
   type PublisherResult,
@@ -60,6 +64,14 @@ type JobMetrics = {
   whatsappGroupAssistedConfirmed: number;
   whatsappGroupAssistedSkipped: number;
   whatsappGroupAssistedFailed: number;
+  whatsappWebDryRuns: number;
+  whatsappWebAttempts: number;
+  whatsappWebPublished: number;
+  whatsappWebFailed: number;
+  whatsappWebDeliveryUncertain: number;
+  whatsappWebLoginRequired: number;
+  whatsappWebSelectorMismatch: number;
+  whatsappWebMediaFallback: number;
   skipReasons: Record<string, number>;
 };
 
@@ -104,6 +116,14 @@ function emptyMetrics(): JobMetrics {
     whatsappGroupAssistedConfirmed: 0,
     whatsappGroupAssistedSkipped: 0,
     whatsappGroupAssistedFailed: 0,
+    whatsappWebDryRuns: 0,
+    whatsappWebAttempts: 0,
+    whatsappWebPublished: 0,
+    whatsappWebFailed: 0,
+    whatsappWebDeliveryUncertain: 0,
+    whatsappWebLoginRequired: 0,
+    whatsappWebSelectorMismatch: 0,
+    whatsappWebMediaFallback: 0,
     skipReasons: {},
   };
 }
@@ -124,6 +144,14 @@ function mergeMetrics(target: JobMetrics, source: JobMetrics) {
     "whatsappGroupAssistedConfirmed",
     "whatsappGroupAssistedSkipped",
     "whatsappGroupAssistedFailed",
+    "whatsappWebDryRuns",
+    "whatsappWebAttempts",
+    "whatsappWebPublished",
+    "whatsappWebFailed",
+    "whatsappWebDeliveryUncertain",
+    "whatsappWebLoginRequired",
+    "whatsappWebSelectorMismatch",
+    "whatsappWebMediaFallback",
   ];
 
   for (const key of numericKeys) {
@@ -292,11 +320,56 @@ function channelConfigString(channel: Channel, key: string) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+function channelConfigBoolean(channel: Channel, key: string, fallback = false) {
+  const value = channelConfiguration(channel)[key];
+  return typeof value === "boolean" ? value : fallback;
+}
+
 export function isAssistedWhatsAppGroup(channel: Channel) {
   return (
     channel.type === "WHATSAPP_GROUPS" &&
     channelConfiguration(channel).publicationMode === "ASSISTED"
   );
+}
+
+export function isExperimentalWhatsAppGroup(channel: Channel) {
+  return (
+    channel.type === "WHATSAPP_GROUPS" &&
+    channelConfiguration(channel).publicationMode === "WEB_EXPERIMENTAL"
+  );
+}
+
+function whatsappWebChannelConfiguration(
+  channel: Channel,
+): WhatsAppWebChannelConfiguration {
+  return {
+    channelId: channel.id,
+    channelType: channel.type,
+    channelEnabled: channel.enabled,
+    channelPaused: channelConfigBoolean(channel, "webAutomationPaused"),
+    publicationMode:
+      channelConfigString(channel, "publicationMode") ?? "ASSISTED",
+    groupDisplayName: whatsappGroupDisplayName(channel),
+    webProfileKey: channelConfigString(channel, "webProfileKey") ?? "principal",
+    webAutomationEnabled: channelConfigBoolean(channel, "webAutomationEnabled"),
+    webAutomationOwnershipConfirmed: channelConfigBoolean(
+      channel,
+      "webAutomationOwnershipConfirmed",
+    ),
+    webAutomationConfirmedAt: channelConfigString(
+      channel,
+      "webAutomationConfirmedAt",
+    ),
+    sendImage: channelConfigBoolean(channel, "sendImage", true),
+    lastSuccessfulDryRunAt: channelConfigString(
+      channel,
+      "lastSuccessfulDryRunAt",
+    ),
+    lastSuccessfulDryRunConfigurationFingerprint: channelConfigString(
+      channel,
+      "lastSuccessfulDryRunConfigurationFingerprint",
+    ),
+  };
 }
 
 function whatsappGroupDisplayName(channel: Channel) {
@@ -366,7 +439,14 @@ async function recentChannelHeadlines(channelId: string) {
   const publications = await prisma.publication.findMany({
     where: {
       channelId,
-      status: { in: ["PUBLISHED", "EXPORTED", "SCHEDULED", "AWAITING_MANUAL_PUBLICATION"] },
+      status: {
+        in: [
+          "PUBLISHED",
+          "EXPORTED",
+          "SCHEDULED",
+          "AWAITING_MANUAL_PUBLICATION",
+        ],
+      },
     },
     orderBy: { scheduledAt: "desc" },
     take: 5,
@@ -470,7 +550,14 @@ async function lastChannelPublication(channelId: string) {
   return prisma.publication.findFirst({
     where: {
       channelId,
-      status: { in: ["PUBLISHED", "EXPORTED", "SCHEDULED", "AWAITING_MANUAL_PUBLICATION"] },
+      status: {
+        in: [
+          "PUBLISHED",
+          "EXPORTED",
+          "SCHEDULED",
+          "AWAITING_MANUAL_PUBLICATION",
+        ],
+      },
     },
     orderBy: { scheduledAt: "desc" },
     select: { scheduledAt: true, publishedAt: true },
@@ -533,7 +620,15 @@ export async function createPublicationIdempotently(
               confirmationStrategy: "MANUAL",
               mediaFallbackUsed: !payload.imageUrl,
             }
-          : Prisma.JsonNull,
+          : isExperimentalWhatsAppGroup(channel)
+            ? {
+                publicationMode: "WEB_EXPERIMENTAL",
+                whatsappDestinationType: "GROUP",
+                groupDisplayNameSnapshot: whatsappGroupDisplayName(channel),
+                confirmationStrategy: "VISUAL_OUTGOING_MESSAGE",
+                sendWasClicked: false,
+              }
+            : Prisma.JsonNull,
       messageSource: payload.messageSource,
       aiProvider: payload.aiProvider,
       aiModel: payload.aiModel ?? null,
@@ -605,7 +700,16 @@ export async function scheduleReadyOffers(now = new Date()) {
       const publisher = publisherForChannel(channel);
 
       const assisted = isAssistedWhatsAppGroup(channel);
-      if (!publisher && !assisted) {
+      const webExperimental = isExperimentalWhatsAppGroup(channel);
+      if (
+        !publisher &&
+        !assisted &&
+        !(
+          webExperimental &&
+          getWhatsAppWebRuntimeConfig().enabled &&
+          channelConfigBoolean(channel, "webAutomationEnabled")
+        )
+      ) {
         recordSkip(metrics, "PUBLISHER_UNAVAILABLE");
         continue;
       }
@@ -842,6 +946,127 @@ export function publicationRetryDelayMs(
   return Math.max(backoffMs, retryAfterMs);
 }
 
+const whatsappWebPauseCodes = new Set([
+  "WHATSAPP_WEB_LOGIN_REQUIRED",
+  "WHATSAPP_WEB_GROUP_AMBIGUOUS",
+  "WHATSAPP_WEB_NO_PUBLISH_PERMISSION",
+  "WHATSAPP_WEB_SELECTOR_MISMATCH",
+  "WHATSAPP_WEB_DELIVERY_UNCERTAIN",
+]);
+
+async function recordWhatsAppWebResult(
+  publication: PublicationWithRelations,
+  result: WhatsAppWebPublishResult,
+  now: Date,
+) {
+  const previousMetadata =
+    publication.metadata &&
+    typeof publication.metadata === "object" &&
+    !Array.isArray(publication.metadata)
+      ? (publication.metadata as Record<string, unknown>)
+      : {};
+  const attemptNumber = publication.attempts.length + 1;
+  const deliveryUncertain = result.status === "DELIVERY_UNCERTAIN";
+
+  await prisma.publicationAttempt.create({
+    data: {
+      publicationId: publication.id,
+      attemptNumber,
+      status: result.status === "PUBLISHED" ? "SUCCESS" : "FAILED",
+      requestPayload: {
+        publicationId: publication.id,
+        channelId: publication.channelId,
+        publicationMode: "WEB_EXPERIMENTAL",
+      },
+      responsePayload: {
+        status: result.status,
+        errorCode: result.errorCode ?? null,
+        sendWasClicked: result.sendWasClicked,
+      },
+      errorMessage: result.errorCode ?? null,
+    },
+  });
+
+  await prisma.publication.update({
+    where: { id: publication.id },
+    data: {
+      status:
+        result.status === "PUBLISHED" ? "PUBLISHED" : "PUBLICATION_FAILED",
+      publishedAt: result.status === "PUBLISHED" ? now : null,
+      errorMessage: result.errorCode ?? null,
+      metadata: {
+        ...previousMetadata,
+        ...result.metadata,
+        rootCause: result.errorCode ?? null,
+        deliveryUncertain,
+        retryAuthorized: false,
+      } as Prisma.InputJsonValue,
+    },
+  });
+
+  if (result.status === "PUBLISHED") {
+    await prisma.offer.update({
+      where: { id: publication.offerId },
+      data: { status: "PUBLISHED", publishedAt: now },
+    });
+  }
+
+  const channelConfiguration = channelConfigurationRecord(
+    publication.channel.configuration,
+  );
+  const shouldAutoPause =
+    result.status === "PUBLISHED" &&
+    (channelConfiguration.webAutoPauseAfterSuccess !== false
+      ? getWhatsAppWebRuntimeConfig().autoPauseAfterFirstSuccess
+      : false);
+  const shouldErrorPause =
+    result.errorCode !== undefined &&
+    whatsappWebPauseCodes.has(result.errorCode);
+
+  if (shouldAutoPause || shouldErrorPause) {
+    const pauseReason = shouldAutoPause
+      ? "WHATSAPP_WEB_FIRST_SUCCESS_REVIEW_REQUIRED"
+      : result.errorCode;
+    await prisma.channel.update({
+      where: { id: publication.channelId },
+      data: {
+        configuration: {
+          ...channelConfiguration,
+          webAutomationPaused: true,
+          webAutomationPauseReason: pauseReason,
+          webLastError: result.errorCode ?? null,
+          ...(result.status === "PUBLISHED"
+            ? { webLastSuccessAt: now.toISOString() }
+            : {}),
+        } as Prisma.InputJsonValue,
+      },
+    });
+  }
+
+  if (deliveryUncertain) {
+    await prisma.systemAlert.create({
+      data: {
+        severity: "CRITICAL",
+        source: "worker.whatsappWeb",
+        message:
+          "WhatsApp Web delivery is uncertain; verify the configured group before any action.",
+        metadata: {
+          publicationId: publication.id,
+          channelId: publication.channelId,
+          rootCause: "WHATSAPP_WEB_DELIVERY_UNCERTAIN",
+          retryBlocked: true,
+        },
+      },
+    });
+  }
+}
+
+function channelConfigurationRecord(value: Channel["configuration"]) {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
 export async function publishScheduledOffers(now = new Date()) {
   const metrics = emptyMetrics();
   const maxAttempts = Number(
@@ -869,8 +1094,19 @@ export async function publishScheduledOffers(now = new Date()) {
     },
   });
   const selectedChannelIds = new Set<string>();
+  let whatsappWebSelected = 0;
   const selectedPublications = publications.filter((publication) => {
     if (selectedChannelIds.has(publication.channelId)) return false;
+    if (isExperimentalWhatsAppGroup(publication.channel)) {
+      if (getWhatsAppWebRuntimeConfig().dryRun) return false;
+      if (
+        whatsappWebSelected >=
+        getWhatsAppWebRuntimeConfig().maxPublicationsPerRun
+      ) {
+        return false;
+      }
+      whatsappWebSelected += 1;
+    }
     selectedChannelIds.add(publication.channelId);
     return true;
   });
@@ -878,6 +1114,60 @@ export async function publishScheduledOffers(now = new Date()) {
   for (const publication of selectedPublications) {
     const payload = await payloadFromPublication(publication);
     const publisher = publisherForChannel(publication.channel);
+
+    if (payload && isExperimentalWhatsAppGroup(publication.channel)) {
+      const lock = await acquireLock(
+        `whatsapp-web:publication:${publication.id}`,
+        getWhatsAppWebRuntimeConfig().profileLockTtlMs,
+        { requireRedis: true },
+      );
+      if (!lock.acquired) {
+        metrics.failed += 1;
+        await prisma.publication.update({
+          where: { id: publication.id },
+          data: {
+            status: "PUBLICATION_FAILED",
+            errorMessage: lock.failureReason ?? "LOCK_ALREADY_HELD",
+          },
+        });
+        continue;
+      }
+      try {
+        const result = await new WhatsAppGroupsWebPublisher().publish({
+          publicationId: publication.id,
+          offerId: publication.offerId,
+          destinationType: "GROUP",
+          message: payload.message,
+          affiliateUrl: publication.affiliateUrlSnapshot ?? "",
+          title: publication.offerTitleSnapshot,
+          currentPrice: publication.currentPriceSnapshot.toString(),
+          imageUrl: publication.imageUrlSnapshot,
+          channel: whatsappWebChannelConfiguration(publication.channel),
+        });
+        metrics.whatsappWebAttempts += 1;
+        if (result.mediaFallbackUsed) metrics.whatsappWebMediaFallback += 1;
+        if (result.errorCode === "WHATSAPP_WEB_LOGIN_REQUIRED") {
+          metrics.whatsappWebLoginRequired += 1;
+        }
+        if (result.errorCode === "WHATSAPP_WEB_SELECTOR_MISMATCH") {
+          metrics.whatsappWebSelectorMismatch += 1;
+        }
+        await recordWhatsAppWebResult(publication, result, now);
+        if (result.status === "PUBLISHED") {
+          metrics.published += 1;
+          metrics.whatsappWebPublished += 1;
+        } else {
+          metrics.failed += 1;
+          metrics.whatsappWebFailed += 1;
+          if (result.status === "DELIVERY_UNCERTAIN") {
+            metrics.whatsappWebDeliveryUncertain += 1;
+          }
+        }
+      } finally {
+        await lock.release();
+      }
+      continue;
+    }
 
     if (!payload || !publisher) {
       metrics.failed += 1;
@@ -1302,10 +1592,7 @@ export async function runWorkerCycle(
 
 let loopStarted = false;
 
-type AcquireWorkerLock = (
-  key: string,
-  ttlMs: number,
-) => Promise<LockHandle>;
+type AcquireWorkerLock = (key: string, ttlMs: number) => Promise<LockHandle>;
 
 function withWorkerComponentOutcome(
   result: unknown,
@@ -1559,8 +1846,16 @@ export async function startWorker(
             whatsappGroupAssistedConfirmed: 0,
             whatsappGroupAssistedSkipped:
               scheduled.whatsappGroupAssistedSkipped,
-            whatsappGroupAssistedFailed:
-              scheduled.whatsappGroupAssistedFailed,
+            whatsappGroupAssistedFailed: scheduled.whatsappGroupAssistedFailed,
+            whatsappWebDryRuns: published.whatsappWebDryRuns,
+            whatsappWebAttempts: published.whatsappWebAttempts,
+            whatsappWebPublished: published.whatsappWebPublished,
+            whatsappWebFailed: published.whatsappWebFailed,
+            whatsappWebDeliveryUncertain:
+              published.whatsappWebDeliveryUncertain,
+            whatsappWebLoginRequired: published.whatsappWebLoginRequired,
+            whatsappWebSelectorMismatch: published.whatsappWebSelectorMismatch,
+            whatsappWebMediaFallback: published.whatsappWebMediaFallback,
           },
         };
       },

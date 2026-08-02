@@ -9,6 +9,7 @@ import {
   getChannelMessageFooter,
   hasAssistedGroupPendingCapacity,
   headlineFromMessagePayload,
+  isExperimentalWhatsAppGroup,
   publicationRetryDelayMs,
   publishScheduledOffers,
   resolvePublicationUrl,
@@ -69,6 +70,29 @@ describe("assisted WhatsApp group capacity", () => {
 
     expect(hasAssistedGroupPendingCapacity(group("group-a", 3), 3)).toBe(false);
     expect(hasAssistedGroupPendingCapacity(group("group-b", 3), 0)).toBe(true);
+  });
+});
+
+describe("experimental WhatsApp group isolation", () => {
+  it("selects only WHATSAPP_GROUPS configured as WEB_EXPERIMENTAL", () => {
+    expect(
+      isExperimentalWhatsAppGroup({
+        type: "WHATSAPP_GROUPS",
+        configuration: { publicationMode: "WEB_EXPERIMENTAL" },
+      } as unknown as Channel),
+    ).toBe(true);
+    expect(
+      isExperimentalWhatsAppGroup({
+        type: "WHATSAPP_GROUPS",
+        configuration: { publicationMode: "ASSISTED" },
+      } as unknown as Channel),
+    ).toBe(false);
+    expect(
+      isExperimentalWhatsAppGroup({
+        type: "TELEGRAM",
+        configuration: { publicationMode: "WEB_EXPERIMENTAL" },
+      } as unknown as Channel),
+    ).toBe(false);
   });
 });
 
@@ -358,16 +382,19 @@ describe("createPublicationIdempotently", () => {
       publicationCreated = true;
       return { id: "publication-whatsapp" };
     });
-    const findFirst = vi.fn().mockImplementation((input: {
-      where?: { idempotencyKey?: string };
-    }) =>
-      input?.where?.idempotencyKey && publicationCreated
-        ? { id: "publication-whatsapp" }
-        : null,
-    );
+    const findFirst = vi
+      .fn()
+      .mockImplementation((input: { where?: { idempotencyKey?: string } }) =>
+        input?.where?.idempotencyKey && publicationCreated
+          ? { id: "publication-whatsapp" }
+          : null,
+      );
     const offerUpdate = vi.fn().mockResolvedValue(offer);
     Object.assign(actual.prisma, {
-      offer: { findMany: vi.fn().mockResolvedValue([offer]), update: offerUpdate },
+      offer: {
+        findMany: vi.fn().mockResolvedValue([offer]),
+        update: offerUpdate,
+      },
       channel: { findMany: vi.fn().mockResolvedValue([channel]) },
       publication: {
         count: vi.fn().mockResolvedValue(0),
@@ -388,7 +415,9 @@ describe("createPublicationIdempotently", () => {
     });
     expect(upsert).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { idempotencyKey: "publication:channel-whatsapp:offer-whatsapp-v1" },
+        where: {
+          idempotencyKey: "publication:channel-whatsapp:offer-whatsapp-v1",
+        },
         create: expect.objectContaining({
           status: "AWAITING_MANUAL_PUBLICATION",
           imageUrlSnapshot: "https://cdn.example.com/image.jpg",
@@ -401,7 +430,9 @@ describe("createPublicationIdempotently", () => {
       }),
     );
     expect(offerUpdate).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ status: "SCHEDULED" }) }),
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "SCHEDULED" }),
+      }),
     );
 
     const second = await scheduleReadyOffers(now);
