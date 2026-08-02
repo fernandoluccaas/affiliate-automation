@@ -79,12 +79,14 @@ export class PlaywrightWhatsAppWebBrowserLauncher implements WhatsAppWebBrowserL
     actionTimeoutMs: number;
     navigationTimeoutMs: number;
     confirmationTimeoutMs: number;
+    slowMoMs?: number;
   }): Promise<BrowserSession> {
     let context: BrowserContext | null = null;
     try {
       const { chromium } = await import("playwright");
       context = await chromium.launchPersistentContext(input.userDataDir, {
         headless: input.headless,
+        slowMo: input.slowMoMs ?? 0,
         viewport: { width: 1280, height: 900 },
       });
       context.setDefaultTimeout(input.actionTimeoutMs);
@@ -121,11 +123,19 @@ export type WhatsAppWebRuntimeConfig = {
   maxPublicationsPerRun: number;
   autoPauseAfterFirstSuccess: boolean;
   allowTextFallback: boolean;
+  slowMoMs: number;
+  keepOpenOnError: boolean;
+  keepOpenOnErrorTimeoutMs: number;
 };
 
 function positiveInteger(value: string | undefined, fallback: number) {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function nonNegativeInteger(value: string | undefined, fallback: number) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
 export function getWhatsAppWebRuntimeConfig(
@@ -159,6 +169,15 @@ export function getWhatsAppWebRuntimeConfig(
     autoPauseAfterFirstSuccess:
       env.WHATSAPP_WEB_AUTO_PAUSE_AFTER_FIRST_SUCCESS !== "false",
     allowTextFallback: env.WHATSAPP_WEB_ALLOW_TEXT_FALLBACK !== "false",
+    slowMoMs: Math.min(
+      2_000,
+      nonNegativeInteger(env.WHATSAPP_WEB_SLOW_MO_MS, 0),
+    ),
+    keepOpenOnError: env.WHATSAPP_WEB_KEEP_OPEN_ON_ERROR === "true",
+    keepOpenOnErrorTimeoutMs: Math.min(
+      60_000,
+      positiveInteger(env.WHATSAPP_WEB_KEEP_OPEN_ON_ERROR_TIMEOUT_MS, 30_000),
+    ),
   };
 }
 
@@ -172,6 +191,10 @@ export class WhatsAppWebSessionManager {
   async withConnectedSession<T>(
     profileKey: string,
     operation: (adapter: BrowserSession["adapter"]) => Promise<T>,
+    localDiagnostic?: {
+      keepOpenOnErrorMs: number;
+      isFailure(result: T): boolean;
+    },
   ): Promise<T> {
     const safeKey = sanitizeWhatsAppWebProfileKey(profileKey);
     if (!(await this.launcher.isAvailable())) {
@@ -204,12 +227,30 @@ export class WhatsAppWebSessionManager {
         actionTimeoutMs: this.config.actionTimeoutMs,
         navigationTimeoutMs: this.config.navigationTimeoutMs,
         confirmationTimeoutMs: this.config.confirmationTimeoutMs,
+        slowMoMs: this.config.slowMoMs,
       });
       await session.adapter.navigate();
       if ((await session.adapter.detectAuthenticationState()) !== "CONNECTED") {
         throw new Error("WHATSAPP_WEB_LOGIN_REQUIRED");
       }
-      return await operation(session.adapter);
+      const result = await operation(session.adapter);
+      if (
+        localDiagnostic &&
+        localDiagnostic.keepOpenOnErrorMs > 0 &&
+        localDiagnostic.isFailure(result)
+      ) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, localDiagnostic.keepOpenOnErrorMs),
+        );
+      }
+      return result;
+    } catch (error) {
+      if (localDiagnostic && localDiagnostic.keepOpenOnErrorMs > 0) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, localDiagnostic.keepOpenOnErrorMs),
+        );
+      }
+      throw error;
     } finally {
       clearInterval(renewal);
       await session?.close().catch(() => undefined);

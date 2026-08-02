@@ -20,7 +20,9 @@ import type {
   WhatsAppWebErrorCode,
   WhatsAppWebPageAdapter,
   WhatsAppWebProfileLock,
+  WhatsAppWebStructureDiagnosticResult,
 } from "./whatsapp-web-types";
+import { WhatsAppWebStageError } from "./whatsapp-web-types";
 
 export type WhatsAppWebChannelConfiguration = {
   channelId: string;
@@ -75,6 +77,9 @@ export type WhatsAppWebPublishResult = {
 
 export interface WhatsAppGroupsWebPublisherContract {
   healthCheck(input: { profileKey: string }): Promise<WhatsAppWebHealthResult>;
+  diagnose(input: {
+    profileKey: string;
+  }): Promise<WhatsAppWebStructureDiagnosticResult>;
   locateGroup(input: {
     profileKey: string;
     groupDisplayName: string;
@@ -148,6 +153,7 @@ export class WhatsAppGroupsWebPublisher implements WhatsAppGroupsWebPublisherCon
       prepareImage?: typeof prepareRemoteImage;
       now?: () => Date;
       profileInitialized?: (path: string) => Promise<boolean>;
+      localDiagnosticKeepOpenOnErrorMs?: number;
     } = {},
   ) {}
 
@@ -266,20 +272,34 @@ export class WhatsAppGroupsWebPublisher implements WhatsAppGroupsWebPublisherCon
           const permission = await adapter.verifyPublishPermission();
           return permission
             ? {
+                ...located,
                 status: "GROUP_FOUND" as const,
                 exactMatch: true,
                 publishPermission: true,
               }
             : {
+                ...located,
                 status: "NO_PUBLISH_PERMISSION" as const,
                 exactMatch: true,
                 publishPermission: false,
                 errorCode: "WHATSAPP_WEB_NO_PUBLISH_PERMISSION" as const,
               };
         },
+        { isFailure: (result) => result.status !== "GROUP_FOUND" },
       );
     } catch (error) {
       const code = errorCode(error);
+      if (error instanceof WhatsAppWebStageError) {
+        return {
+          status: "SELECTOR_MISMATCH" as const,
+          exactMatch: false,
+          publishPermission: false,
+          errorCode: "WHATSAPP_WEB_SELECTOR_MISMATCH" as const,
+          stage: error.stage,
+          rootCause: error.stage,
+          diagnostics: error.diagnostics,
+        };
+      }
       return code === "WHATSAPP_WEB_LOGIN_REQUIRED"
         ? {
             status: "LOGIN_REQUIRED" as const,
@@ -293,6 +313,46 @@ export class WhatsAppGroupsWebPublisher implements WhatsAppGroupsWebPublisherCon
             publishPermission: false,
             errorCode: "WHATSAPP_WEB_SELECTOR_MISMATCH" as const,
           };
+    }
+  }
+
+  async diagnose(input: {
+    profileKey: string;
+  }): Promise<WhatsAppWebStructureDiagnosticResult> {
+    try {
+      return await this.withConnectedSession(
+        input.profileKey,
+        (adapter) => adapter.diagnoseStructure(),
+        { isFailure: (result) => result.stage !== "READY_FOR_GROUP_SEARCH" },
+      );
+    } catch (error) {
+      const code = errorCode(error);
+      return {
+        authentication:
+          code === "WHATSAPP_WEB_LOGIN_REQUIRED"
+            ? "LOGIN_REQUIRED"
+            : "UNEXPECTED_STATE",
+        shellRecognized: false,
+        searchTriggerFound: false,
+        searchInputFound: false,
+        stage:
+          code === "WHATSAPP_WEB_LOGIN_REQUIRED"
+            ? "AUTHENTICATED_SHELL_NOT_RECOGNIZED"
+            : "APP_SHELL_NOT_FOUND",
+        diagnostics: {
+          currentOrigin: "https://web.whatsapp.com",
+          interfaceLanguage: "unknown",
+          shellRecognized: false,
+          strategiesTried: 0,
+          visible: false,
+          enabled: false,
+          errorCode: code,
+          rootCause:
+            code === "WHATSAPP_WEB_LOGIN_REQUIRED"
+              ? "AUTHENTICATED_SHELL_NOT_RECOGNIZED"
+              : "APP_SHELL_NOT_FOUND",
+        },
+      };
     }
   }
 
@@ -494,18 +554,32 @@ export class WhatsAppGroupsWebPublisher implements WhatsAppGroupsWebPublisherCon
       actionTimeoutMs: this.config.actionTimeoutMs,
       navigationTimeoutMs: this.config.navigationTimeoutMs,
       confirmationTimeoutMs: this.config.confirmationTimeoutMs,
+      slowMoMs: this.config.slowMoMs,
     });
   }
 
   private async withConnectedSession<T>(
     profileKey: string,
     operation: (adapter: WhatsAppWebPageAdapter) => Promise<T>,
+    localDiagnostic?: {
+      isFailure(result: T): boolean;
+    },
   ): Promise<T> {
     return new WhatsAppWebSessionManager(
       this.config,
       this.launcher,
       this.profileLock,
-    ).withConnectedSession(profileKey, operation);
+    ).withConnectedSession(
+      profileKey,
+      operation,
+      localDiagnostic
+        ? {
+            keepOpenOnErrorMs:
+              this.dependencies.localDiagnosticKeepOpenOnErrorMs ?? 0,
+            isFailure: localDiagnostic.isFailure,
+          }
+        : undefined,
+    );
   }
 
   private async openExactGroup(adapter: WhatsAppWebPageAdapter, name: string) {

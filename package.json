@@ -16,6 +16,7 @@
     "whatsapp:web:install-browser": "npm exec -w @affiliate/publisher-connectors -- playwright install chromium",
     "whatsapp:web:login": "npm run whatsapp:web -w apps/worker -- login",
     "whatsapp:web:health": "npm run whatsapp:web -w apps/worker -- health",
+    "whatsapp:web:diagnose": "npm run whatsapp:web -w apps/worker -- diagnose",
     "whatsapp:web:locate": "npm run whatsapp:web -w apps/worker -- locate",
     "whatsapp:web:dry-run": "npm run whatsapp:web -w apps/worker -- dry-run",
     "whatsapp:web:publish": "npm run whatsapp:web -w apps/worker -- publish",

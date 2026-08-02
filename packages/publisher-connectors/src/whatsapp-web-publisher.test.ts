@@ -5,6 +5,7 @@ import {
   sanitizeWhatsAppWebProfileKey,
   validateWhatsAppWebPublication,
   WhatsAppGroupsWebPublisher,
+  WhatsAppWebStageError,
   whatsappWebConfigurationFingerprint,
   type WhatsAppWebBrowserLauncher,
   type WhatsAppWebPageAdapter,
@@ -30,6 +31,9 @@ function config(
     maxPublicationsPerRun: 1,
     autoPauseAfterFirstSuccess: true,
     allowTextFallback: true,
+    slowMoMs: 0,
+    keepOpenOnError: false,
+    keepOpenOnErrorTimeoutMs: 30_000,
     ...overrides,
   };
 }
@@ -40,6 +44,66 @@ function adapter(
   return {
     navigate: vi.fn().mockResolvedValue(undefined),
     detectAuthenticationState: vi.fn().mockResolvedValue("CONNECTED"),
+    waitForAuthenticatedShell: vi.fn().mockResolvedValue({
+      found: true,
+      stage: "READY_FOR_GROUP_SEARCH",
+      strategiesTried: 1,
+      visible: true,
+      enabled: true,
+    }),
+    findGlobalSearchTrigger: vi.fn().mockResolvedValue({
+      found: true,
+      stage: "READY_FOR_GROUP_SEARCH",
+      strategiesTried: 1,
+      visible: true,
+      enabled: true,
+    }),
+    findGlobalSearchInput: vi.fn().mockResolvedValue({
+      found: true,
+      stage: "READY_FOR_GROUP_SEARCH",
+      strategiesTried: 1,
+      visible: true,
+      enabled: true,
+      editable: true,
+    }),
+    openGlobalSearch: vi.fn().mockResolvedValue({
+      found: true,
+      stage: "READY_FOR_GROUP_SEARCH",
+      strategiesTried: 1,
+      visible: true,
+      enabled: true,
+      editable: true,
+    }),
+    fillGlobalSearch: vi.fn().mockResolvedValue({
+      found: true,
+      stage: "READY_FOR_GROUP_SEARCH",
+      strategiesTried: 1,
+      visible: true,
+      enabled: true,
+      editable: true,
+    }),
+    waitForSearchResults: vi.fn().mockResolvedValue({
+      found: true,
+      stage: "READY_FOR_GROUP_SEARCH",
+      strategiesTried: 1,
+      visible: true,
+      enabled: true,
+    }),
+    diagnoseStructure: vi.fn().mockResolvedValue({
+      authentication: "CONNECTED",
+      shellRecognized: true,
+      searchTriggerFound: true,
+      searchInputFound: true,
+      stage: "READY_FOR_GROUP_SEARCH",
+      diagnostics: {
+        currentOrigin: "https://web.whatsapp.com",
+        interfaceLanguage: "pt",
+        shellRecognized: true,
+        strategiesTried: 1,
+        visible: true,
+        enabled: true,
+      },
+    }),
     locateGroupExact: vi.fn().mockResolvedValue({
       status: "GROUP_FOUND",
       exactMatch: true,
@@ -156,8 +220,25 @@ describe("WhatsApp Web profile safety and defaults", () => {
       enabled: false,
       dryRun: true,
       headless: false,
+      slowMoMs: 0,
+      keepOpenOnError: false,
+      keepOpenOnErrorTimeoutMs: 30_000,
       maxPublicationsPerRun: 1,
       autoPauseAfterFirstSuccess: true,
+    });
+  });
+
+  it("bounds visual debug settings and keeps them opt-in", () => {
+    expect(
+      getWhatsAppWebRuntimeConfig({
+        WHATSAPP_WEB_SLOW_MO_MS: "9999",
+        WHATSAPP_WEB_KEEP_OPEN_ON_ERROR: "true",
+        WHATSAPP_WEB_KEEP_OPEN_ON_ERROR_TIMEOUT_MS: "999999",
+      }),
+    ).toMatchObject({
+      slowMoMs: 2_000,
+      keepOpenOnError: true,
+      keepOpenOnErrorTimeoutMs: 60_000,
     });
   });
 });
@@ -208,6 +289,201 @@ describe("WhatsAppGroupsWebPublisher health", () => {
       expect(result.status).toBe(state);
     },
   );
+});
+
+describe("WhatsAppGroupsWebPublisher safe diagnosis and locate", () => {
+  it("diagnoses structure without typing, opening, drafting or sending", async () => {
+    const page = adapter();
+    const close = vi.fn().mockResolvedValue(undefined);
+    const release = vi.fn().mockResolvedValue(undefined);
+    const browser: WhatsAppWebBrowserLauncher = {
+      isAvailable: vi.fn().mockResolvedValue(true),
+      launchPersistent: vi.fn().mockResolvedValue({ adapter: page, close }),
+    };
+    const profileLock: WhatsAppWebProfileLock = {
+      acquire: vi.fn().mockResolvedValue({
+        key: "lock",
+        token: "token",
+        acquired: true,
+        mode: "redis-url",
+        extend: vi.fn().mockResolvedValue(true),
+        release,
+      }),
+    };
+
+    await expect(
+      new WhatsAppGroupsWebPublisher({
+        config: config(),
+        launcher: browser,
+        profileLock,
+      }).diagnose({ profileKey: "principal" }),
+    ).resolves.toMatchObject({
+      authentication: "CONNECTED",
+      stage: "READY_FOR_GROUP_SEARCH",
+    });
+
+    expect(page.fillGlobalSearch).not.toHaveBeenCalled();
+    expect(page.openGroup).not.toHaveBeenCalled();
+    expect(page.attachImage).not.toHaveBeenCalled();
+    expect(page.fillCaption).not.toHaveBeenCalled();
+    expect(page.fillText).not.toHaveBeenCalled();
+    expect(page.send).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledOnce();
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it("preserves a specific selector stage and sanitized diagnostics", async () => {
+    const safeDiagnostics = {
+      currentOrigin: "https://web.whatsapp.com" as const,
+      interfaceLanguage: "pt" as const,
+      shellRecognized: true,
+      strategiesTried: 7,
+      visible: false,
+      enabled: false,
+      errorCode: "WHATSAPP_WEB_SELECTOR_MISMATCH" as const,
+      rootCause: "SEARCH_INPUT_NOT_VISIBLE" as const,
+    };
+    const page = adapter({
+      locateGroupExact: vi.fn().mockResolvedValue({
+        status: "GROUP_FOUND",
+        exactMatch: true,
+        publishPermission: false,
+      }),
+      openGroup: vi
+        .fn()
+        .mockRejectedValue(
+          new WhatsAppWebStageError(
+            "SEARCH_INPUT_NOT_VISIBLE",
+            safeDiagnostics,
+          ),
+        ),
+    });
+
+    await expect(
+      new WhatsAppGroupsWebPublisher({
+        config: config(),
+        launcher: launcher(page),
+        profileLock: lock(),
+      }).locateGroup({
+        profileKey: "principal",
+        groupDisplayName: "Grupo privado que nao deve aparecer",
+      }),
+    ).resolves.toMatchObject({
+      status: "SELECTOR_MISMATCH",
+      stage: "SEARCH_INPUT_NOT_VISIBLE",
+      rootCause: "SEARCH_INPUT_NOT_VISIBLE",
+      diagnostics: safeDiagnostics,
+    });
+    expect(JSON.stringify(safeDiagnostics)).not.toContain("Grupo privado");
+    expect(page.attachImage).not.toHaveBeenCalled();
+    expect(page.fillCaption).not.toHaveBeenCalled();
+    expect(page.fillText).not.toHaveBeenCalled();
+    expect(page.send).not.toHaveBeenCalled();
+  });
+
+  it("locates an exact writable group and always closes browser and lock", async () => {
+    const page = adapter();
+    const close = vi.fn().mockResolvedValue(undefined);
+    const release = vi.fn().mockResolvedValue(undefined);
+    const browser: WhatsAppWebBrowserLauncher = {
+      isAvailable: vi.fn().mockResolvedValue(true),
+      launchPersistent: vi.fn().mockResolvedValue({ adapter: page, close }),
+    };
+    const profileLock: WhatsAppWebProfileLock = {
+      acquire: vi.fn().mockResolvedValue({
+        key: "lock",
+        token: "token",
+        acquired: true,
+        mode: "redis-url",
+        extend: vi.fn().mockResolvedValue(true),
+        release,
+      }),
+    };
+
+    await expect(
+      new WhatsAppGroupsWebPublisher({
+        config: config(),
+        launcher: browser,
+        profileLock,
+      }).locateGroup({
+        profileKey: "principal",
+        groupDisplayName: "Grupo de Ofertas",
+      }),
+    ).resolves.toMatchObject({
+      status: "GROUP_FOUND",
+      exactMatch: true,
+      publishPermission: true,
+    });
+    expect(page.attachImage).not.toHaveBeenCalled();
+    expect(page.fillCaption).not.toHaveBeenCalled();
+    expect(page.fillText).not.toHaveBeenCalled();
+    expect(page.send).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledOnce();
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it("closes the browser and releases the lock after a locate failure", async () => {
+    const page = adapter({
+      locateGroupExact: vi.fn().mockResolvedValue({
+        status: "GROUP_NOT_FOUND",
+        exactMatch: false,
+        publishPermission: false,
+        errorCode: "WHATSAPP_WEB_GROUP_NOT_FOUND",
+      }),
+    });
+    const close = vi.fn().mockResolvedValue(undefined);
+    const release = vi.fn().mockResolvedValue(undefined);
+    const browser: WhatsAppWebBrowserLauncher = {
+      isAvailable: vi.fn().mockResolvedValue(true),
+      launchPersistent: vi.fn().mockResolvedValue({ adapter: page, close }),
+    };
+    const profileLock: WhatsAppWebProfileLock = {
+      acquire: vi.fn().mockResolvedValue({
+        key: "lock",
+        token: "token",
+        acquired: true,
+        mode: "redis-url",
+        extend: vi.fn().mockResolvedValue(true),
+        release,
+      }),
+    };
+
+    await new WhatsAppGroupsWebPublisher({
+      config: config(),
+      launcher: browser,
+      profileLock,
+    }).locateGroup({
+      profileKey: "principal",
+      groupDisplayName: "Grupo ausente",
+    });
+
+    expect(close).toHaveBeenCalledOnce();
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it("does not open an ambiguous result", async () => {
+    const page = adapter({
+      locateGroupExact: vi.fn().mockResolvedValue({
+        status: "GROUP_AMBIGUOUS",
+        exactMatch: false,
+        publishPermission: false,
+        errorCode: "WHATSAPP_WEB_GROUP_AMBIGUOUS",
+        stage: "MULTIPLE_EXACT_GROUP_RESULTS",
+      }),
+    });
+    const result = await new WhatsAppGroupsWebPublisher({
+      config: config(),
+      launcher: launcher(page),
+      profileLock: lock(),
+    }).locateGroup({
+      profileKey: "principal",
+      groupDisplayName: "Grupo de Ofertas",
+    });
+
+    expect(result.status).toBe("GROUP_AMBIGUOUS");
+    expect(page.openGroup).not.toHaveBeenCalled();
+    expect(page.send).not.toHaveBeenCalled();
+  });
 });
 
 describe("WhatsAppGroupsWebPublisher dry run", () => {

@@ -2,21 +2,36 @@ import type { Locator, Page } from "playwright";
 import {
   WHATSAPP_WEB_URL,
   whatsappWebAccessibleAliases,
+  whatsappWebExactGroupResultSelectors,
   whatsappWebStableSelectors,
 } from "./whatsapp-web-selectors";
-import type {
-  AuthenticationState,
-  OutgoingMessageConfirmation,
-  PreparedDraftInspection,
-  WhatsAppGroupLocationResult,
-  WhatsAppWebPageAdapter,
+import {
+  WhatsAppWebStageError,
+  type AuthenticationState,
+  type OutgoingMessageConfirmation,
+  type PreparedDraftInspection,
+  type WhatsAppGroupLocationResult,
+  type WhatsAppWebControlResult,
+  type WhatsAppWebDiagnosticStage,
+  type WhatsAppWebPageAdapter,
+  type WhatsAppWebSafeDiagnostics,
+  type WhatsAppWebStructureDiagnosticResult,
 } from "./whatsapp-web-types";
 
 function normalizedText(value: string) {
   return value.replace(/\s+/g, " ").trim();
 }
 
+type LocatedControl = WhatsAppWebControlResult & {
+  locator?: Locator;
+  matched?: boolean;
+};
+
 export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter {
+  private globalSearchInput: Locator | null = null;
+  private exactGroupResult: Locator | null = null;
+  private lastLocationDiagnostics: WhatsAppWebSafeDiagnostics | null = null;
+
   constructor(
     private readonly page: Page,
     private readonly confirmationTimeoutMs: number,
@@ -30,14 +45,8 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
   async detectAuthenticationState(): Promise<AuthenticationState> {
     const deadline = Date.now() + this.actionTimeoutMs;
     do {
-      const composerOrSearch = await this.firstVisible([
-        this.page.locator(whatsappWebStableSelectors.chatList),
-        ...whatsappWebAccessibleAliases.search.map((name) =>
-          this.page.getByRole("textbox", { name }),
-        ),
-      ]);
-      if (composerOrSearch) return "CONNECTED";
-
+      const shell = await this.findAuthenticatedShellOnce();
+      if (shell.found) return "CONNECTED";
       const qrVisible = await this.page
         .locator(whatsappWebStableSelectors.qrCanvas)
         .first()
@@ -45,77 +54,308 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
         .catch(() => false);
       const loginVisible = await this.firstVisible([
         this.page.getByText("Log in with phone number", { exact: false }),
+        this.page.getByText("Entrar com número de telefone", { exact: false }),
         this.page.getByText("Entrar com numero de telefone", { exact: false }),
         this.page.getByText("Link with phone number", { exact: false }),
+        this.page.getByText("Vincular con el número de teléfono", {
+          exact: false,
+        }),
       ]);
       if (qrVisible || loginVisible) return "LOGIN_REQUIRED";
-      await this.page.waitForTimeout(250);
+      await this.page.waitForTimeout(200);
     } while (Date.now() < deadline);
     return "UNEXPECTED_STATE";
   }
 
+  async waitForAuthenticatedShell(): Promise<WhatsAppWebControlResult> {
+    const deadline = Date.now() + this.actionTimeoutMs;
+    let stableObservations = 0;
+    let strategiesTried = 0;
+    do {
+      const shell = await this.findAuthenticatedShellOnce();
+      strategiesTried = Math.max(strategiesTried, shell.strategiesTried);
+      if (shell.found) {
+        const overlay = await this.anyVisible(
+          whatsappWebStableSelectors.loadingOverlays.map((selector) =>
+            this.page.locator(selector),
+          ),
+        );
+        stableObservations = overlay ? 0 : stableObservations + 1;
+        if (stableObservations >= 2) return shell;
+      } else {
+        stableObservations = 0;
+      }
+      await this.page.waitForTimeout(200);
+    } while (Date.now() < deadline);
+    return this.controlFailure(
+      "AUTHENTICATED_SHELL_NOT_RECOGNIZED",
+      strategiesTried || whatsappWebStableSelectors.authenticatedShell.length,
+    );
+  }
+
+  async findGlobalSearchTrigger(): Promise<WhatsAppWebControlResult> {
+    return this.findGlobalSearchTriggerControl();
+  }
+
+  async findGlobalSearchInput(): Promise<WhatsAppWebControlResult> {
+    return this.findGlobalSearchInputControl();
+  }
+
+  async openGlobalSearch(): Promise<WhatsAppWebControlResult> {
+    const existing = await this.findGlobalSearchInputControl();
+    if (existing.found) return existing;
+
+    const trigger = await this.findGlobalSearchTriggerControl();
+    if (!trigger.found || !trigger.locator) return trigger;
+    if (!trigger.visible || !trigger.enabled) {
+      return this.controlFailure(
+        "SEARCH_TRIGGER_NOT_INTERACTABLE",
+        trigger.strategiesTried,
+        trigger,
+      );
+    }
+    try {
+      await trigger.locator.click();
+    } catch {
+      return this.controlFailure(
+        "SEARCH_OPEN_FAILED",
+        trigger.strategiesTried,
+        trigger,
+      );
+    }
+
+    const deadline = Date.now() + this.actionTimeoutMs;
+    do {
+      const input = await this.findGlobalSearchInputControl();
+      if (input.found) return input;
+      await this.page.waitForTimeout(150);
+    } while (Date.now() < deadline);
+    return this.controlFailure(
+      "SEARCH_INPUT_NOT_FOUND",
+      trigger.strategiesTried,
+    );
+  }
+
+  async fillGlobalSearch(text: string): Promise<WhatsAppWebControlResult> {
+    const opened = await this.openGlobalSearch();
+    if (!opened.found || !this.globalSearchInput) return opened;
+    if (!opened.visible)
+      return this.controlFailure(
+        "SEARCH_INPUT_NOT_VISIBLE",
+        opened.strategiesTried,
+        opened,
+      );
+    if (!opened.editable)
+      return this.controlFailure(
+        "SEARCH_INPUT_NOT_EDITABLE",
+        opened.strategiesTried,
+        opened,
+      );
+    try {
+      await this.globalSearchInput.fill("");
+      await this.globalSearchInput.fill(text);
+      return opened;
+    } catch {
+      return this.controlFailure(
+        "SEARCH_INPUT_NOT_EDITABLE",
+        opened.strategiesTried,
+        opened,
+      );
+    }
+  }
+
+  async waitForSearchResults(): Promise<WhatsAppWebControlResult> {
+    const deadline = Date.now() + this.actionTimeoutMs;
+    let containerRecognized = false;
+    do {
+      const container = await this.firstVisible(
+        whatsappWebStableSelectors.searchResults.map((selector) =>
+          this.page.locator(selector),
+        ),
+      );
+      if (!container) {
+        await this.page.waitForTimeout(150);
+        continue;
+      }
+      containerRecognized = true;
+      const candidateCount = await this.countFirstAvailableStrategy(
+        whatsappWebStableSelectors.genericSearchCandidate,
+      );
+      const empty = await this.firstVisible(
+        whatsappWebAccessibleAliases.emptySearch.map((name) =>
+          this.page.getByText(name, { exact: false }),
+        ),
+      );
+      if (candidateCount > 0 || empty) {
+        return {
+          found: true,
+          stage: "READY_FOR_GROUP_SEARCH",
+          strategiesTried: whatsappWebStableSelectors.searchResults.length,
+          visible: true,
+          enabled: true,
+        };
+      }
+      await this.page.waitForTimeout(150);
+    } while (Date.now() < deadline);
+    return this.controlFailure(
+      containerRecognized
+        ? "SEARCH_RESULTS_NOT_READY"
+        : "SEARCH_RESULTS_CONTAINER_NOT_FOUND",
+      whatsappWebStableSelectors.searchResults.length,
+    );
+  }
+
+  async diagnoseStructure(): Promise<WhatsAppWebStructureDiagnosticResult> {
+    const startedAt = Date.now();
+    const authentication = await this.detectAuthenticationState();
+    if (authentication !== "CONNECTED") {
+      return {
+        authentication,
+        shellRecognized: false,
+        searchTriggerFound: false,
+        searchInputFound: false,
+        stage: "AUTHENTICATED_SHELL_NOT_RECOGNIZED",
+        diagnostics: await this.safeDiagnostics({
+          shellRecognized: false,
+          durationMs: Date.now() - startedAt,
+          rootCause: "AUTHENTICATED_SHELL_NOT_RECOGNIZED",
+        }),
+      };
+    }
+    const shell = await this.waitForAuthenticatedShell();
+    if (!shell.found)
+      return this.diagnosticFailure(authentication, shell, startedAt);
+
+    const inputBefore = await this.findGlobalSearchInputControl();
+    if (inputBefore.found) {
+      return this.diagnosticReady(
+        authentication,
+        true,
+        false,
+        inputBefore,
+        startedAt,
+      );
+    }
+    const trigger = await this.findGlobalSearchTriggerControl();
+    if (!trigger.found)
+      return this.diagnosticFailure(authentication, trigger, startedAt);
+    const inputAfter = await this.openGlobalSearch();
+    if (!inputAfter.found)
+      return this.diagnosticFailure(
+        authentication,
+        inputAfter,
+        startedAt,
+        true,
+      );
+    return this.diagnosticReady(
+      authentication,
+      true,
+      true,
+      inputAfter,
+      startedAt,
+    );
+  }
+
   async locateGroupExact(name: string): Promise<WhatsAppGroupLocationResult> {
-    const search = await this.searchBox();
-    if (!search) {
-      return this.locationFailure(
-        "SELECTOR_MISMATCH",
-        "WHATSAPP_WEB_SELECTOR_MISMATCH",
+    const startedAt = Date.now();
+    const shell = await this.waitForAuthenticatedShell();
+    if (!shell.found) return this.locationSelectorFailure(shell, startedAt);
+    const search = await this.fillGlobalSearch(name);
+    if (!search.found) return this.locationSelectorFailure(search, startedAt);
+    const results = await this.waitForSearchResults();
+    if (!results.found) return this.locationSelectorFailure(results, startedAt);
+
+    const exact = await this.findExactGroupResult(name);
+    const diagnostics = await this.safeDiagnostics({
+      shellRecognized: true,
+      strategiesTried: exact.strategiesTried,
+      candidateCount: exact.candidateCount,
+      exactMatchCount: exact.count,
+      visible: exact.visible,
+      enabled: exact.enabled,
+      ...(search.editable !== undefined ? { editable: search.editable } : {}),
+      durationMs: Date.now() - startedAt,
+    });
+    this.lastLocationDiagnostics = diagnostics;
+    if (exact.count === 0) {
+      return {
+        status: "GROUP_NOT_FOUND",
+        exactMatch: false,
+        publishPermission: false,
+        errorCode: "WHATSAPP_WEB_GROUP_NOT_FOUND",
+        stage: "EXACT_GROUP_RESULT_NOT_FOUND",
+        rootCause: "EXACT_GROUP_RESULT_NOT_FOUND",
+        diagnostics: {
+          ...diagnostics,
+          errorCode: "WHATSAPP_WEB_GROUP_NOT_FOUND",
+          rootCause: "EXACT_GROUP_RESULT_NOT_FOUND",
+        },
+      };
+    }
+    if (exact.count > 1) {
+      return {
+        status: "GROUP_AMBIGUOUS",
+        exactMatch: false,
+        publishPermission: false,
+        errorCode: "WHATSAPP_WEB_GROUP_AMBIGUOUS",
+        stage: "MULTIPLE_EXACT_GROUP_RESULTS",
+        rootCause: "MULTIPLE_EXACT_GROUP_RESULTS",
+        diagnostics: {
+          ...diagnostics,
+          errorCode: "WHATSAPP_WEB_GROUP_AMBIGUOUS",
+          rootCause: "MULTIPLE_EXACT_GROUP_RESULTS",
+        },
+      };
+    }
+    if (!exact.locator || !exact.visible || !exact.enabled) {
+      return this.locationSelectorFailure(
+        this.controlFailure(
+          "GROUP_RESULT_NOT_INTERACTABLE",
+          exact.strategiesTried,
+          {
+            visible: exact.visible,
+            enabled: exact.enabled,
+          },
+        ),
+        startedAt,
       );
     }
-    await search.fill(name);
-    await this.page.waitForTimeout(500);
-    const titled = this.page.locator(`[title=${JSON.stringify(name)}]`);
-    const count = await titled.count();
-    const exact: Locator[] = [];
-    for (let index = 0; index < count; index += 1) {
-      const candidate = titled.nth(index);
-      const title = await candidate.getAttribute("title");
-      if (title && normalizedText(title) === normalizedText(name))
-        exact.push(candidate);
-    }
-    if (exact.length === 0) {
-      return this.locationFailure(
-        "GROUP_NOT_FOUND",
-        "WHATSAPP_WEB_GROUP_NOT_FOUND",
-      );
-    }
-    if (exact.length > 1) {
-      return this.locationFailure(
-        "GROUP_AMBIGUOUS",
-        "WHATSAPP_WEB_GROUP_AMBIGUOUS",
-      );
-    }
+    this.exactGroupResult = exact.locator;
     return {
       status: "GROUP_FOUND",
       exactMatch: true,
       publishPermission: false,
+      stage: "GROUP_FOUND",
+      diagnostics,
     };
   }
 
   async openGroup(name: string) {
-    const candidate = this.page
-      .locator(`[title=${JSON.stringify(name)}]`)
-      .first();
-    if (!(await candidate.isVisible().catch(() => false))) {
-      throw new Error("WHATSAPP_WEB_GROUP_NOT_FOUND");
+    if (!this.exactGroupResult) {
+      throw await this.stageError("GROUP_RESULT_NOT_INTERACTABLE");
     }
-    await candidate.click();
+    try {
+      await this.exactGroupResult.click();
+    } catch {
+      throw await this.stageError("GROUP_OPEN_FAILED");
+    }
+    const header = await this.waitForOpenedHeader(name);
+    if (!header.found) throw await this.stageError(header.stage, header);
   }
 
   async verifyOpenedGroup(name: string) {
-    const titles = this.page.locator(
-      whatsappWebStableSelectors.conversationTitle,
-    );
-    const count = await titles.count();
-    for (let index = 0; index < count; index += 1) {
-      const title = await titles.nth(index).getAttribute("title");
-      if (title && normalizedText(title) === normalizedText(name)) return true;
-    }
-    return false;
+    return (await this.waitForOpenedHeader(name)).found;
   }
 
   async verifyPublishPermission() {
-    return Boolean(await this.composer());
+    const deadline = Date.now() + this.actionTimeoutMs;
+    do {
+      const composer = await this.findWritableComposer();
+      if (composer.found) return true;
+      if (await this.hasReadOnlySignal()) return false;
+      await this.page.waitForTimeout(150);
+    } while (Date.now() < deadline);
+    throw await this.stageError("COMPOSER_NOT_FOUND");
   }
 
   async attachImage(path: string) {
@@ -127,12 +367,10 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
     ]);
     if (!attach) throw new Error("WHATSAPP_WEB_SELECTOR_MISMATCH");
     await attach.click();
-    const input = this.page
-      .locator("input[type='file'][accept*='image']")
-      .last();
+    const input = this.page.locator("input[type='file'][accept*='image']");
     if ((await input.count()) === 0)
       throw new Error("WHATSAPP_WEB_MEDIA_UPLOAD_FAILED");
-    await input.setInputFiles(path);
+    await input.last().setInputFiles(path);
   }
 
   async fillCaption(text: string) {
@@ -149,9 +387,10 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
   }
 
   async fillText(text: string) {
-    const composer = await this.composer();
-    if (!composer) throw new Error("WHATSAPP_WEB_NO_PUBLISH_PERMISSION");
-    await composer.fill(text);
+    const composer = await this.findWritableComposer();
+    if (!composer.found || !composer.locator)
+      throw new Error("WHATSAPP_WEB_NO_PUBLISH_PERMISSION");
+    await composer.locator.fill(text);
   }
 
   async inspectPreparedDraft(input: {
@@ -226,7 +465,9 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
       ...whatsappWebAccessibleAliases.caption.map((name) =>
         this.page.getByRole("textbox", { name }),
       ),
-      this.page.locator(whatsappWebStableSelectors.composeBox),
+      ...whatsappWebStableSelectors.composeBox.map((selector) =>
+        this.page.locator(selector),
+      ),
     ]);
     if (captionOrComposer) await captionOrComposer.fill("");
     const cancel = await this.firstVisible(
@@ -238,51 +479,423 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
   }
 
   async isDraftClear() {
-    const composer = await this.composer();
-    if (!composer) return true;
-    return normalizedText(await composer.innerText().catch(() => "")) === "";
+    const composer = await this.findWritableComposer();
+    if (!composer.found || !composer.locator) return true;
+    return (
+      normalizedText(await composer.locator.innerText().catch(() => "")) === ""
+    );
   }
 
   async capturePreparedDraft(path: string) {
-    const draft = this.page
-      .locator("[data-testid='media-caption-input-container'], footer")
-      .last();
-    if (!(await draft.isVisible().catch(() => false))) {
+    const draft = this.page.locator(
+      "[data-testid='media-caption-input-container'], footer",
+    );
+    const count = await draft.count();
+    if (
+      count === 0 ||
+      !(await draft
+        .nth(count - 1)
+        .isVisible()
+        .catch(() => false))
+    )
       throw new Error("WHATSAPP_WEB_SELECTOR_MISMATCH");
+    await draft.nth(count - 1).screenshot({ path });
+  }
+
+  private async findAuthenticatedShellOnce(): Promise<LocatedControl> {
+    return this.findControl(
+      whatsappWebStableSelectors.authenticatedShell.map((selector) =>
+        this.page.locator(selector),
+      ),
+      "APP_SHELL_NOT_FOUND",
+      false,
+    );
+  }
+
+  private async findGlobalSearchTriggerControl(): Promise<LocatedControl> {
+    const sidebar = await this.sidebar();
+    const roleLocators = sidebar
+      ? whatsappWebAccessibleAliases.search.map((name) =>
+          sidebar.getByRole("button", { name, exact: true }),
+        )
+      : [];
+    const result = await this.findControl(
+      [
+        ...roleLocators,
+        ...whatsappWebStableSelectors.searchTrigger.map((selector) =>
+          this.page.locator(selector),
+        ),
+      ],
+      "SEARCH_TRIGGER_NOT_FOUND",
+      false,
+    );
+    if (!result.found && result.matched) {
+      return this.controlFailure(
+        "SEARCH_TRIGGER_NOT_INTERACTABLE",
+        result.strategiesTried,
+        result,
+        true,
+      );
     }
-    await draft.screenshot({ path });
+    return result;
   }
 
-  private async searchBox() {
-    return this.firstVisible([
-      this.page.locator(whatsappWebStableSelectors.searchBox),
-      ...whatsappWebAccessibleAliases.search.map((name) =>
-        this.page.getByRole("textbox", { name }),
-      ),
-    ]);
+  private async findGlobalSearchInputControl(): Promise<LocatedControl> {
+    const sidebar = await this.sidebar();
+    const roleLocators = sidebar
+      ? whatsappWebAccessibleAliases.search.map((name) =>
+          sidebar.getByRole("textbox", { name, exact: true }),
+        )
+      : [];
+    let result = await this.findControl(
+      [
+        ...roleLocators,
+        ...whatsappWebStableSelectors.searchInput.map((selector) =>
+          this.page.locator(selector),
+        ),
+      ],
+      "SEARCH_INPUT_NOT_FOUND",
+      true,
+    );
+    if (!result.found && result.matched) {
+      result = this.controlFailure(
+        result.visible
+          ? "SEARCH_INPUT_NOT_EDITABLE"
+          : "SEARCH_INPUT_NOT_VISIBLE",
+        result.strategiesTried,
+        result,
+        true,
+      );
+    }
+    if (result.found && result.locator) this.globalSearchInput = result.locator;
+    return result;
   }
 
-  private async composer() {
-    return this.firstVisible([
-      this.page.locator(whatsappWebStableSelectors.composeBox),
-      ...whatsappWebAccessibleAliases.composer.map((name) =>
-        this.page.getByRole("textbox", { name }),
+  private async findWritableComposer(): Promise<LocatedControl> {
+    const main = this.page.locator("#main, main");
+    const roleLocators = whatsappWebAccessibleAliases.composer.map((name) =>
+      main.getByRole("textbox", { name, exact: true }),
+    );
+    return this.findControl(
+      [
+        ...roleLocators,
+        ...whatsappWebStableSelectors.composeBox.map((selector) =>
+          this.page.locator(selector),
+        ),
+      ],
+      "COMPOSER_NOT_FOUND",
+      true,
+    );
+  }
+
+  private async findExactGroupResult(name: string) {
+    let strategiesTried = 0;
+    let genericCandidateCount = 0;
+    for (const selector of whatsappWebExactGroupResultSelectors(name)) {
+      strategiesTried += 1;
+      const locator = this.page.locator(selector);
+      const count = await locator.count().catch(() => 0);
+      if (count === 0) continue;
+      const first = locator.nth(0);
+      const visible = await first.isVisible().catch(() => false);
+      const enabled = await first.isEnabled().catch(() => false);
+      return {
+        count,
+        locator: first,
+        visible,
+        enabled,
+        strategiesTried,
+        candidateCount: count,
+      };
+    }
+    genericCandidateCount = await this.countFirstAvailableStrategy(
+      whatsappWebStableSelectors.genericSearchCandidate,
+    );
+    return {
+      count: 0,
+      locator: null,
+      visible: false,
+      enabled: false,
+      strategiesTried,
+      candidateCount: genericCandidateCount,
+    };
+  }
+
+  private async waitForOpenedHeader(
+    name: string,
+  ): Promise<WhatsAppWebControlResult> {
+    const deadline = Date.now() + this.actionTimeoutMs;
+    let headerRecognized = false;
+    do {
+      for (const selector of whatsappWebStableSelectors.conversationTitle) {
+        const titles = this.page.locator(selector);
+        const count = await titles.count().catch(() => 0);
+        if (count === 0) continue;
+        headerRecognized = true;
+        for (let index = 0; index < count; index += 1) {
+          const candidate = titles.nth(index);
+          if (!(await candidate.isVisible().catch(() => false))) continue;
+          const title =
+            (await candidate.getAttribute("title").catch(() => null)) ??
+            (await candidate.innerText().catch(() => ""));
+          if (normalizedText(title) === normalizedText(name)) {
+            return {
+              found: true,
+              stage: "GROUP_FOUND",
+              strategiesTried:
+                whatsappWebStableSelectors.conversationTitle.length,
+              visible: true,
+              enabled: true,
+            };
+          }
+        }
+      }
+      await this.page.waitForTimeout(150);
+    } while (Date.now() < deadline);
+    return this.controlFailure(
+      headerRecognized ? "GROUP_HEADER_MISMATCH" : "GROUP_HEADER_NOT_FOUND",
+      whatsappWebStableSelectors.conversationTitle.length,
+    );
+  }
+
+  private async hasReadOnlySignal() {
+    const footer = this.page.locator(
+      whatsappWebStableSelectors.readOnlyFooter.join(","),
+    );
+    for (const text of whatsappWebAccessibleAliases.readOnly) {
+      const signal = footer.getByText(text, { exact: false });
+      if (
+        (await signal.count()) > 0 &&
+        (await signal
+          .first()
+          .isVisible()
+          .catch(() => false))
+      )
+        return true;
+    }
+    return false;
+  }
+
+  private async sidebar() {
+    return this.firstVisible(
+      whatsappWebStableSelectors.sidebar.map((selector) =>
+        this.page.locator(selector),
       ),
-    ]);
+    );
+  }
+
+  private async findControl(
+    locators: Locator[],
+    missingStage: WhatsAppWebDiagnosticStage,
+    requireEditable: boolean,
+  ): Promise<LocatedControl> {
+    let strategiesTried = 0;
+    let sawVisible = false;
+    let sawEnabled = false;
+    let matched = false;
+    for (const locator of locators) {
+      strategiesTried += 1;
+      const count = await locator.count().catch(() => 0);
+      if (count === 0) continue;
+      matched = true;
+      for (let index = 0; index < count; index += 1) {
+        const candidate = locator.nth(index);
+        const visible = await candidate.isVisible().catch(() => false);
+        const enabled = await candidate.isEnabled().catch(() => false);
+        const editable = requireEditable
+          ? await candidate.isEditable().catch(() => false)
+          : undefined;
+        sawVisible ||= visible;
+        sawEnabled ||= enabled;
+        if (visible && enabled && (!requireEditable || editable)) {
+          return {
+            found: true,
+            stage: "READY_FOR_GROUP_SEARCH",
+            strategiesTried,
+            visible,
+            enabled,
+            ...(requireEditable && editable !== undefined ? { editable } : {}),
+            locator: candidate,
+            matched: true,
+          };
+        }
+      }
+    }
+    return this.controlFailure(
+      missingStage,
+      strategiesTried,
+      {
+        visible: sawVisible,
+        enabled: sawEnabled,
+        ...(requireEditable ? { editable: false } : {}),
+      },
+      matched,
+    );
   }
 
   private async firstVisible(locators: Locator[]) {
     for (const locator of locators) {
-      const candidate = locator.first();
-      if (await candidate.isVisible().catch(() => false)) return candidate;
+      const count = await locator.count().catch(() => 0);
+      for (let index = 0; index < count; index += 1) {
+        const candidate = locator.nth(index);
+        if (await candidate.isVisible().catch(() => false)) return candidate;
+      }
     }
     return null;
   }
 
-  private locationFailure(
-    status: WhatsAppGroupLocationResult["status"],
-    errorCode: NonNullable<WhatsAppGroupLocationResult["errorCode"]>,
+  private async anyVisible(locators: Locator[]) {
+    return Boolean(await this.firstVisible(locators));
+  }
+
+  private async countFirstAvailableStrategy(selectors: readonly string[]) {
+    for (const selector of selectors) {
+      const count = await this.page
+        .locator(selector)
+        .count()
+        .catch(() => 0);
+      if (count > 0) return count;
+    }
+    return 0;
+  }
+
+  private controlFailure(
+    stage: WhatsAppWebDiagnosticStage,
+    strategiesTried: number,
+    state: Partial<WhatsAppWebControlResult> = {},
+    matched = false,
+  ): LocatedControl {
+    return {
+      found: false,
+      stage,
+      strategiesTried,
+      visible: state.visible ?? false,
+      enabled: state.enabled ?? false,
+      ...(state.editable !== undefined ? { editable: state.editable } : {}),
+      matched,
+    };
+  }
+
+  private locationSelectorFailure(
+    control: WhatsAppWebControlResult,
+    startedAt: number,
   ): WhatsAppGroupLocationResult {
-    return { status, exactMatch: false, publishPermission: false, errorCode };
+    const diagnostics: WhatsAppWebSafeDiagnostics = {
+      currentOrigin: "https://web.whatsapp.com",
+      shellRecognized:
+        control.stage !== "APP_SHELL_NOT_FOUND" &&
+        control.stage !== "AUTHENTICATED_SHELL_NOT_RECOGNIZED",
+      strategiesTried: control.strategiesTried,
+      visible: control.visible,
+      enabled: control.enabled,
+      ...(control.editable !== undefined ? { editable: control.editable } : {}),
+      durationMs: Date.now() - startedAt,
+      errorCode: "WHATSAPP_WEB_SELECTOR_MISMATCH",
+      rootCause: control.stage,
+    };
+    return {
+      status: "SELECTOR_MISMATCH",
+      exactMatch: false,
+      publishPermission: false,
+      errorCode: "WHATSAPP_WEB_SELECTOR_MISMATCH",
+      stage: control.stage,
+      rootCause: control.stage,
+      diagnostics,
+    };
+  }
+
+  private async safeDiagnostics(
+    input: Omit<
+      WhatsAppWebSafeDiagnostics,
+      "currentOrigin" | "interfaceLanguage"
+    >,
+  ): Promise<WhatsAppWebSafeDiagnostics> {
+    const language = await this.page
+      .locator("html")
+      .getAttribute("lang")
+      .catch(() => null);
+    const interfaceLanguage = language?.toLowerCase().startsWith("pt")
+      ? "pt"
+      : language?.toLowerCase().startsWith("es")
+        ? "es"
+        : language?.toLowerCase().startsWith("en")
+          ? "en"
+          : "unknown";
+    return {
+      currentOrigin: "https://web.whatsapp.com",
+      interfaceLanguage,
+      ...input,
+    };
+  }
+
+  private async stageError(
+    stage: WhatsAppWebDiagnosticStage,
+    state: Partial<WhatsAppWebControlResult> = {},
+  ) {
+    return new WhatsAppWebStageError(
+      stage,
+      await this.safeDiagnostics({
+        ...(this.lastLocationDiagnostics ?? {}),
+        visible: state.visible ?? false,
+        enabled: state.enabled ?? false,
+        ...(state.editable !== undefined ? { editable: state.editable } : {}),
+        errorCode: "WHATSAPP_WEB_SELECTOR_MISMATCH",
+        rootCause: stage,
+      }),
+    );
+  }
+
+  private async diagnosticReady(
+    authentication: AuthenticationState,
+    shellRecognized: boolean,
+    searchTriggerFound: boolean,
+    control: WhatsAppWebControlResult,
+    startedAt: number,
+  ): Promise<WhatsAppWebStructureDiagnosticResult> {
+    return {
+      authentication,
+      shellRecognized,
+      searchTriggerFound,
+      searchInputFound: true,
+      stage: "READY_FOR_GROUP_SEARCH",
+      diagnostics: await this.safeDiagnostics({
+        shellRecognized,
+        strategiesTried: control.strategiesTried,
+        visible: control.visible,
+        enabled: control.enabled,
+        ...(control.editable !== undefined
+          ? { editable: control.editable }
+          : {}),
+        durationMs: Date.now() - startedAt,
+      }),
+    };
+  }
+
+  private async diagnosticFailure(
+    authentication: AuthenticationState,
+    control: WhatsAppWebControlResult,
+    startedAt: number,
+    searchTriggerFound = false,
+  ): Promise<WhatsAppWebStructureDiagnosticResult> {
+    return {
+      authentication,
+      shellRecognized:
+        control.stage !== "APP_SHELL_NOT_FOUND" &&
+        control.stage !== "AUTHENTICATED_SHELL_NOT_RECOGNIZED",
+      searchTriggerFound,
+      searchInputFound: false,
+      stage: control.stage,
+      diagnostics: await this.safeDiagnostics({
+        strategiesTried: control.strategiesTried,
+        visible: control.visible,
+        enabled: control.enabled,
+        ...(control.editable !== undefined
+          ? { editable: control.editable }
+          : {}),
+        durationMs: Date.now() - startedAt,
+        errorCode: "WHATSAPP_WEB_SELECTOR_MISMATCH",
+        rootCause: control.stage,
+      }),
+    };
   }
 }

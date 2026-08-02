@@ -26,6 +26,9 @@ WHATSAPP_WEB_PROFILE_LOCK_TTL_SECONDS="180"
 WHATSAPP_WEB_MAX_PUBLICATIONS_PER_RUN="1"
 WHATSAPP_WEB_AUTO_PAUSE_AFTER_FIRST_SUCCESS="true"
 WHATSAPP_WEB_ALLOW_TEXT_FALLBACK="true"
+WHATSAPP_WEB_SLOW_MO_MS="0"
+WHATSAPP_WEB_KEEP_OPEN_ON_ERROR="false"
+WHATSAPP_WEB_KEEP_OPEN_ON_ERROR_TIMEOUT_MS="30000"
 ```
 
 Profiles and debug output are Git-ignored. `webProfileKey` accepts only ASCII letters, digits, hyphen and underscore and is resolved below the configured root. Do not point it at or copy a personal browser profile.
@@ -36,12 +39,16 @@ Profiles and debug output are Git-ignored. `webProfileKey` accepts only ASCII le
 npm run whatsapp:web:install-browser
 npm run whatsapp:web:login -- --profile principal
 npm run whatsapp:web:health -- --profile principal
+npm run whatsapp:web:diagnose -- --profile principal
+npm run whatsapp:web:diagnose -- --channel-id <CHANNEL_ID>
 npm run whatsapp:web:locate -- --channel-id <CHANNEL_ID>
 npm run whatsapp:web:dry-run -- --publication-id <PUBLICATION_ID>
 npm run whatsapp:web:publish -- --publication-id <PUBLICATION_ID> --confirm-send
 ```
 
 Login opens visible Chromium and waits for manual QR interaction without capturing it. Health detects authenticated UI, not HTTP 200. Locate uses the persisted `groupDisplayName`, whitespace-only normalization, exact matching, opened-title verification and composer permission; it never accepts a CLI group-name override or chooses the first ambiguous result.
+
+Diagnose by profile recognizes the authenticated shell and global-search controls without typing or opening a conversation. Diagnose by channel performs only the same exact locate validation. Diagnostics contain structural stage, language, strategy/count flags and timing; they never contain chat names, messages, phone numbers, HTML, QR data or session secrets. `WHATSAPP_WEB_SLOW_MO_MS` is visual assistance only. `WHATSAPP_WEB_KEEP_OPEN_ON_ERROR` applies only to explicit local `diagnose` and `locate` commands, is bounded by the configured timeout (maximum 60 seconds), and still closes the browser and releases the Redis lock.
 
 Dry-run requires the feature flag, ownership confirmation, connected session, Redis, exact group and `WEB_EXPERIMENTAL`. It prepares the safe image or configured text fallback, fills the immutable Publication snapshot, checks the unique title snippet and affiliate URL, does not invoke send, clears the draft and persists a configuration fingerprint. A change to channel ID, group name, profile key, mode or `sendImage` invalidates that fingerprint.
 

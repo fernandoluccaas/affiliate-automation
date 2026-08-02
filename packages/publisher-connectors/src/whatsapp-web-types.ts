@@ -39,6 +39,72 @@ export type WhatsAppWebHealthResult = {
   errorCode?: WhatsAppWebErrorCode;
 };
 
+export type WhatsAppWebDiagnosticStage =
+  | "APP_SHELL_NOT_FOUND"
+  | "AUTHENTICATED_SHELL_NOT_RECOGNIZED"
+  | "SEARCH_TRIGGER_NOT_FOUND"
+  | "SEARCH_TRIGGER_NOT_INTERACTABLE"
+  | "SEARCH_OPEN_FAILED"
+  | "SEARCH_INPUT_NOT_FOUND"
+  | "SEARCH_INPUT_NOT_VISIBLE"
+  | "SEARCH_INPUT_NOT_EDITABLE"
+  | "SEARCH_RESULTS_CONTAINER_NOT_FOUND"
+  | "SEARCH_RESULTS_NOT_READY"
+  | "EXACT_GROUP_RESULT_NOT_FOUND"
+  | "MULTIPLE_EXACT_GROUP_RESULTS"
+  | "GROUP_RESULT_NOT_INTERACTABLE"
+  | "GROUP_OPEN_FAILED"
+  | "GROUP_HEADER_NOT_FOUND"
+  | "GROUP_HEADER_MISMATCH"
+  | "COMPOSER_NOT_FOUND"
+  | "PUBLISH_PERMISSION_UNDETERMINED"
+  | "READY_FOR_GROUP_SEARCH"
+  | "GROUP_FOUND";
+
+export type WhatsAppWebSafeDiagnostics = {
+  currentOrigin: "https://web.whatsapp.com";
+  interfaceLanguage?: "pt" | "en" | "es" | "unknown";
+  shellRecognized?: boolean;
+  strategiesTried?: number;
+  candidateCount?: number;
+  visible?: boolean;
+  enabled?: boolean;
+  editable?: boolean;
+  exactMatchCount?: number;
+  durationMs?: number;
+  errorCode?: WhatsAppWebErrorCode;
+  rootCause?: WhatsAppWebDiagnosticStage;
+};
+
+export type WhatsAppWebControlResult = {
+  found: boolean;
+  stage: WhatsAppWebDiagnosticStage;
+  strategiesTried: number;
+  visible: boolean;
+  enabled: boolean;
+  editable?: boolean;
+};
+
+export type WhatsAppWebStructureDiagnosticResult = {
+  authentication: AuthenticationState;
+  shellRecognized: boolean;
+  searchTriggerFound: boolean;
+  searchInputFound: boolean;
+  stage: WhatsAppWebDiagnosticStage;
+  diagnostics: WhatsAppWebSafeDiagnostics;
+};
+
+export class WhatsAppWebStageError extends Error {
+  constructor(
+    public readonly stage: WhatsAppWebDiagnosticStage,
+    public readonly diagnostics: WhatsAppWebSafeDiagnostics,
+    public readonly errorCode: WhatsAppWebErrorCode = "WHATSAPP_WEB_SELECTOR_MISMATCH",
+  ) {
+    super(errorCode);
+    this.name = "WhatsAppWebStageError";
+  }
+}
+
 export type WhatsAppGroupLocationResult = {
   status:
     | "GROUP_FOUND"
@@ -50,6 +116,9 @@ export type WhatsAppGroupLocationResult = {
   exactMatch: boolean;
   publishPermission: boolean;
   errorCode?: WhatsAppWebErrorCode;
+  stage?: WhatsAppWebDiagnosticStage;
+  rootCause?: WhatsAppWebDiagnosticStage;
+  diagnostics?: WhatsAppWebSafeDiagnostics;
 };
 
 export type AuthenticationState =
@@ -68,6 +137,13 @@ export type OutgoingMessageConfirmation = PreparedDraftInspection & {
 export interface WhatsAppWebPageAdapter {
   navigate(): Promise<void>;
   detectAuthenticationState(): Promise<AuthenticationState>;
+  waitForAuthenticatedShell(): Promise<WhatsAppWebControlResult>;
+  findGlobalSearchTrigger(): Promise<WhatsAppWebControlResult>;
+  findGlobalSearchInput(): Promise<WhatsAppWebControlResult>;
+  openGlobalSearch(): Promise<WhatsAppWebControlResult>;
+  fillGlobalSearch(text: string): Promise<WhatsAppWebControlResult>;
+  waitForSearchResults(): Promise<WhatsAppWebControlResult>;
+  diagnoseStructure(): Promise<WhatsAppWebStructureDiagnosticResult>;
   locateGroupExact(name: string): Promise<WhatsAppGroupLocationResult>;
   openGroup(name: string): Promise<void>;
   verifyOpenedGroup(name: string): Promise<boolean>;
@@ -105,6 +181,7 @@ export interface WhatsAppWebBrowserLauncher {
     actionTimeoutMs: number;
     navigationTimeoutMs: number;
     confirmationTimeoutMs: number;
+    slowMoMs?: number;
   }): Promise<BrowserSession>;
 }
 

@@ -135,6 +135,7 @@ async function login(profileValue: string) {
       actionTimeoutMs: config.actionTimeoutMs,
       navigationTimeoutMs: config.navigationTimeoutMs,
       confirmationTimeoutMs: config.confirmationTimeoutMs,
+      slowMoMs: config.slowMoMs,
     });
     await session.adapter.navigate();
     process.stdout.write(
@@ -159,7 +160,21 @@ async function login(profileValue: string) {
 
 async function main() {
   const command = process.argv[2];
-  const publisher = new WhatsAppGroupsWebPublisher();
+  const runtimeConfig = getWhatsAppWebRuntimeConfig();
+  const localDiagnosticCommand = command === "diagnose" || command === "locate";
+  const localDiagnosticKeepOpenOnErrorMs =
+    localDiagnosticCommand && runtimeConfig.keepOpenOnError
+      ? runtimeConfig.keepOpenOnErrorTimeoutMs
+      : 0;
+  if (localDiagnosticKeepOpenOnErrorMs > 0) {
+    process.stderr.write(
+      `Diagnostico local: o browser permanecera aberto por no maximo ${localDiagnosticKeepOpenOnErrorMs}ms somente se houver falha.\n`,
+    );
+  }
+  const publisher = new WhatsAppGroupsWebPublisher({
+    config: runtimeConfig,
+    localDiagnosticKeepOpenOnErrorMs,
+  });
 
   if (command === "login") {
     await login(option("--profile") || "");
@@ -189,6 +204,29 @@ async function main() {
     return;
   }
 
+  if (command === "diagnose") {
+    const channelId = option("--channel-id");
+    if (channelId) {
+      const channel = await prisma.channel.findUnique({
+        where: { id: channelId },
+      });
+      if (!channel || channel.type !== "WHATSAPP_GROUPS")
+        throw new Error("CHANNEL_NOT_FOUND");
+      const input = channelInput(channel);
+      const result = await publisher.locateGroup({
+        profileKey: input.webProfileKey,
+        groupDisplayName: input.groupDisplayName,
+      });
+      process.stdout.write(`${JSON.stringify(result)}\n`);
+      return;
+    }
+    const profileKey = sanitizeWhatsAppWebProfileKey(option("--profile") || "");
+    process.stdout.write(
+      `${JSON.stringify(await publisher.diagnose({ profileKey }))}\n`,
+    );
+    return;
+  }
+
   if (command === "locate") {
     const channelId = option("--channel-id");
     if (!channelId) throw new Error("CHANNEL_ID_REQUIRED");
@@ -206,6 +244,9 @@ async function main() {
       webLastGroupLocationStatus: result.status,
       webLastGroupLocationAt: new Date().toISOString(),
       webLastError: result.errorCode ?? null,
+      webLastDiagnosticStage: result.stage ?? null,
+      webLastDiagnosticRootCause: result.rootCause ?? null,
+      webLastSafeDiagnostics: result.diagnostics ?? null,
     });
     process.stdout.write(`${JSON.stringify(result)}\n`);
     return;
@@ -281,7 +322,7 @@ async function main() {
     return;
   }
 
-  throw new Error("USAGE: login|health|locate|dry-run|publish");
+  throw new Error("USAGE: login|health|diagnose|locate|dry-run|publish");
 }
 
 main()
