@@ -9,3 +9,5 @@ coverage
 *.tsbuildinfo
 playwright-report
 test-results
+.local/whatsapp-web/
+.local/whatsapp-debug/

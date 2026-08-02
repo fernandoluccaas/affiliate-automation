@@ -110,6 +110,14 @@ Marketplace authentication status is separate from operational sync health. `inv
 
 Manual export is not treated as publication delivery. `ManualExportPublisher` returns an exported-only status so downstream code cannot count a copied/exported message as a published message.
 
+## Phase 5A - Assisted WhatsApp Channel
+
+`WHATSAPP_CHANNEL` is one logical channel type. Its `publicationMode` is stored in `Channel.configuration`; the supported value is `ASSISTED`. The pipeline remains `Offer -> shared scheduler -> PromoMessageBuilder facts -> WhatsAppMessageFormatter -> WhatsAppChannelPublisher`. Scheduler policy, Redis locking, idempotency and immutable Publication snapshots are shared with Telegram.
+
+The assisted publisher returns `AWAITING_MANUAL_PUBLICATION`, never `PUBLISHED`. Those rows reserve daily capacity, participate in interval/repeat checks and are excluded from automatic delivery. `imageUrlSnapshot` and `messagePayload` keep the preview stable. Manual confirmation is a separate authenticated dashboard transition.
+
+The Web experimental implementation is deliberately an inert adapter with a uniform health/publish contract. It has no browser/session code because `AGENTS.md` does not authorize unofficial WhatsApp Web automation.
+
 Redis selection is server-only: Upstash is used when `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` are configured; otherwise `REDIS_URL` is used for local Redis. If neither is present, dashboard health reports Redis as unavailable/skipped and the worker can still run locally without distributed guarantees.
 
 ## AI Boundary

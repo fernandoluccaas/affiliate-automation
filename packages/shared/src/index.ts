@@ -25,6 +25,7 @@ export type ShippingStatus = (typeof shippingStatuses)[number];
 export const channelTypes = [
   "TELEGRAM",
   "MANUAL_EXPORT",
+  "WHATSAPP_CHANNEL",
   "WHATSAPP_CLOUD_API",
   "WHATSAPP_GROUPS_API",
 ] as const;

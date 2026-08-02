@@ -9,6 +9,7 @@ import {
   PackageSearch,
   RadioTower,
   ScrollText,
+  ClipboardCheck,
 } from "lucide-react";
 
 export const adminNavigation = [
@@ -19,6 +20,7 @@ export const adminNavigation = [
   { label: "Canais", href: "/canais", icon: Megaphone },
   { label: "Integracoes", href: "/integracoes", icon: Link2 },
   { label: "Publicacoes", href: "/publicacoes", icon: CalendarClock },
+  { label: "Fila assistida", href: "/publicacoes-assistidas", icon: ClipboardCheck },
   { label: "Automacoes", href: "/automacoes", icon: RadioTower },
   { label: "Configuracoes", href: "/configuracoes", icon: Cog },
   { label: "Logs", href: "/logs", icon: ScrollText },

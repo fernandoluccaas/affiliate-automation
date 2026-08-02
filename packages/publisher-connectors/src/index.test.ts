@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  AssistedWhatsAppChannelPublisher,
+  DisabledWhatsAppWebPublisher,
   ManualExportPublisher,
   TelegramPublisher,
   type PublicationPayload,
@@ -21,6 +23,26 @@ describe("ManualExportPublisher", () => {
     expect(result.rawResponse).toMatchObject({
       exportedOnly: true,
       message: payload.message,
+    });
+  });
+});
+
+describe("WhatsApp Channel publishers", () => {
+  it("prepares assisted output without claiming delivery", async () => {
+    await expect(
+      new AssistedWhatsAppChannelPublisher().publish(payload),
+    ).resolves.toEqual({
+      status: "AWAITING_MANUAL_PUBLICATION",
+      publicationMode: "ASSISTED",
+      mediaFallbackUsed: false,
+    });
+  });
+
+  it("keeps Web automation inert regardless of feature flags", async () => {
+    process.env.WHATSAPP_CHANNEL_WEB_EXPERIMENTAL_ENABLED = "true";
+    await expect(new DisabledWhatsAppWebPublisher().publish(payload)).resolves.toMatchObject({
+      status: "DISABLED",
+      errorCode: "WHATSAPP_WEB_AUTOMATION_NOT_AUTHORIZED",
     });
   });
 });

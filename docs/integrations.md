@@ -174,6 +174,12 @@ Prepared adapters:
 - `ManualExportPublisher` stores the generated message as `EXPORTED` and never marks it as an external publication.
 - WhatsApp Cloud API and WhatsApp Groups API appear as unavailable channel types in Phase 2B. They do not simulate publication.
 
+## Canal do WhatsApp
+
+`WHATSAPP_CHANNEL` does not use Meta Cloud API and is not a WhatsApp group. In stable `ASSISTED` mode, the worker prepares deterministic message and image snapshots while the authenticated operator performs the actual publication. The formatter uses WhatsApp-compatible `*bold*` and `~strikethrough~`, includes the affiliate URL exactly once and never adds `#publi` or an invented affiliate disclosure.
+
+The UI never receives session files, cookies, QR codes or browser storage. `WEB_EXPERIMENTAL` is visible only as unavailable and cannot be activated under the current repository guardrails.
+
 ## Telegram Setup
 
 Set these variables on the server:

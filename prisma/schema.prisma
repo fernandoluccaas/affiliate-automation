@@ -72,6 +72,7 @@ enum ShippingStatus {
 }
 
 enum ChannelType {
+  WHATSAPP_CHANNEL
   WHATSAPP_CLOUD
   WHATSAPP_CLOUD_API
   WHATSAPP_GROUPS
@@ -81,6 +82,7 @@ enum ChannelType {
 }
 
 enum PublicationStatus {
+  AWAITING_MANUAL_PUBLICATION
   SCHEDULED
   PUBLISHED
   EXPORTED
@@ -408,6 +410,8 @@ model Publication {
   publishedAt                 DateTime?
   externalId                  String?
   messagePayload              Json?
+  imageUrlSnapshot            String?
+  metadata                    Json?
   messageSource               MessageSource     @default(DETERMINISTIC_FALLBACK)
   aiProvider                  AiProviderName    @default(DETERMINISTIC)
   aiModel                     String?

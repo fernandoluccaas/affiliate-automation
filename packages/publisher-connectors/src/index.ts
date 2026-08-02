@@ -1,3 +1,5 @@
+export * from "./media";
+
 export type PublicationPayload = {
   offerId: string;
   channelId: string;
@@ -30,6 +32,74 @@ export interface PublisherAdapter {
     payload?: PublicationPayload,
   ): Promise<PublisherResult>;
   healthCheck(): Promise<boolean>;
+}
+
+export type WhatsAppPublicationMode = "ASSISTED" | "WEB_EXPERIMENTAL";
+
+export type WhatsAppPublishResult =
+  | {
+      status: "AWAITING_MANUAL_PUBLICATION";
+      publicationMode: "ASSISTED";
+      mediaFallbackUsed: boolean;
+    }
+  | {
+      status: "DISABLED";
+      publicationMode: "WEB_EXPERIMENTAL";
+      errorCode: "WHATSAPP_WEB_AUTOMATION_NOT_AUTHORIZED";
+      errorMessage: string;
+    };
+
+export type WhatsAppHealthResult =
+  | { status: "CONNECTED"; publicationMode: "ASSISTED" }
+  | {
+      status: "DISABLED";
+      publicationMode: "WEB_EXPERIMENTAL";
+      errorCode: "WHATSAPP_WEB_AUTOMATION_NOT_AUTHORIZED";
+    };
+
+export interface WhatsAppChannelPublisher {
+  publish(input: PublicationPayload): Promise<WhatsAppPublishResult>;
+  healthCheck(): Promise<WhatsAppHealthResult>;
+}
+
+export class AssistedWhatsAppChannelPublisher
+  implements WhatsAppChannelPublisher
+{
+  async publish(input: PublicationPayload): Promise<WhatsAppPublishResult> {
+    return {
+      status: "AWAITING_MANUAL_PUBLICATION",
+      publicationMode: "ASSISTED",
+      mediaFallbackUsed: !isValidHttpsUrl(input.imageUrl),
+    };
+  }
+
+  async healthCheck(): Promise<WhatsAppHealthResult> {
+    return { status: "CONNECTED", publicationMode: "ASSISTED" };
+  }
+}
+
+/**
+ * Deliberately inert until repository-level authorization permits unofficial
+ * WhatsApp Web automation. It has no browser/session dependency or side effect.
+ */
+export class DisabledWhatsAppWebPublisher implements WhatsAppChannelPublisher {
+  async publish(_input: PublicationPayload): Promise<WhatsAppPublishResult> {
+    return {
+      status: "DISABLED",
+      publicationMode: "WEB_EXPERIMENTAL",
+      errorCode: "WHATSAPP_WEB_AUTOMATION_NOT_AUTHORIZED",
+      errorMessage:
+        "WhatsApp Web automation is disabled by the repository policy.",
+    };
+  }
+
+  async healthCheck(): Promise<WhatsAppHealthResult> {
+    return {
+      status: "DISABLED",
+      publicationMode: "WEB_EXPERIMENTAL",
+      errorCode: "WHATSAPP_WEB_AUTOMATION_NOT_AUTHORIZED",
+    };
+  }
 }
 
 type TelegramConfig = {
@@ -90,6 +160,15 @@ function isValidHttpUrl(value?: string | null) {
   try {
     const url = new URL(value);
     return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function isValidHttpsUrl(value?: string | null) {
+  if (!value) return false;
+  try {
+    return new URL(value).protocol === "https:";
   } catch {
     return false;
   }

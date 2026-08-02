@@ -21,6 +21,7 @@ type ChannelsPageProps = {
 const channelTypes = [
   { value: "TELEGRAM", label: "Telegram", disabled: false },
   { value: "MANUAL_EXPORT", label: "Exportacao manual", disabled: false },
+  { value: "WHATSAPP_CHANNEL", label: "Canal do WhatsApp", disabled: false },
   { value: "WHATSAPP_CLOUD_API", label: "WhatsApp Cloud API indisponivel", disabled: true },
   { value: "WHATSAPP_GROUPS_API", label: "WhatsApp Groups API indisponivel", disabled: true },
 ];
@@ -36,6 +37,27 @@ function configChatId(value: unknown) {
   }
 
   return "";
+}
+
+function configRecord(value: unknown) {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function configText(value: unknown, key: string) {
+  const field = configRecord(value)[key];
+  return typeof field === "string" ? field : "";
+}
+
+function configNumber(value: unknown, key: string, fallback: number) {
+  const field = configRecord(value)[key];
+  return typeof field === "number" ? field : fallback;
+}
+
+function configBoolean(value: unknown, key: string, fallback: boolean) {
+  const field = configRecord(value)[key];
+  return typeof field === "boolean" ? field : fallback;
 }
 
 function messageText(message?: string | string[]) {
@@ -124,6 +146,12 @@ export default async function ChannelsPage({ searchParams }: ChannelsPageProps) 
                   allowedMarketplaces: listText(channel.allowedMarketplaces),
                   allowedCategories: listText(channel.allowedCategories),
                   telegramChatId: configChatId(channel.configuration),
+                  publicationMode: configText(channel.configuration, "publicationMode") || "ASSISTED",
+                  channelDisplayName: configText(channel.configuration, "channelDisplayName"),
+                  customHeader: configText(channel.configuration, "customHeader"),
+                  customFooter: configText(channel.configuration, "customFooter"),
+                  sendImage: configBoolean(channel.configuration, "sendImage", true),
+                  maxPending: configNumber(channel.configuration, "maxPending", 5),
                 }}
               />
             </section>
@@ -150,6 +178,12 @@ type ChannelFormValue = {
   allowedMarketplaces?: string;
   allowedCategories?: string;
   telegramChatId?: string;
+  publicationMode?: string;
+  channelDisplayName?: string;
+  customHeader?: string;
+  customFooter?: string;
+  sendImage?: boolean;
+  maxPending?: number;
 };
 
 function ChannelForm({
@@ -250,6 +284,35 @@ function ChannelForm({
       <label className="grid gap-2">
         <Label>Telegram Chat ID</Label>
         <Input name="telegramChatId" defaultValue={channel?.telegramChatId ?? ""} />
+      </label>
+      <label className="grid gap-2">
+        <Label>Modo WhatsApp</Label>
+        <Select name="publicationMode" defaultValue={channel?.publicationMode ?? "ASSISTED"}>
+          <option value="ASSISTED">Assistido (estavel)</option>
+          <option value="WEB_EXPERIMENTAL" disabled>
+            Web experimental (nao autorizado)
+          </option>
+        </Select>
+      </label>
+      <label className="grid gap-2">
+        <Label>Nome exibido do Canal</Label>
+        <Input name="channelDisplayName" defaultValue={channel?.channelDisplayName ?? ""} />
+      </label>
+      <label className="grid gap-2">
+        <Label>Maximo de pendencias assistidas</Label>
+        <Input name="maxPending" type="number" min="1" max="50" defaultValue={channel?.maxPending ?? 5} />
+      </label>
+      <label className="grid gap-2 md:col-span-3">
+        <Label>Cabecalho personalizado</Label>
+        <Input name="customHeader" defaultValue={channel?.customHeader ?? ""} />
+      </label>
+      <label className="grid gap-2 md:col-span-3">
+        <Label>Rodape personalizado</Label>
+        <Input name="customFooter" defaultValue={channel?.customFooter ?? ""} />
+      </label>
+      <label className="flex items-end gap-2 pb-2 text-sm font-medium">
+        <input name="sendImage" type="checkbox" defaultChecked={channel?.sendImage ?? true} />
+        Preparar imagem
       </label>
       <div className="md:col-span-3">
         <Button type="submit">{submitLabel}</Button>

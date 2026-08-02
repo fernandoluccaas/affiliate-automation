@@ -278,6 +278,95 @@ describe("createPublicationIdempotently", () => {
     );
   });
 
+  it("creates one assisted WhatsApp pending snapshot without marking it published", async () => {
+    const actual = await import("@affiliate/database");
+    const now = new Date("2026-08-02T12:00:00.000Z");
+    const offer = {
+      id: "offer-whatsapp-v1",
+      productId: "product-whatsapp",
+      title: "Produto Mercado Livre",
+      externalProductId: "MLB123",
+      marketplace: "MERCADO_LIVRE",
+      category: "Eletronicos",
+      imageUrl: "https://cdn.example.com/image.jpg",
+      originalPrice: 120,
+      currentPrice: 90,
+      discountPercentage: 25,
+      couponCode: null,
+      couponExpiration: null,
+      freeShipping: true,
+      shippingStatus: "FREE",
+      stockStatus: "IN_STOCK",
+      score: 90,
+      scoreCompletenessPercentage: 100,
+      affiliateUrl: "https://meli.la/whatsapp",
+      trackingStrategy: "DIRECT_AFFILIATE_LINK",
+      version: 1,
+      sourceCategoryId: "MLB1000",
+      bestSellerPosition: 1,
+      sourceHighlightId: "MLB123",
+      sourceHighlightType: "ITEM",
+      resolutionStrategy: "ITEM_DIRECT",
+      affiliateLinks: [],
+      collectedAt: now,
+      publishedAt: null,
+    };
+    const channel = {
+      id: "channel-whatsapp",
+      name: "Canal principal",
+      type: "WHATSAPP_CHANNEL",
+      enabled: true,
+      timezone: "America/Fortaleza",
+      dailyPublicationLimit: 10,
+      minimumIntervalMinutes: 0,
+      allowedStartTime: null,
+      allowedEndTime: null,
+      minimumScore: 0,
+      minDiscountPercentage: 0,
+      productRepeatIntervalDays: 0,
+      allowedMarketplaces: ["MERCADO_LIVRE"],
+      allowedCategories: [],
+      configuration: { publicationMode: "ASSISTED", maxPending: 5, sendImage: true },
+      createdAt: now,
+      updatedAt: now,
+    };
+    const upsert = vi.fn().mockResolvedValue({ id: "publication-whatsapp" });
+    const offerUpdate = vi.fn().mockResolvedValue(offer);
+    Object.assign(actual.prisma, {
+      offer: { findMany: vi.fn().mockResolvedValue([offer]), update: offerUpdate },
+      channel: { findMany: vi.fn().mockResolvedValue([channel]) },
+      publication: {
+        count: vi.fn().mockResolvedValue(0),
+        findFirst: vi.fn().mockResolvedValue(null),
+        findMany: vi.fn().mockResolvedValue([]),
+        upsert,
+      },
+      $transaction: vi.fn(async (callback: (tx: unknown) => unknown) =>
+        callback({ publication: { upsert }, offer: { update: offerUpdate } }),
+      ),
+    });
+
+    const first = await scheduleReadyOffers(now);
+    expect(first).toMatchObject({
+      scheduled: 1,
+      published: 0,
+      whatsappAssistedPrepared: 1,
+    });
+    expect(upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { idempotencyKey: "publication:channel-whatsapp:offer-whatsapp-v1" },
+        create: expect.objectContaining({
+          status: "AWAITING_MANUAL_PUBLICATION",
+          imageUrlSnapshot: "https://cdn.example.com/image.jpg",
+          metadata: expect.objectContaining({ publicationMode: "ASSISTED" }),
+        }),
+      }),
+    );
+    expect(offerUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: "SCHEDULED" }) }),
+    );
+  });
+
   it("schedules the same Offer version once for each compatible channel", async () => {
     const actual = await import("@affiliate/database");
     const now = new Date("2026-07-30T12:00:00.000Z");

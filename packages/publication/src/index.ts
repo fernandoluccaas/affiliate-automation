@@ -36,6 +36,11 @@ export type PromoMessageResult = {
   message: string;
 };
 
+export type WhatsAppMessageInput = PromoMessageInput & {
+  customHeader?: string | null;
+  customFooter?: string | null;
+};
+
 export const MERCADO_LIVRE_HEADLINES = [
   "MELI CHEGOUUUUU 💛",
   "SURREAAAAL AGORA 🥵",
@@ -299,6 +304,56 @@ export class PromoMessageBuilder {
   }
 }
 
+/** Formats deterministic offer facts using WhatsApp's supported plain-text marks. */
+export class WhatsAppMessageFormatter {
+  format(input: WhatsAppMessageInput): PromoMessageResult {
+    const base = new PromoMessageBuilder().build({
+      ...input,
+      footer: null,
+    });
+    const lines: string[] = [];
+    const header = input.customHeader
+      ? escapeMessageText(input.customHeader).replaceAll(input.trackingUrl, "")
+      : "";
+    if (header) lines.push(header, "");
+
+    lines.push(base.headline, "", `*${normalizeProductTitle(input.title)}*`);
+    const originalPrice = validOriginalPrice(
+      input.originalPrice,
+      input.currentPrice,
+    );
+    if (originalPrice !== null) {
+      lines.push("", `De: ~${formatBRLCurrency(originalPrice)}~`);
+    }
+    lines.push("", `Por: *${formatBRLCurrency(input.currentPrice)}* ✅`);
+
+    if (input.shippingStatus === "FREE" || input.freeShipping === true) {
+      lines.push("", "🚚 Frete grátis");
+    }
+
+    const couponCode = input.couponCode
+      ? normalizeProductTitle(input.couponCode)
+      : null;
+    if (couponCode) {
+      lines.push("", "🎟️ Use o cupom:", couponCode);
+    }
+
+    lines.push("", "🛒 *Compre aqui:*", input.trackingUrl);
+    const footer = input.customFooter
+      ? escapeMessageText(input.customFooter).replaceAll(input.trackingUrl, "")
+      : input.footer
+        ? escapeMessageText(input.footer).replaceAll(input.trackingUrl, "")
+        : "";
+    if (footer) lines.push("", footer);
+
+    return { headline: base.headline, message: lines.join("\n") };
+  }
+}
+
+export function formatWhatsAppMessage(input: WhatsAppMessageInput) {
+  return new WhatsAppMessageFormatter().format(input);
+}
+
 export function buildPromoMessage(input: PromoMessageInput) {
   return new PromoMessageBuilder().build(input);
 }
@@ -435,7 +490,7 @@ export function isOfferCompatibleWithChannel(
     return { ok: false, code: "CHANNEL_DISABLED", reason: "Canal desativado." };
   }
 
-  if (!["TELEGRAM", "MANUAL_EXPORT"].includes(channel.type)) {
+  if (!["TELEGRAM", "MANUAL_EXPORT", "WHATSAPP_CHANNEL"].includes(channel.type)) {
     return {
       ok: false,
       code: "CHANNEL_TYPE_UNAVAILABLE",

@@ -7,6 +7,7 @@ import {
   canScheduleInWindow,
   deterministicMessageComposer,
   formatBRLCurrency,
+  formatWhatsAppMessage,
   getZonedDayRange,
   isOfferCompatibleWithChannel,
   isWithinAllowedWindow,
@@ -149,6 +150,54 @@ describe("deterministicMessageComposer", () => {
 
     expect(message.match(/https:\/\/meli\.la\/footer/g)).toHaveLength(1);
     expect(message.endsWith("Rodapé configurado pelo usuário.")).toBe(true);
+  });
+});
+
+describe("WhatsAppMessageFormatter", () => {
+  it("formats immutable facts with WhatsApp marks and one affiliate URL", () => {
+    const result = formatWhatsAppMessage({
+      title: "Smartphone OPPO A6T 128GB",
+      originalPrice: 1299,
+      currentPrice: 887.78,
+      couponCode: "MELI10",
+      freeShipping: true,
+      marketplace: "MERCADO_LIVRE",
+      trackingUrl: "https://meli.la/abc123",
+      customHeader: "Oferta do canal",
+      customFooter: "Siga para mais ofertas.",
+      seed: "whatsapp-snapshot",
+    });
+
+    expect(result.message).toContain("*Smartphone OPPO A6T 128GB*");
+    expect(result.message).toContain("De: ~R$\u00a01.299,00~");
+    expect(result.message).toContain("Por: *R$\u00a0887,78* ✅");
+    expect(result.message).toContain("🚚 Frete grátis");
+    expect(result.message).toContain("🎟️ Use o cupom:\nMELI10");
+    expect(result.message).toContain("🛒 *Compre aqui:*");
+    expect(result.message.match(/https:\/\/meli\.la\/abc123/g)).toHaveLength(1);
+    expect(result.message.startsWith("Oferta do canal")).toBe(true);
+    expect(result.message.endsWith("Siga para mais ofertas.")).toBe(true);
+    expect(result.message).not.toContain("#publi");
+    expect(result.message.toLowerCase()).not.toContain("link de afiliado");
+  });
+
+  it("omits unconfirmed optional facts and remains deterministic", () => {
+    const input = {
+      title: "Produto sem adicionais",
+      originalPrice: 50,
+      currentPrice: 80,
+      freeShipping: false,
+      marketplace: "MERCADO_LIVRE",
+      trackingUrl: "https://meli.la/only",
+      seed: "same-publication",
+    } as const;
+    const first = formatWhatsAppMessage(input).message;
+    const second = formatWhatsAppMessage(input).message;
+
+    expect(second).toBe(first);
+    expect(first).not.toContain("De:");
+    expect(first).not.toContain("Frete grátis");
+    expect(first).not.toContain("cupom");
   });
 });
 

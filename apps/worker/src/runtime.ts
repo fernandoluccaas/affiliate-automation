@@ -45,6 +45,18 @@ export type WorkerOperationalMetrics = {
   publicationsRetried: number;
   aiGenerated: number;
   aiFallbackUsed: number;
+  whatsappAssistedPrepared: number;
+  whatsappAssistedConfirmed: number;
+  whatsappAssistedSkipped: number;
+  whatsappAssistedFailed: number;
+  whatsappWebDryRuns: number;
+  whatsappWebAttempts: number;
+  whatsappWebPublished: number;
+  whatsappWebFailed: number;
+  whatsappWebDeliveryUncertain: number;
+  whatsappWebLoginRequired: number;
+  whatsappWebSelectorMismatch: number;
+  whatsappWebMediaFallback: number;
 };
 
 export type WorkerOperationalStatus = {
@@ -259,6 +271,18 @@ function emptyOperationalMetrics(): WorkerOperationalMetrics {
     publicationsRetried: 0,
     aiGenerated: 0,
     aiFallbackUsed: 0,
+    whatsappAssistedPrepared: 0,
+    whatsappAssistedConfirmed: 0,
+    whatsappAssistedSkipped: 0,
+    whatsappAssistedFailed: 0,
+    whatsappWebDryRuns: 0,
+    whatsappWebAttempts: 0,
+    whatsappWebPublished: 0,
+    whatsappWebFailed: 0,
+    whatsappWebDeliveryUncertain: 0,
+    whatsappWebLoginRequired: 0,
+    whatsappWebSelectorMismatch: 0,
+    whatsappWebMediaFallback: 0,
   };
 }
 

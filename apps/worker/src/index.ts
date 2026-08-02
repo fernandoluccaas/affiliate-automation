@@ -1,5 +1,6 @@
 import {
   canScheduleInWindow,
+  WhatsAppMessageFormatter,
   getZonedDayRange,
   isOfferCompatibleWithChannel,
   type ChannelPolicy,
@@ -10,6 +11,7 @@ import {
   type MessageGenerationResult,
 } from "@affiliate/ai-copywriter";
 import {
+  AssistedWhatsAppChannelPublisher,
   ManualExportPublisher,
   TelegramPublisher,
   type PublicationPayload,
@@ -19,9 +21,9 @@ import {
 import { acquireLock, type LockHandle } from "@affiliate/redis";
 import {
   prisma,
+  Prisma,
   type Channel,
   type Offer,
-  type Prisma,
   type Publication,
 } from "@affiliate/database";
 import {
@@ -54,6 +56,10 @@ type JobMetrics = {
   skipped: number;
   aiGenerated: number;
   aiFallbackUsed: number;
+  whatsappAssistedPrepared: number;
+  whatsappAssistedConfirmed: number;
+  whatsappAssistedSkipped: number;
+  whatsappAssistedFailed: number;
   skipReasons: Record<string, number>;
 };
 
@@ -94,6 +100,10 @@ function emptyMetrics(): JobMetrics {
     skipped: 0,
     aiGenerated: 0,
     aiFallbackUsed: 0,
+    whatsappAssistedPrepared: 0,
+    whatsappAssistedConfirmed: 0,
+    whatsappAssistedSkipped: 0,
+    whatsappAssistedFailed: 0,
     skipReasons: {},
   };
 }
@@ -110,6 +120,10 @@ function mergeMetrics(target: JobMetrics, source: JobMetrics) {
     "skipped",
     "aiGenerated",
     "aiFallbackUsed",
+    "whatsappAssistedPrepared",
+    "whatsappAssistedConfirmed",
+    "whatsappAssistedSkipped",
+    "whatsappAssistedFailed",
   ];
 
   for (const key of numericKeys) {
@@ -223,12 +237,38 @@ async function messagePayloadFor(
     recentHeadlines,
   });
 
+  const message = isAssistedWhatsAppChannel(channel)
+    ? new WhatsAppMessageFormatter().format({
+        title: offer.title,
+        marketplace: offer.marketplace,
+        originalPrice: offer.originalPrice?.toString() ?? null,
+        currentPrice: offer.currentPrice.toString(),
+        discountPercentage: offer.discountPercentage?.toString() ?? null,
+        couponCode: offer.couponCode,
+        couponExpiration: offer.couponExpiration,
+        freeShipping: offer.freeShipping,
+        shippingStatus: offer.shippingStatus,
+        trackingUrl: publicationUrl.url,
+        seed: `${channel.id}:${offer.id}`,
+        recentHeadlines,
+        headlineSuggestion: headlineFromMessagePayload({
+          message: generated.message,
+        }),
+        customHeader: channelConfigString(channel, "customHeader"),
+        customFooter: channelConfigString(channel, "customFooter"),
+      }).message
+    : generated.message;
+
   return {
     offerId: offer.id,
     channelId: channel.id,
     trackingUrl: publicationUrl.url,
-    message: generated.message,
-    imageUrl: offer.imageUrl,
+    message,
+    imageUrl:
+      isAssistedWhatsAppChannel(channel) &&
+      channelConfiguration(channel).sendImage === false
+        ? null
+        : offer.imageUrl,
     messageSource: generated.source,
     aiProvider: generated.aiProvider,
     aiModel: generated.aiModel,
@@ -237,6 +277,34 @@ async function messagePayloadFor(
     aiValidationReasons: generated.aiValidationReasons,
     generatedAt: generated.generatedAt.toISOString(),
   };
+}
+
+function channelConfiguration(channel: Channel) {
+  return channel.configuration &&
+    typeof channel.configuration === "object" &&
+    !Array.isArray(channel.configuration)
+    ? (channel.configuration as Record<string, unknown>)
+    : {};
+}
+
+function channelConfigString(channel: Channel, key: string) {
+  const value = channelConfiguration(channel)[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+export function isAssistedWhatsAppChannel(channel: Channel) {
+  return (
+    channel.type === "WHATSAPP_CHANNEL" &&
+    channelConfiguration(channel).publicationMode === "ASSISTED"
+  );
+}
+
+function assistedMaxPending(channel: Channel) {
+  const configured = Number(channelConfiguration(channel).maxPending);
+  const fallback = Number(
+    process.env.WHATSAPP_ASSISTED_MAX_PENDING_PER_CHANNEL ?? 5,
+  );
+  return Math.max(1, Number.isFinite(configured) ? configured : fallback);
 }
 
 export function getChannelMessageFooter(
@@ -284,7 +352,7 @@ async function recentChannelHeadlines(channelId: string) {
   const publications = await prisma.publication.findMany({
     where: {
       channelId,
-      status: { in: ["PUBLISHED", "EXPORTED", "SCHEDULED"] },
+      status: { in: ["PUBLISHED", "EXPORTED", "SCHEDULED", "AWAITING_MANUAL_PUBLICATION"] },
     },
     orderBy: { scheduledAt: "desc" },
     take: 5,
@@ -388,7 +456,7 @@ async function lastChannelPublication(channelId: string) {
   return prisma.publication.findFirst({
     where: {
       channelId,
-      status: { in: ["PUBLISHED", "EXPORTED", "SCHEDULED"] },
+      status: { in: ["PUBLISHED", "EXPORTED", "SCHEDULED", "AWAITING_MANUAL_PUBLICATION"] },
     },
     orderBy: { scheduledAt: "desc" },
     select: { scheduledAt: true, publishedAt: true },
@@ -406,7 +474,14 @@ async function lastProductPublication(
   return prisma.publication.findFirst({
     where: {
       channelId,
-      status: { in: ["PUBLISHED", "EXPORTED", "SCHEDULED"] },
+      status: {
+        in: [
+          "PUBLISHED",
+          "EXPORTED",
+          "SCHEDULED",
+          "AWAITING_MANUAL_PUBLICATION",
+        ],
+      },
       offer: { productId },
     },
     orderBy: { scheduledAt: "desc" },
@@ -420,6 +495,7 @@ export async function createPublicationIdempotently(
   channel: Channel,
   payload: GeneratedPublicationPayload,
   now: Date,
+  status: "SCHEDULED" | "AWAITING_MANUAL_PUBLICATION" = "SCHEDULED",
 ) {
   const idempotencyKey = `publication:${channel.id}:${offer.id}`;
 
@@ -429,10 +505,19 @@ export async function createPublicationIdempotently(
     create: {
       offerId: offer.id,
       channelId: channel.id,
-      status: "SCHEDULED",
+      status,
       idempotencyKey,
       scheduledAt: now,
       messagePayload: payload,
+      imageUrlSnapshot: payload.imageUrl ?? null,
+      metadata:
+        status === "AWAITING_MANUAL_PUBLICATION"
+          ? {
+              publicationMode: "ASSISTED",
+              confirmationStrategy: "MANUAL",
+              mediaFallbackUsed: !payload.imageUrl,
+            }
+          : Prisma.JsonNull,
       messageSource: payload.messageSource,
       aiProvider: payload.aiProvider,
       aiModel: payload.aiModel ?? null,
@@ -503,9 +588,24 @@ export async function scheduleReadyOffers(now = new Date()) {
 
       const publisher = publisherForChannel(channel);
 
-      if (!publisher) {
+      const assisted = isAssistedWhatsAppChannel(channel);
+      if (!publisher && !assisted) {
         recordSkip(metrics, "PUBLISHER_UNAVAILABLE");
         continue;
+      }
+
+      if (assisted) {
+        const pending = await prisma.publication.count({
+          where: {
+            channelId: channel.id,
+            status: "AWAITING_MANUAL_PUBLICATION",
+          },
+        });
+        if (pending >= assistedMaxPending(channel)) {
+          recordSkip(metrics, "CHANNEL_DAILY_LIMIT");
+          metrics.whatsappAssistedSkipped += 1;
+          continue;
+        }
       }
 
       const [publicationsToday, lastPublication, productPublication] =
@@ -564,14 +664,25 @@ export async function scheduleReadyOffers(now = new Date()) {
       }
 
       try {
+        if (assisted) {
+          await new AssistedWhatsAppChannelPublisher().publish(payload);
+        }
         await prisma.$transaction(async (tx) => {
-          await createPublicationIdempotently(tx, offer, channel, payload, now);
+          await createPublicationIdempotently(
+            tx,
+            offer,
+            channel,
+            payload,
+            now,
+            assisted ? "AWAITING_MANUAL_PUBLICATION" : "SCHEDULED",
+          );
           await tx.offer.update({
             where: { id: offer.id },
             data: { status: "SCHEDULED", scheduledAt: now },
           });
         });
         metrics.scheduled += 1;
+        if (assisted) metrics.whatsappAssistedPrepared += 1;
         scheduledChannelIds.add(channel.id);
       } finally {
         await lock.release();
@@ -1423,6 +1534,10 @@ export async function startWorker(
             publicationsFailed: published.failed,
             aiGenerated: scheduled.aiGenerated,
             aiFallbackUsed: scheduled.aiFallbackUsed,
+            whatsappAssistedPrepared: scheduled.whatsappAssistedPrepared,
+            whatsappAssistedConfirmed: 0,
+            whatsappAssistedSkipped: scheduled.whatsappAssistedSkipped,
+            whatsappAssistedFailed: scheduled.whatsappAssistedFailed,
           },
         };
       },

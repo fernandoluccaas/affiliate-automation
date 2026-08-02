@@ -39,11 +39,16 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
 import { TelegramPublisher } from "@affiliate/publisher-connectors";
-import { createSession, destroySession } from "./session";
+import { createSession, destroySession, requireSession } from "./session";
 import {
   WORKER_CONTROLS_KEY,
   workerControlsFromValue,
 } from "./worker-operations";
+import {
+  assistedCancellationData,
+  assistedConfirmationData,
+  assistedFailureData,
+} from "./assisted-publications";
 
 const loginSchema = z.object({
   email: z.string().email(),
@@ -130,6 +135,7 @@ const channelSchema = z.object({
   type: z.enum([
     "TELEGRAM",
     "MANUAL_EXPORT",
+    "WHATSAPP_CHANNEL",
     "WHATSAPP_CLOUD_API",
     "WHATSAPP_GROUPS_API",
   ]),
@@ -148,6 +154,12 @@ const channelSchema = z.object({
   allowedMarketplaces: z.string().optional(),
   allowedCategories: z.string().optional(),
   telegramChatId: z.string().optional(),
+  publicationMode: z.enum(["ASSISTED", "WEB_EXPERIMENTAL"]).optional(),
+  channelDisplayName: z.string().trim().optional(),
+  customHeader: z.string().trim().max(500).optional(),
+  customFooter: z.string().trim().max(500).optional(),
+  sendImage: z.boolean().optional(),
+  maxPending: z.coerce.number().int().min(1).max(50).optional(),
 });
 
 const mercadoLivreConfigSchema = z.object({
@@ -215,6 +227,12 @@ function channelPayload(formData: FormData) {
     allowedMarketplaces: formData.get("allowedMarketplaces")?.toString(),
     allowedCategories: formData.get("allowedCategories")?.toString(),
     telegramChatId: formData.get("telegramChatId")?.toString(),
+    publicationMode: formData.get("publicationMode")?.toString() || "ASSISTED",
+    channelDisplayName: formData.get("channelDisplayName")?.toString(),
+    customHeader: formData.get("customHeader")?.toString(),
+    customFooter: formData.get("customFooter")?.toString(),
+    sendImage: formData.get("sendImage") === "on",
+    maxPending: formData.get("maxPending") || 5,
   });
 
   if (!parsed.success) {
@@ -224,9 +242,28 @@ function channelPayload(formData: FormData) {
   }
 
   const channel = parsed.data;
-  const configuration =
-    channel.type === "TELEGRAM" && channel.telegramChatId
+  if (
+    channel.type === "WHATSAPP_CHANNEL" &&
+    channel.publicationMode === "WEB_EXPERIMENTAL"
+  ) {
+    throw new Error(
+      "A automacao do WhatsApp Web nao esta autorizada pelo AGENTS.md deste repositorio.",
+    );
+  }
+
+  const configuration = channel.type === "TELEGRAM"
+    ? channel.telegramChatId
       ? { chatId: channel.telegramChatId.trim() }
+      : Prisma.JsonNull
+    : channel.type === "WHATSAPP_CHANNEL"
+      ? {
+          publicationMode: "ASSISTED",
+          channelDisplayName: channel.channelDisplayName || null,
+          customHeader: channel.customHeader || null,
+          customFooter: channel.customFooter || null,
+          sendImage: channel.sendImage ?? true,
+          maxPending: channel.maxPending ?? 5,
+        }
       : Prisma.JsonNull;
 
   return {
@@ -316,6 +353,61 @@ export async function testTelegramChannelAction(formData: FormData) {
   const ok = await publisher.validateCredentials();
 
   redirect(`/canais?message=${ok ? "telegram-ok" : "telegram-failed"}`);
+}
+
+async function assistedPublication(formData: FormData) {
+  const id = formData.get("publicationId")?.toString();
+  if (!id) throw new Error("Publicacao nao informada.");
+  const publication = await prisma.publication.findFirst({
+    where: {
+      id,
+      status: "AWAITING_MANUAL_PUBLICATION",
+      channel: { type: "WHATSAPP_CHANNEL" },
+    },
+    select: { id: true, offerId: true, metadata: true },
+  });
+  if (!publication) throw new Error("Pendencia assistida nao encontrada.");
+  return publication;
+}
+
+export async function confirmAssistedPublicationAction(formData: FormData) {
+  const user = await requireSession();
+  const publication = await assistedPublication(formData);
+  const now = new Date();
+  await prisma.$transaction([
+    prisma.publication.update({
+      where: { id: publication.id },
+      data: assistedConfirmationData(publication.metadata, user.id, now),
+    }),
+    prisma.offer.update({
+      where: { id: publication.offerId },
+      data: { status: "PUBLISHED", publishedAt: now },
+    }),
+  ]);
+  revalidatePath("/publicacoes-assistidas");
+}
+
+export async function cancelAssistedPublicationAction(formData: FormData) {
+  const user = await requireSession();
+  const publication = await assistedPublication(formData);
+  const now = new Date();
+  await prisma.publication.update({
+    where: { id: publication.id },
+    data: assistedCancellationData(publication.metadata, user.id, now),
+  });
+  revalidatePath("/publicacoes-assistidas");
+}
+
+export async function failAssistedPublicationAction(formData: FormData) {
+  const user = await requireSession();
+  const publication = await assistedPublication(formData);
+  const reason = formData.get("reason")?.toString();
+  const now = new Date();
+  await prisma.publication.update({
+    where: { id: publication.id },
+    data: assistedFailureData(publication.metadata, user.id, now, reason),
+  });
+  revalidatePath("/publicacoes-assistidas");
 }
 
 function uniqueStringList(values: string[]) {
