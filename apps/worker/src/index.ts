@@ -18,6 +18,7 @@ import {
   getWhatsAppWebRuntimeConfig,
   type WhatsAppWebChannelConfiguration,
   type WhatsAppWebPublishResult,
+  type WhatsAppWebSendStateUpdate,
   type PublicationPayload,
   type PublisherAdapter,
   type PublisherResult,
@@ -336,6 +337,18 @@ export function isExperimentalWhatsAppGroup(channel: Channel) {
   return (
     channel.type === "WHATSAPP_GROUPS" &&
     channelConfiguration(channel).publicationMode === "WEB_EXPERIMENTAL"
+  );
+}
+
+export function hasBlockedWhatsAppWebSendState(metadata: unknown) {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return false;
+  }
+  const value = metadata as Record<string, unknown>;
+  return (
+    value.retryAuthorized !== true &&
+    (value.deliveryUncertain === true ||
+      typeof value.sendClickStartedAt === "string")
   );
 }
 
@@ -959,11 +972,15 @@ async function recordWhatsAppWebResult(
   result: WhatsAppWebPublishResult,
   now: Date,
 ) {
+  const currentPublication = await prisma.publication.findUnique({
+    where: { id: publication.id },
+    select: { metadata: true },
+  });
   const previousMetadata =
-    publication.metadata &&
-    typeof publication.metadata === "object" &&
-    !Array.isArray(publication.metadata)
-      ? (publication.metadata as Record<string, unknown>)
+    currentPublication?.metadata &&
+    typeof currentPublication.metadata === "object" &&
+    !Array.isArray(currentPublication.metadata)
+      ? (currentPublication.metadata as Record<string, unknown>)
       : {};
   const attemptNumber = publication.attempts.length + 1;
   const deliveryUncertain = result.status === "DELIVERY_UNCERTAIN";
@@ -981,7 +998,11 @@ async function recordWhatsAppWebResult(
       responsePayload: {
         status: result.status,
         errorCode: result.errorCode ?? null,
+        stage: result.stage,
         sendWasClicked: result.sendWasClicked,
+        sendClickStartedAt: result.sendClickStartedAt ?? null,
+        sendClickedAt: result.sendClickedAt ?? null,
+        deliveryUncertain: result.deliveryUncertain,
       },
       errorMessage: result.errorCode ?? null,
     },
@@ -997,7 +1018,8 @@ async function recordWhatsAppWebResult(
       metadata: {
         ...previousMetadata,
         ...result.metadata,
-        rootCause: result.errorCode ?? null,
+        rootCause: result.rootCause,
+        stage: result.stage,
         deliveryUncertain,
         retryAuthorized: false,
       } as Prisma.InputJsonValue,
@@ -1061,6 +1083,45 @@ async function recordWhatsAppWebResult(
   }
 }
 
+async function persistWhatsAppWebSendState(update: WhatsAppWebSendStateUpdate) {
+  const publication = await prisma.publication.findUnique({
+    where: { id: update.publicationId },
+    select: { metadata: true },
+  });
+  if (!publication) throw new Error("PUBLICATION_NOT_FOUND");
+  const metadata =
+    publication.metadata &&
+    typeof publication.metadata === "object" &&
+    !Array.isArray(publication.metadata)
+      ? (publication.metadata as Record<string, unknown>)
+      : {};
+  await prisma.publication.update({
+    where: { id: update.publicationId },
+    data: {
+      ...(update.deliveryUncertain
+        ? {
+            status: "PUBLICATION_FAILED" as const,
+            errorMessage: "WHATSAPP_WEB_DELIVERY_UNCERTAIN",
+          }
+        : {}),
+      metadata: {
+        ...metadata,
+        stage: update.stage,
+        rootCause: update.stage,
+        sendWasClicked: update.sendWasClicked,
+        ...(update.sendClickStartedAt
+          ? { sendClickStartedAt: update.sendClickStartedAt }
+          : {}),
+        ...(update.sendClickedAt
+          ? { sendClickedAt: update.sendClickedAt }
+          : {}),
+        deliveryUncertain: update.deliveryUncertain,
+        retryAuthorized: false,
+      } as Prisma.InputJsonValue,
+    },
+  });
+}
+
 function channelConfigurationRecord(value: Channel["configuration"]) {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -1098,6 +1159,7 @@ export async function publishScheduledOffers(now = new Date()) {
   const selectedPublications = publications.filter((publication) => {
     if (selectedChannelIds.has(publication.channelId)) return false;
     if (isExperimentalWhatsAppGroup(publication.channel)) {
+      if (hasBlockedWhatsAppWebSendState(publication.metadata)) return false;
       if (getWhatsAppWebRuntimeConfig().dryRun) return false;
       if (
         whatsappWebSelected >=
@@ -1133,7 +1195,9 @@ export async function publishScheduledOffers(now = new Date()) {
         continue;
       }
       try {
-        const result = await new WhatsAppGroupsWebPublisher().publish({
+        const result = await new WhatsAppGroupsWebPublisher({
+          recordSendState: persistWhatsAppWebSendState,
+        }).publish({
           publicationId: publication.id,
           offerId: publication.offerId,
           destinationType: "GROUP",

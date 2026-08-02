@@ -43,6 +43,7 @@ npm run whatsapp:web:diagnose -- --profile principal
 npm run whatsapp:web:diagnose -- --channel-id <CHANNEL_ID>
 npm run whatsapp:web:locate -- --channel-id <CHANNEL_ID>
 npm run whatsapp:web:dry-run -- --publication-id <PUBLICATION_ID>
+npm run whatsapp:web:preflight -- --publication-id <PUBLICATION_ID>
 npm run whatsapp:web:publish -- --publication-id <PUBLICATION_ID> --confirm-send
 ```
 
@@ -51,6 +52,10 @@ Login opens visible Chromium and waits for manual QR interaction without capturi
 Diagnose by profile recognizes the authenticated shell and global-search controls without typing or opening a conversation. Diagnose by channel performs only the same exact locate validation. Diagnostics contain structural stage, language, strategy/count flags and timing; they never contain chat names, messages, phone numbers, HTML, QR data or session secrets. `WHATSAPP_WEB_SLOW_MO_MS` is visual assistance only. `WHATSAPP_WEB_KEEP_OPEN_ON_ERROR` applies only to explicit local `diagnose` and `locate` commands, is bounded by the configured timeout (maximum 60 seconds), and still closes the browser and releases the Redis lock.
 
 Dry-run requires the feature flag, ownership confirmation, connected session, Redis, exact group and `WEB_EXPERIMENTAL`. It prepares the safe image or configured text fallback, fills the immutable Publication snapshot, checks the unique title snippet and affiliate URL, does not invoke send, clears the draft and persists a configuration fingerprint. A change to channel ID, group name, profile key, mode or `sendImage` invalidates that fingerprint.
+
+Preflight is the final safe check while `WHATSAPP_WEB_DRY_RUN=true`. It revalidates the exact open group, stable media preview, caption, exactly one affiliate URL, absence of a visible upload error, and exactly one visible/enabled send trigger scoped to the media editor. It is structurally separate from `clickSendTrigger`, never sends, and clears the draft before closing the browser and releasing the Redis lock.
+
+For a confirmed real execution, metadata records `sendClickStartedAt` before invoking the click and `sendWasClicked`/`sendClickedAt` immediately after it returns. A failure or crash after initiation is never treated as a safe retry: the Publication is blocked as `DELIVERY_UNCERTAIN` until explicit review and authorization. Confirmation only examines a newly appeared outgoing element after the captured pre-click baseline and validates the expected affiliate URL, unique title snippet and media.
 
 Image dry-run validates the downloaded temporary file (regular file, non-zero size, supported image MIME and compatible extension), selects the semantic Photos & videos action, uses Playwright's file chooser when available or the scoped image input fallback, waits for the media preview and only then fills the caption. The local file is removed only after draft cleanup. Results expose sanitized media stages and structural flags such as the upload strategy, file size/extension, preview, caption, validation and cleanup; paths, group names, message contents and session data are never included. A failed partial draft is still cleared before the browser and Redis lock are released.
 

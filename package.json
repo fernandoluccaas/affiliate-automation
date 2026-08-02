@@ -19,6 +19,7 @@
     "whatsapp:web:diagnose": "npm run whatsapp:web -w apps/worker -- diagnose",
     "whatsapp:web:locate": "npm run whatsapp:web -w apps/worker -- locate",
     "whatsapp:web:dry-run": "npm run whatsapp:web -w apps/worker -- dry-run",
+    "whatsapp:web:preflight": "npm run whatsapp:web -w apps/worker -- preflight",
     "whatsapp:web:publish": "npm run whatsapp:web -w apps/worker -- publish",
     "build": "npm run build --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",

@@ -33,6 +33,14 @@ describe("WhatsApp Web semantic selector strategies", () => {
     expect(selectors).not.toMatch(/\._[A-Za-z0-9]{5,}/);
   });
 
+  it("provides PT/EN/ES send aliases and media-scoped fallback selectors", () => {
+    expect(whatsappWebAccessibleAliases.send).toEqual(["Send", "Enviar"]);
+    for (const selector of whatsappWebStableSelectors.mediaSendTrigger) {
+      expect(selector).toMatch(/button|role='button'|data-testid='send'/);
+      expect(selector).not.toMatch(/\._[A-Za-z0-9]{5,}/);
+    }
+  });
+
   it("builds only exact title-based group result selectors", () => {
     const selectors = whatsappWebExactGroupResultSelectors(
       'Grupo "Exato" [ofertas]',

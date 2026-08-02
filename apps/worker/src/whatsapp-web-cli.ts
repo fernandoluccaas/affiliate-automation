@@ -8,6 +8,7 @@ import {
   WhatsAppGroupsWebPublisher,
   type WhatsAppWebChannelConfiguration,
   type WhatsAppWebPublicationInput,
+  type WhatsAppWebSendStateUpdate,
 } from "@affiliate/publisher-connectors";
 
 function option(name: string) {
@@ -101,6 +102,39 @@ async function updateChannelOperationalState(
   });
 }
 
+async function recordPublicationSendState(update: WhatsAppWebSendStateUpdate) {
+  const publication = await prisma.publication.findUnique({
+    where: { id: update.publicationId },
+    select: { metadata: true },
+  });
+  if (!publication) throw new Error("PUBLICATION_NOT_FOUND");
+  await prisma.publication.update({
+    where: { id: update.publicationId },
+    data: {
+      ...(update.deliveryUncertain
+        ? {
+            status: "PUBLICATION_FAILED" as const,
+            errorMessage: "WHATSAPP_WEB_DELIVERY_UNCERTAIN",
+          }
+        : {}),
+      metadata: {
+        ...record(publication.metadata),
+        stage: update.stage,
+        rootCause: update.stage,
+        sendWasClicked: update.sendWasClicked,
+        ...(update.sendClickStartedAt
+          ? { sendClickStartedAt: update.sendClickStartedAt }
+          : {}),
+        ...(update.sendClickedAt
+          ? { sendClickedAt: update.sendClickedAt }
+          : {}),
+        deliveryUncertain: update.deliveryUncertain,
+        retryAuthorized: false,
+      } as Prisma.InputJsonValue,
+    },
+  });
+}
+
 async function login(profileValue: string) {
   const config = getWhatsAppWebRuntimeConfig();
   const profileKey = sanitizeWhatsAppWebProfileKey(profileValue);
@@ -174,6 +208,7 @@ async function main() {
   const publisher = new WhatsAppGroupsWebPublisher({
     config: runtimeConfig,
     localDiagnosticKeepOpenOnErrorMs,
+    recordSendState: recordPublicationSendState,
   });
 
   if (command === "login") {
@@ -284,6 +319,29 @@ async function main() {
     return;
   }
 
+  if (command === "preflight") {
+    const publicationId = option("--publication-id");
+    if (!publicationId) throw new Error("PUBLICATION_ID_REQUIRED");
+    const { publication, input } = await publicationInput(publicationId);
+    const result = await publisher.preflight(input);
+    const current = await prisma.publication.findUnique({
+      where: { id: publication.id },
+      select: { metadata: true },
+    });
+    await prisma.publication.update({
+      where: { id: publication.id },
+      data: {
+        metadata: {
+          ...record(current?.metadata),
+          lastPreflight: result,
+          lastPreflightAt: new Date().toISOString(),
+        } as Prisma.InputJsonValue,
+      },
+    });
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    return;
+  }
+
   if (command === "publish") {
     if (!process.argv.includes("--confirm-send"))
       throw new Error("CONFIRM_SEND_REQUIRED");
@@ -292,6 +350,35 @@ async function main() {
     const { publication, input } = await publicationInput(publicationId);
     const result = await publisher.publish(input);
     const uncertain = result.status === "DELIVERY_UNCERTAIN";
+    const attemptNumber = await prisma.publicationAttempt.count({
+      where: { publicationId: publication.id },
+    });
+    await prisma.publicationAttempt.create({
+      data: {
+        publicationId: publication.id,
+        attemptNumber: attemptNumber + 1,
+        status: result.status === "PUBLISHED" ? "SUCCESS" : "FAILED",
+        requestPayload: {
+          publicationId: publication.id,
+          channelId: publication.channelId,
+          publicationMode: "WEB_EXPERIMENTAL",
+        },
+        responsePayload: {
+          status: result.status,
+          errorCode: result.errorCode ?? null,
+          stage: result.stage,
+          sendWasClicked: result.sendWasClicked,
+          sendClickStartedAt: result.sendClickStartedAt ?? null,
+          sendClickedAt: result.sendClickedAt ?? null,
+          deliveryUncertain: result.deliveryUncertain,
+        },
+        errorMessage: result.errorCode ?? null,
+      },
+    });
+    const current = await prisma.publication.findUnique({
+      where: { id: publication.id },
+      select: { metadata: true },
+    });
     await prisma.publication.update({
       where: { id: publication.id },
       data: {
@@ -300,9 +387,10 @@ async function main() {
         publishedAt: result.status === "PUBLISHED" ? new Date() : null,
         errorMessage: result.errorCode ?? null,
         metadata: {
-          ...record(publication.metadata),
+          ...record(current?.metadata),
           ...result.metadata,
-          rootCause: result.errorCode ?? null,
+          rootCause: result.rootCause,
+          stage: result.stage,
           retryAuthorized: false,
           deliveryUncertain: uncertain,
         } as Prisma.InputJsonValue,
@@ -324,7 +412,9 @@ async function main() {
     return;
   }
 
-  throw new Error("USAGE: login|health|diagnose|locate|dry-run|publish");
+  throw new Error(
+    "USAGE: login|health|diagnose|locate|dry-run|preflight|publish",
+  );
 }
 
 main()

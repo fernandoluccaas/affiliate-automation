@@ -492,3 +492,136 @@ describe("PlaywrightWhatsAppWebPageAdapter media draft", () => {
     });
   });
 });
+
+describe("PlaywrightWhatsAppWebPageAdapter media send trigger", () => {
+  function mediaEditorPage() {
+    return pageWithShell().add("css:[data-testid='media-editor']", {
+      visible: true,
+    });
+  }
+
+  it.each(["Enviar", "Send"])(
+    "finds the %s role alias only inside the media editor",
+    async (alias) => {
+      const page = mediaEditorPage().add(
+        `css:[data-testid='media-editor']>>role:button:${alias}:true`,
+        { visible: true, enabled: true },
+      );
+      page.add(`role:button:${alias}:true`, {
+        visible: true,
+        enabled: true,
+      });
+
+      const result = await adapter(page).inspectSendTrigger({
+        mediaExpected: true,
+      });
+
+      expect(result).toMatchObject({
+        found: true,
+        visible: true,
+        enabled: true,
+        candidateCount: 1,
+        stage: "READY_TO_COMMIT_SEND",
+      });
+      expect(page.clicks).toEqual([]);
+    },
+  );
+
+  it("falls back to a scoped aria-label selector", async () => {
+    const page = mediaEditorPage().add(
+      "css:[data-testid='media-editor']>>css:button[aria-label='Send']",
+      { visible: true, enabled: true },
+    );
+    await expect(
+      adapter(page).inspectSendTrigger({ mediaExpected: true }),
+    ).resolves.toMatchObject({ found: true, strategiesTried: 3 });
+  });
+
+  it.each([
+    ["SEND_TRIGGER_NOT_FOUND", []],
+    [
+      "SEND_TRIGGER_AMBIGUOUS",
+      [
+        { visible: true, enabled: true },
+        { visible: true, enabled: true },
+      ],
+    ],
+    ["SEND_TRIGGER_NOT_VISIBLE", [{ visible: false, enabled: true }]],
+    ["SEND_TRIGGER_DISABLED", [{ visible: true, enabled: false }]],
+  ] as const)("returns %s without clicking", async (stage, nodes) => {
+    const page = mediaEditorPage();
+    if (nodes.length) {
+      page.add(
+        "css:[data-testid='media-editor']>>role:button:Enviar:true",
+        ...nodes,
+      );
+    }
+
+    await expect(
+      adapter(page).inspectSendTrigger({ mediaExpected: true }),
+    ).resolves.toMatchObject({ stage });
+    expect(page.clicks).toEqual([]);
+  });
+
+  it("clicks only the trigger previously validated in the media editor", async () => {
+    const page = mediaEditorPage().add(
+      "css:[data-testid='media-editor']>>role:button:Enviar:true",
+      { visible: true, enabled: true },
+    );
+    const pageAdapter = adapter(page);
+    await pageAdapter.inspectSendTrigger({ mediaExpected: true });
+    await pageAdapter.clickSendTrigger();
+    expect(page.clicks).toEqual([
+      "css:[data-testid='media-editor']>>role:button:Enviar:true",
+    ]);
+  });
+
+  it("accepts a named page candidate only with a current media-editor ancestor", async () => {
+    const page = mediaEditorPage()
+      .add("role:button:Enviar:true", { visible: true, enabled: true })
+      .add(
+        "role:button:Enviar:true>>css:xpath=ancestor::*[.//*[@contenteditable='true'] and (.//*[@data-testid='media-caption-input-container'] or .//*[@data-testid='media-preview'] or @role='dialog' or @aria-modal='true')][1]",
+        { visible: true },
+      );
+
+    await expect(
+      adapter(page).inspectSendTrigger({ mediaExpected: true }),
+    ).resolves.toMatchObject({
+      found: true,
+      candidateCount: 1,
+      stage: "READY_TO_COMMIT_SEND",
+    });
+  });
+});
+
+describe("PlaywrightWhatsAppWebPageAdapter logical draft text", () => {
+  it("uses the editable lexical text instead of duplicated container text", async () => {
+    const page = pageWithShell()
+      .add("css:[data-testid='media-editor']", { visible: true })
+      .add(
+        "css:[data-testid='media-editor']>>role:textbox:Add a caption:false",
+        {
+          visible: true,
+          editable: true,
+          text: "Oferta https://meli.la/abc Oferta https://meli.la/abc",
+        },
+      )
+      .add(
+        "css:[data-testid='media-editor']>>role:textbox:Add a caption:false>>css:[data-lexical-text='true']",
+        { text: "Oferta https://meli.la/abc" },
+      )
+      .add("css:[data-testid='media-preview']", { visible: true });
+
+    await expect(
+      adapter(page).inspectPreparedDraft({
+        affiliateUrl: "https://meli.la/abc",
+        textSnippet: "Oferta",
+        expectedText: "Oferta https://meli.la/abc",
+        mediaExpected: true,
+      }),
+    ).resolves.toMatchObject({
+      affiliateUrlFound: true,
+      affiliateUrlOccurrences: 1,
+    });
+  });
+});

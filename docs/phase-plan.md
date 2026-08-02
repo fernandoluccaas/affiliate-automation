@@ -155,6 +155,7 @@ Status: implemented.
 - Added isolated persistent profiles, manual login, health, exact group location, safe dry run and protected publish commands.
 - Added mandatory Redis profile/publication locks, ownership confirmation, configuration fingerprinting, one-publication limit and first-success auto-pause.
 - Added visual confirmation and `DELIVERY_UNCERTAIN` metadata/review without automatic retry.
+- Added a no-click send preflight, media-editor-scoped semantic send trigger validation, durable click-initiation markers and new-outgoing-message confirmation.
 - Preserved assisted groups and Telegram as independent delivery modes.
 - Did not run a real external send and did not add unofficial protocol libraries, individual recipients, credential automation, QR capture or conversation/member collection.
 

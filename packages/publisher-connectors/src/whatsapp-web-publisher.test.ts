@@ -122,15 +122,29 @@ function adapter(
     fillText: vi.fn().mockResolvedValue(undefined),
     inspectPreparedDraft: vi.fn().mockResolvedValue({
       affiliateUrlFound: true,
+      affiliateUrlOccurrences: 1,
       textSnippetFound: true,
       mediaFound: true,
+      uploadErrorVisible: false,
     }),
-    send: vi.fn().mockResolvedValue(undefined),
+    inspectSendTrigger: vi.fn().mockResolvedValue({
+      found: true,
+      visible: true,
+      enabled: true,
+      candidateCount: 1,
+      strategiesTried: 1,
+      outgoingCount: 0,
+      stage: "READY_TO_COMMIT_SEND",
+    }),
+    clickSendTrigger: vi.fn().mockResolvedValue(undefined),
     confirmOutgoingMessage: vi.fn().mockResolvedValue({
       confirmed: true,
       affiliateUrlFound: true,
+      affiliateUrlOccurrences: 1,
       textSnippetFound: true,
       mediaFound: true,
+      uploadErrorVisible: false,
+      stage: "DELIVERY_CONFIRMED",
     }),
     clearDraft: vi.fn().mockResolvedValue(undefined),
     isDraftClear: vi.fn().mockResolvedValue(true),
@@ -332,7 +346,7 @@ describe("WhatsAppGroupsWebPublisher safe diagnosis and locate", () => {
     expect(page.attachImage).not.toHaveBeenCalled();
     expect(page.fillCaption).not.toHaveBeenCalled();
     expect(page.fillText).not.toHaveBeenCalled();
-    expect(page.send).not.toHaveBeenCalled();
+    expect(page.clickSendTrigger).not.toHaveBeenCalled();
     expect(close).toHaveBeenCalledOnce();
     expect(release).toHaveBeenCalledOnce();
   });
@@ -383,7 +397,7 @@ describe("WhatsAppGroupsWebPublisher safe diagnosis and locate", () => {
     expect(page.attachImage).not.toHaveBeenCalled();
     expect(page.fillCaption).not.toHaveBeenCalled();
     expect(page.fillText).not.toHaveBeenCalled();
-    expect(page.send).not.toHaveBeenCalled();
+    expect(page.clickSendTrigger).not.toHaveBeenCalled();
   });
 
   it("locates an exact writable group and always closes browser and lock", async () => {
@@ -422,7 +436,7 @@ describe("WhatsAppGroupsWebPublisher safe diagnosis and locate", () => {
     expect(page.attachImage).not.toHaveBeenCalled();
     expect(page.fillCaption).not.toHaveBeenCalled();
     expect(page.fillText).not.toHaveBeenCalled();
-    expect(page.send).not.toHaveBeenCalled();
+    expect(page.clickSendTrigger).not.toHaveBeenCalled();
     expect(close).toHaveBeenCalledOnce();
     expect(release).toHaveBeenCalledOnce();
   });
@@ -487,7 +501,7 @@ describe("WhatsAppGroupsWebPublisher safe diagnosis and locate", () => {
 
     expect(result.status).toBe("GROUP_AMBIGUOUS");
     expect(page.openGroup).not.toHaveBeenCalled();
-    expect(page.send).not.toHaveBeenCalled();
+    expect(page.clickSendTrigger).not.toHaveBeenCalled();
   });
 });
 
@@ -520,7 +534,7 @@ describe("WhatsAppGroupsWebPublisher dry run", () => {
       stage: "DRY_RUN_READY",
     });
     expect(page.fillText).toHaveBeenCalled();
-    expect(page.send).not.toHaveBeenCalled();
+    expect(page.clickSendTrigger).not.toHaveBeenCalled();
     expect(page.clearDraft).toHaveBeenCalled();
   });
 
@@ -641,7 +655,7 @@ describe("WhatsAppGroupsWebPublisher dry run", () => {
     });
     expect(page.attachImage).toHaveBeenCalledOnce();
     expect(page.fillCaption).toHaveBeenCalledOnce();
-    expect(page.send).not.toHaveBeenCalled();
+    expect(page.clickSendTrigger).not.toHaveBeenCalled();
   });
 
   it("returns FILE_NOT_FOUND_ON_DISK when the written temp file is absent", async () => {
@@ -778,7 +792,7 @@ describe("WhatsAppGroupsWebPublisher dry run", () => {
       sendCalled: false,
     });
     expect(page.clearDraft).toHaveBeenCalledOnce();
-    expect(page.send).not.toHaveBeenCalled();
+    expect(page.clickSendTrigger).not.toHaveBeenCalled();
   });
 
   it("preserves CAPTION_INPUT_NOT_FOUND", async () => {
@@ -819,8 +833,10 @@ describe("WhatsAppGroupsWebPublisher dry run", () => {
     const page = adapter({
       inspectPreparedDraft: vi.fn().mockResolvedValue({
         affiliateUrlFound: false,
+        affiliateUrlOccurrences: 0,
         textSnippetFound: true,
         mediaFound: true,
+        uploadErrorVisible: false,
       }),
     });
     const result = await new WhatsAppGroupsWebPublisher({
@@ -837,11 +853,100 @@ describe("WhatsAppGroupsWebPublisher dry run", () => {
       sendCalled: false,
     });
     expect(page.clearDraft).toHaveBeenCalledOnce();
-    expect(page.send).not.toHaveBeenCalled();
+    expect(page.clickSendTrigger).not.toHaveBeenCalled();
   });
 });
 
 describe("WhatsAppGroupsWebPublisher protected send", () => {
+  it("preflights the exact draft and send trigger without clicking", async () => {
+    const page = adapter();
+    const result = await new WhatsAppGroupsWebPublisher({
+      config: config(),
+      launcher: launcher(page),
+      profileLock: lock(),
+    }).preflight(input());
+
+    expect(result).toMatchObject({
+      status: "READY_TO_COMMIT_SEND",
+      groupExactMatch: true,
+      affiliateUrlConfirmedInDraft: true,
+      sendTriggerFound: true,
+      sendTriggerVisible: true,
+      sendTriggerEnabled: true,
+      sendCalled: false,
+      draftCleared: true,
+    });
+    expect(page.clickSendTrigger).not.toHaveBeenCalled();
+    expect(page.clearDraft).toHaveBeenCalledOnce();
+  });
+
+  it("fails preflight safely when the trigger is ambiguous", async () => {
+    const page = adapter({
+      inspectSendTrigger: vi.fn().mockResolvedValue({
+        found: true,
+        visible: false,
+        enabled: false,
+        candidateCount: 2,
+        strategiesTried: 1,
+        outgoingCount: 0,
+        stage: "SEND_TRIGGER_AMBIGUOUS",
+      }),
+    });
+    const result = await new WhatsAppGroupsWebPublisher({
+      config: config(),
+      launcher: launcher(page),
+      profileLock: lock(),
+    }).preflight(input());
+
+    expect(result).toMatchObject({
+      status: "FAILED",
+      stage: "SEND_TRIGGER_AMBIGUOUS",
+      sendCalled: false,
+      draftCleared: true,
+    });
+    expect(page.clickSendTrigger).not.toHaveBeenCalled();
+  });
+
+  it("fails preflight if the open group changes before commit", async () => {
+    const page = adapter({
+      verifyOpenedGroup: vi
+        .fn()
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce(false),
+    });
+    const result = await new WhatsAppGroupsWebPublisher({
+      config: config(),
+      launcher: launcher(page),
+      profileLock: lock(),
+    }).preflight(input());
+
+    expect(result).toMatchObject({
+      status: "FAILED",
+      stage: "PRE_SEND_GROUP_MISMATCH",
+      sendCalled: false,
+    });
+    expect(page.clickSendTrigger).not.toHaveBeenCalled();
+  });
+
+  it("does not click when the durable pre-send marker cannot be persisted", async () => {
+    const page = adapter();
+    const result = await new WhatsAppGroupsWebPublisher({
+      config: config({ dryRun: false }),
+      launcher: launcher(page),
+      profileLock: lock(),
+      recordSendState: vi.fn().mockRejectedValue(new Error("database down")),
+    }).publish(input());
+
+    expect(result).toMatchObject({
+      status: "FAILED",
+      sendWasClicked: false,
+      stage: "SEND_STATE_PERSIST_FAILED",
+      errorCode: "WHATSAPP_WEB_SEND_STATE_PERSIST_FAILED",
+    });
+    expect(page.clickSendTrigger).not.toHaveBeenCalled();
+    expect(page.clearDraft).toHaveBeenCalledOnce();
+  });
+
   it("refuses real send while dry-run protection is active", async () => {
     const page = adapter();
     const result = await new WhatsAppGroupsWebPublisher({
@@ -850,7 +955,7 @@ describe("WhatsAppGroupsWebPublisher protected send", () => {
       profileLock: lock(),
     }).publish(input());
     expect(result.errorCode).toBe("WHATSAPP_WEB_DISABLED");
-    expect(page.send).not.toHaveBeenCalled();
+    expect(page.clickSendTrigger).not.toHaveBeenCalled();
   });
 
   it("requires an unchanged successful dry-run fingerprint", async () => {
@@ -860,21 +965,36 @@ describe("WhatsAppGroupsWebPublisher protected send", () => {
       config: config({ dryRun: false }),
       launcher: launcher(),
       profileLock: lock(),
+      recordSendState: vi.fn().mockResolvedValue(undefined),
     }).publish(value);
     expect(result.errorCode).toBe("WHATSAPP_WEB_DRAFT_VALIDATION_FAILED");
   });
 
   it("publishes only after visual confirmation", async () => {
+    const recordSendState = vi.fn().mockResolvedValue(undefined);
     const result = await new WhatsAppGroupsWebPublisher({
       config: config({ dryRun: false }),
       launcher: launcher(),
       profileLock: lock(),
+      recordSendState,
     }).publish(input());
     expect(result).toMatchObject({ status: "PUBLISHED", sendWasClicked: true });
     expect(result.metadata).toMatchObject({
-      confirmationStrategy: "VISUAL_OUTGOING_MESSAGE",
-      confirmedAffiliateUrl: "https://meli.la/abc",
+      confirmationStrategy: "VISUAL_NEW_OUTGOING_MESSAGE",
     });
+    expect(recordSendState).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stage: "SEND_CLICK_STARTED",
+        sendWasClicked: false,
+        deliveryUncertain: true,
+      }),
+    );
+    expect(recordSendState).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stage: "SEND_CLICK_COMPLETED",
+        sendWasClicked: true,
+      }),
+    );
   });
 
   it("blocks automatic retry when confirmation is inconclusive after click", async () => {
@@ -882,14 +1002,18 @@ describe("WhatsAppGroupsWebPublisher protected send", () => {
       confirmOutgoingMessage: vi.fn().mockResolvedValue({
         confirmed: false,
         affiliateUrlFound: false,
+        affiliateUrlOccurrences: 0,
         textSnippetFound: false,
         mediaFound: false,
+        uploadErrorVisible: false,
+        stage: "DELIVERY_CONFIRMATION_TIMEOUT",
       }),
     });
     const result = await new WhatsAppGroupsWebPublisher({
       config: config({ dryRun: false }),
       launcher: launcher(page),
       profileLock: lock(),
+      recordSendState: vi.fn().mockResolvedValue(undefined),
     }).publish(input());
     expect(result).toMatchObject({
       status: "DELIVERY_UNCERTAIN",
@@ -898,19 +1022,22 @@ describe("WhatsAppGroupsWebPublisher protected send", () => {
     });
   });
 
-  it("does not classify a failure before click as delivery uncertain", async () => {
+  it("classifies an error after click initiation as delivery uncertain", async () => {
     const page = adapter({
-      send: vi.fn().mockRejectedValue(new Error("WHATSAPP_WEB_SEND_FAILED")),
+      clickSendTrigger: vi
+        .fn()
+        .mockRejectedValue(new Error("WHATSAPP_WEB_SEND_FAILED")),
     });
     const result = await new WhatsAppGroupsWebPublisher({
       config: config({ dryRun: false }),
       launcher: launcher(page),
       profileLock: lock(),
+      recordSendState: vi.fn().mockResolvedValue(undefined),
     }).publish(input());
     expect(result).toMatchObject({
-      status: "FAILED",
+      status: "DELIVERY_UNCERTAIN",
       sendWasClicked: false,
-      errorCode: "WHATSAPP_WEB_SEND_FAILED",
+      errorCode: "WHATSAPP_WEB_DELIVERY_UNCERTAIN",
     });
   });
 });

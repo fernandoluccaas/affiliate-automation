@@ -15,6 +15,9 @@ export type WhatsAppWebErrorCode =
   | "WHATSAPP_WEB_MEDIA_UPLOAD_FAILED"
   | "WHATSAPP_WEB_DRAFT_VALIDATION_FAILED"
   | "WHATSAPP_WEB_DRAFT_CLEANUP_FAILED"
+  | "WHATSAPP_WEB_PRE_SEND_VALIDATION_FAILED"
+  | "WHATSAPP_WEB_SEND_TRIGGER_FAILED"
+  | "WHATSAPP_WEB_SEND_STATE_PERSIST_FAILED"
   | "WHATSAPP_WEB_SEND_FAILED"
   | "WHATSAPP_WEB_CONFIRMATION_TIMEOUT"
   | "WHATSAPP_WEB_DELIVERY_UNCERTAIN"
@@ -76,7 +79,30 @@ export type WhatsAppWebDiagnosticStage =
   | "PUBLISH_PERMISSION_UNDETERMINED"
   | "READY_FOR_GROUP_SEARCH"
   | "GROUP_FOUND"
-  | "DRY_RUN_READY";
+  | "DRY_RUN_READY"
+  | "READY_TO_COMMIT_SEND"
+  | "PRE_SEND_VALIDATION_STARTED"
+  | "PRE_SEND_GROUP_MISMATCH"
+  | "PRE_SEND_MEDIA_PREVIEW_MISSING"
+  | "PRE_SEND_CAPTION_MISSING"
+  | "PRE_SEND_AFFILIATE_URL_MISSING"
+  | "SEND_TRIGGER_NOT_FOUND"
+  | "SEND_TRIGGER_NOT_VISIBLE"
+  | "SEND_TRIGGER_DISABLED"
+  | "SEND_TRIGGER_NOT_INTERACTABLE"
+  | "SEND_TRIGGER_AMBIGUOUS"
+  | "SEND_CLICK_STARTED"
+  | "SEND_CLICK_FAILED"
+  | "SEND_CLICK_COMPLETED"
+  | "SEND_STATE_PERSIST_FAILED"
+  | "DELIVERY_CONFIRMATION_STARTED"
+  | "OUTGOING_MESSAGE_NOT_FOUND"
+  | "OUTGOING_MEDIA_NOT_CONFIRMED"
+  | "OUTGOING_TEXT_NOT_CONFIRMED"
+  | "OUTGOING_AFFILIATE_URL_NOT_CONFIRMED"
+  | "DELIVERY_CONFIRMATION_TIMEOUT"
+  | "DELIVERY_CONFIRMED"
+  | "DELIVERY_UNCERTAIN";
 
 export type WhatsAppWebAttachStrategy =
   "DIRECT_FILE_CHOOSER" | "IMAGE_OPTION_FILE_CHOOSER" | "SET_INPUT_FILES";
@@ -104,6 +130,14 @@ export type WhatsAppWebSafeDiagnostics = {
   captionDetected?: boolean;
   draftValidated?: boolean;
   draftCleared?: boolean;
+  uploadErrorVisible?: boolean;
+  affiliateUrlOccurrences?: number;
+  closeTriggerFound?: boolean;
+  escapeUsed?: boolean;
+  discardTriggerFound?: boolean;
+  activeMediaCaptionFound?: boolean;
+  discardTriggerVisible?: boolean;
+  normalComposerEmpty?: boolean;
 };
 
 export type WhatsAppWebMediaAttachmentResult = {
@@ -115,6 +149,12 @@ export type WhatsAppWebMediaAttachmentResult = {
 
 export type WhatsAppWebCaptionResult = {
   captionDetected: true;
+};
+
+export type WhatsAppWebDraftCleanupResult = {
+  closeTriggerFound: boolean;
+  escapeUsed: boolean;
+  discardTriggerFound: boolean;
 };
 
 export type WhatsAppWebControlResult = {
@@ -167,12 +207,25 @@ export type AuthenticationState =
 
 export type PreparedDraftInspection = {
   affiliateUrlFound: boolean;
+  affiliateUrlOccurrences: number;
   textSnippetFound: boolean;
   mediaFound: boolean;
+  uploadErrorVisible: boolean;
 };
 
 export type OutgoingMessageConfirmation = PreparedDraftInspection & {
   confirmed: boolean;
+  stage: WhatsAppWebDiagnosticStage;
+};
+
+export type WhatsAppWebSendTriggerInspection = {
+  found: boolean;
+  visible: boolean;
+  enabled: boolean;
+  candidateCount: number;
+  strategiesTried: number;
+  outgoingCount: number;
+  stage: WhatsAppWebDiagnosticStage;
 };
 
 export interface WhatsAppWebPageAdapter {
@@ -195,16 +248,21 @@ export interface WhatsAppWebPageAdapter {
   inspectPreparedDraft(input: {
     affiliateUrl: string;
     textSnippet: string;
+    expectedText: string;
     mediaExpected: boolean;
   }): Promise<PreparedDraftInspection>;
-  send(): Promise<void>;
+  inspectSendTrigger(input: {
+    mediaExpected: boolean;
+  }): Promise<WhatsAppWebSendTriggerInspection>;
+  clickSendTrigger(): Promise<void>;
   confirmOutgoingMessage(input: {
     affiliateUrl: string;
     textSnippet: string;
     mediaExpected: boolean;
     sentAfter: Date;
+    outgoingCountBefore: number;
   }): Promise<OutgoingMessageConfirmation>;
-  clearDraft(): Promise<void>;
+  clearDraft(): Promise<WhatsAppWebDraftCleanupResult>;
   isDraftClear(): Promise<boolean>;
   capturePreparedDraft?(path: string): Promise<void>;
 }

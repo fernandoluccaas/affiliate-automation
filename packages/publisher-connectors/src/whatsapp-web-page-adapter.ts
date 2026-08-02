@@ -13,10 +13,12 @@ import {
   type WhatsAppGroupLocationResult,
   type WhatsAppWebControlResult,
   type WhatsAppWebDiagnosticStage,
+  type WhatsAppWebDraftCleanupResult,
   type WhatsAppWebErrorCode,
   type WhatsAppWebMediaAttachmentResult,
   type WhatsAppWebPageAdapter,
   type WhatsAppWebSafeDiagnostics,
+  type WhatsAppWebSendTriggerInspection,
   type WhatsAppWebStructureDiagnosticResult,
 } from "./whatsapp-web-types";
 
@@ -49,6 +51,12 @@ function errorCodeForDiagnosticStage(
   if (stage === "DRAFT_CLEANUP_FAILED") {
     return "WHATSAPP_WEB_DRAFT_CLEANUP_FAILED";
   }
+  if (stage.startsWith("PRE_SEND_")) {
+    return "WHATSAPP_WEB_PRE_SEND_VALIDATION_FAILED";
+  }
+  if (stage.startsWith("SEND_TRIGGER_") || stage === "SEND_CLICK_FAILED") {
+    return "WHATSAPP_WEB_SEND_TRIGGER_FAILED";
+  }
   if (
     stage === "CAPTION_INPUT_NOT_FOUND" ||
     stage === "CAPTION_NOT_EDITABLE" ||
@@ -68,6 +76,7 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
   private globalSearchInput: Locator | null = null;
   private exactGroupResult: Locator | null = null;
   private lastLocationDiagnostics: WhatsAppWebSafeDiagnostics | null = null;
+  private validatedSendTrigger: Locator | null = null;
 
   constructor(
     private readonly page: Page,
@@ -535,12 +544,23 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
   async inspectPreparedDraft(input: {
     affiliateUrl: string;
     textSnippet: string;
+    expectedText: string;
     mediaExpected: boolean;
   }): Promise<PreparedDraftInspection> {
-    const draftText = await this.page
-      .locator("footer, [data-testid='media-caption-input-container']")
-      .allInnerTexts();
-    const text = normalizedText(draftText.join(" "));
+    const draftControl = input.mediaExpected
+      ? await this.findCaptionInput()
+      : (await this.findWritableComposer()).locator;
+    const lexicalText = draftControl
+      ? await draftControl
+          .locator("[data-lexical-text='true']")
+          .allInnerTexts()
+          .catch(() => [])
+      : [];
+    const text = normalizedText(
+      lexicalText.length > 0
+        ? lexicalText.join("")
+        : ((await draftControl?.innerText().catch(() => "")) ?? ""),
+    );
     const mediaFound = Boolean(
       await this.firstVisible(
         whatsappWebStableSelectors.mediaPreview.map((selector) =>
@@ -548,22 +568,226 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
         ),
       ),
     );
+    const expectedText = normalizedText(input.expectedText);
+    const expectedSnapshotFound = text.includes(expectedText);
+    const logicalText = expectedSnapshotFound ? expectedText : text;
+    const affiliateUrlOccurrences =
+      logicalText.split(input.affiliateUrl).length - 1;
+    const mediaSurface = await this.visibleMediaSurface();
+    let uploadErrorVisible = false;
+    if (mediaSurface) {
+      for (const alias of whatsappWebAccessibleAliases.uploadError) {
+        const candidate = mediaSurface.getByText(alias, { exact: false });
+        if (
+          (await candidate.count().catch(() => 0)) > 0 &&
+          (await candidate
+            .first()
+            .isVisible()
+            .catch(() => false))
+        ) {
+          uploadErrorVisible = true;
+          break;
+        }
+      }
+    }
     return {
-      affiliateUrlFound: text.includes(input.affiliateUrl),
-      textSnippetFound: text.includes(normalizedText(input.textSnippet)),
+      affiliateUrlFound: affiliateUrlOccurrences === 1,
+      affiliateUrlOccurrences,
+      textSnippetFound:
+        expectedSnapshotFound &&
+        logicalText.includes(normalizedText(input.textSnippet)),
       mediaFound: input.mediaExpected ? mediaFound : true,
+      uploadErrorVisible,
     };
   }
 
-  async send() {
-    const button = await this.firstVisible([
-      this.page.locator(whatsappWebStableSelectors.sendButton),
-      ...whatsappWebAccessibleAliases.send.map((name) =>
-        this.page.getByRole("button", { name, exact: true }),
-      ),
-    ]);
-    if (!button) throw new Error("WHATSAPP_WEB_SELECTOR_MISMATCH");
-    await button.click();
+  async inspectSendTrigger(input: {
+    mediaExpected: boolean;
+  }): Promise<WhatsAppWebSendTriggerInspection> {
+    this.validatedSendTrigger = null;
+    const scopes = input.mediaExpected
+      ? await this.visibleMediaSurfaces()
+      : [
+          await this.firstVisible([
+            this.page.locator("#main footer"),
+            this.page.locator("main footer"),
+          ]),
+        ].filter((value): value is Locator => value !== null);
+    const outgoingCount = await this.page
+      .locator(whatsappWebStableSelectors.outgoingMessage)
+      .count()
+      .catch(() => 0);
+    if (scopes.length === 0) {
+      return {
+        found: false,
+        visible: false,
+        enabled: false,
+        candidateCount: 0,
+        strategiesTried: 0,
+        outgoingCount,
+        stage: "SEND_TRIGGER_NOT_FOUND",
+      };
+    }
+
+    let strategiesTried = 0;
+    for (const scope of scopes) {
+      const strategies = [
+        ...whatsappWebAccessibleAliases.send.map((name) =>
+          scope.getByRole("button", { name, exact: true }),
+        ),
+        ...whatsappWebStableSelectors.mediaSendTrigger.map((selector) =>
+          scope.locator(selector),
+        ),
+      ];
+      for (const strategy of strategies) {
+        strategiesTried += 1;
+        const count = await strategy.count().catch(() => 0);
+        if (count === 0) continue;
+        if (count !== 1) {
+          return {
+            found: true,
+            visible: false,
+            enabled: false,
+            candidateCount: count,
+            strategiesTried,
+            outgoingCount,
+            stage: "SEND_TRIGGER_AMBIGUOUS",
+          };
+        }
+        const candidate = strategy.first();
+        const visible = await candidate.isVisible().catch(() => false);
+        const enabled = await candidate.isEnabled().catch(() => false);
+        if (!visible) {
+          return {
+            found: true,
+            visible,
+            enabled,
+            candidateCount: 1,
+            strategiesTried,
+            outgoingCount,
+            stage: "SEND_TRIGGER_NOT_VISIBLE",
+          };
+        }
+        if (!enabled) {
+          return {
+            found: true,
+            visible,
+            enabled,
+            candidateCount: 1,
+            strategiesTried,
+            outgoingCount,
+            stage: "SEND_TRIGGER_DISABLED",
+          };
+        }
+        this.validatedSendTrigger = candidate;
+        return {
+          found: true,
+          visible: true,
+          enabled: true,
+          candidateCount: 1,
+          strategiesTried,
+          outgoingCount,
+          stage: "READY_TO_COMMIT_SEND",
+        };
+      }
+    }
+    if (input.mediaExpected) {
+      const editorBoundStrategies = [
+        ...whatsappWebAccessibleAliases.send.map((name) =>
+          this.page.getByRole("button", { name, exact: true }),
+        ),
+        ...whatsappWebStableSelectors.mediaSendTrigger.map((selector) =>
+          this.page.locator(selector),
+        ),
+      ];
+      for (const strategy of editorBoundStrategies) {
+        strategiesTried += 1;
+        const count = await strategy.count().catch(() => 0);
+        const candidates: Locator[] = [];
+        for (let index = 0; index < count; index += 1) {
+          const candidate = strategy.nth(index);
+          if (await this.isInsideCurrentMediaEditor(candidate)) {
+            candidates.push(candidate);
+          }
+        }
+        if (candidates.length === 0) continue;
+        if (candidates.length !== 1) {
+          return {
+            found: true,
+            visible: false,
+            enabled: false,
+            candidateCount: candidates.length,
+            strategiesTried,
+            outgoingCount,
+            stage: "SEND_TRIGGER_AMBIGUOUS",
+          };
+        }
+        const candidate = candidates[0]!;
+        const visible = await candidate.isVisible().catch(() => false);
+        const enabled = await candidate.isEnabled().catch(() => false);
+        if (!visible || !enabled) {
+          return {
+            found: true,
+            visible,
+            enabled,
+            candidateCount: 1,
+            strategiesTried,
+            outgoingCount,
+            stage: visible
+              ? "SEND_TRIGGER_DISABLED"
+              : "SEND_TRIGGER_NOT_VISIBLE",
+          };
+        }
+        this.validatedSendTrigger = candidate;
+        return {
+          found: true,
+          visible: true,
+          enabled: true,
+          candidateCount: 1,
+          strategiesTried,
+          outgoingCount,
+          stage: "READY_TO_COMMIT_SEND",
+        };
+      }
+    }
+    return {
+      found: false,
+      visible: false,
+      enabled: false,
+      candidateCount: 0,
+      strategiesTried,
+      outgoingCount,
+      stage: "SEND_TRIGGER_NOT_FOUND",
+    };
+  }
+
+  async clickSendTrigger() {
+    const button = this.validatedSendTrigger;
+    if (!button) {
+      throw await this.stageError("SEND_TRIGGER_NOT_INTERACTABLE", {});
+    }
+    const visible = await button.isVisible().catch(() => false);
+    const enabled = await button.isEnabled().catch(() => false);
+    if (!visible || !enabled) {
+      throw await this.stageError(
+        visible ? "SEND_TRIGGER_DISABLED" : "SEND_TRIGGER_NOT_VISIBLE",
+        {},
+        { candidateCount: 1, visible, enabled },
+      );
+    }
+    try {
+      await button.click();
+    } catch {
+      throw await this.stageError(
+        "SEND_CLICK_FAILED",
+        {},
+        {
+          candidateCount: 1,
+          visible: true,
+          enabled: true,
+        },
+      );
+    }
   }
 
   async confirmOutgoingMessage(input: {
@@ -571,38 +795,68 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
     textSnippet: string;
     mediaExpected: boolean;
     sentAfter: Date;
+    outgoingCountBefore: number;
   }): Promise<OutgoingMessageConfirmation> {
-    const outgoing = this.page
-      .locator(whatsappWebStableSelectors.outgoingMessage)
-      .last();
-    try {
-      await outgoing.waitFor({
-        state: "visible",
-        timeout: this.confirmationTimeoutMs,
-      });
-      const text = normalizedText(await outgoing.innerText());
-      const affiliateUrlFound = text.includes(input.affiliateUrl);
-      const textSnippetFound = text.includes(normalizedText(input.textSnippet));
-      const mediaFound = input.mediaExpected
-        ? (await outgoing.locator("img, [data-testid*='media']").count()) > 0
-        : true;
-      return {
-        confirmed: affiliateUrlFound && textSnippetFound && mediaFound,
-        affiliateUrlFound,
-        textSnippetFound,
-        mediaFound,
-      };
-    } catch {
-      return {
-        confirmed: false,
-        affiliateUrlFound: false,
-        textSnippetFound: false,
-        mediaFound: false,
-      };
-    }
+    const deadline = Date.now() + this.confirmationTimeoutMs;
+    let lastStage: OutgoingMessageConfirmation["stage"] =
+      "OUTGOING_MESSAGE_NOT_FOUND";
+    do {
+      const outgoing = this.page.locator(
+        whatsappWebStableSelectors.outgoingMessage,
+      );
+      const count = await outgoing.count().catch(() => 0);
+      for (let index = input.outgoingCountBefore; index < count; index += 1) {
+        const candidate = outgoing.nth(index);
+        if (!(await candidate.isVisible().catch(() => false))) continue;
+        const text = normalizedText(await candidate.innerText());
+        const affiliateUrlFound = text.includes(input.affiliateUrl);
+        const textSnippetFound = text.includes(
+          normalizedText(input.textSnippet),
+        );
+        const mediaFound = input.mediaExpected
+          ? (await candidate
+              .locator("img, [data-testid*='media']")
+              .count()
+              .catch(() => 0)) > 0
+          : true;
+        lastStage = !affiliateUrlFound
+          ? "OUTGOING_AFFILIATE_URL_NOT_CONFIRMED"
+          : !textSnippetFound
+            ? "OUTGOING_TEXT_NOT_CONFIRMED"
+            : !mediaFound
+              ? "OUTGOING_MEDIA_NOT_CONFIRMED"
+              : "DELIVERY_CONFIRMED";
+        if (lastStage !== "DELIVERY_CONFIRMED") continue;
+        return {
+          confirmed: true,
+          affiliateUrlFound,
+          affiliateUrlOccurrences: text.split(input.affiliateUrl).length - 1,
+          textSnippetFound,
+          mediaFound,
+          uploadErrorVisible: false,
+          stage: "DELIVERY_CONFIRMED",
+        };
+      }
+      await this.page.waitForTimeout(150);
+    } while (Date.now() < deadline);
+    return {
+      confirmed: false,
+      affiliateUrlFound: false,
+      affiliateUrlOccurrences: 0,
+      textSnippetFound: false,
+      mediaFound: false,
+      uploadErrorVisible: false,
+      stage:
+        lastStage === "OUTGOING_MESSAGE_NOT_FOUND"
+          ? "DELIVERY_CONFIRMATION_TIMEOUT"
+          : lastStage,
+    };
   }
 
-  async clearDraft() {
+  async clearDraft(): Promise<WhatsAppWebDraftCleanupResult> {
+    let closeTriggerFound = false;
+    let escapeUsed = false;
+    let discardTriggerFound = false;
     const captionOrComposer =
       (await this.findCaptionInput()) ??
       (await this.firstVisible([
@@ -611,51 +865,65 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
         ),
       ]));
     if (captionOrComposer) await captionOrComposer.fill("");
-    const mediaSurface = await this.firstVisible(
-      whatsappWebStableSelectors.mediaSurface.map((selector) =>
-        this.page.locator(selector),
-      ),
-    );
+    const mediaSurface = await this.visibleMediaSurface();
     if (mediaSurface) {
-      const close = await this.firstVisible([
-        ...whatsappWebAccessibleAliases.close.map((name) =>
-          mediaSurface.getByRole("button", { name, exact: true }),
-        ),
-        ...whatsappWebAccessibleAliases.cancel.map((name) =>
-          mediaSurface.getByRole("button", { name, exact: true }),
-        ),
-        ...whatsappWebStableSelectors.mediaClose.map((selector) =>
-          this.page.locator(selector),
-        ),
-      ]);
+      const close = await this.findMediaCloseTrigger();
       if (close) {
-        await close.click();
+        closeTriggerFound = true;
+        await close.click().catch(() => undefined);
       } else {
+        escapeUsed = true;
         await this.page.keyboard.press("Escape");
       }
-      await this.clickDiscardIfVisible();
-      if (
-        await this.firstVisible(
-          whatsappWebStableSelectors.mediaPreview.map((selector) =>
-            this.page.locator(selector),
-          ),
-        )
-      ) {
+      discardTriggerFound =
+        (await this.clickDiscardIfVisible()) || discardTriggerFound;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        if (!(await this.visibleMediaSurface())) break;
+        escapeUsed = true;
         await this.page.keyboard.press("Escape");
-        await this.clickDiscardIfVisible();
+        discardTriggerFound =
+          (await this.clickDiscardIfVisible()) || discardTriggerFound;
+        await this.page.waitForTimeout(250);
       }
     }
+    const composer = await this.findWritableComposer();
+    if (composer.found && composer.locator) {
+      await composer.locator.fill("").catch(() => undefined);
+    }
+    return { closeTriggerFound, escapeUsed, discardTriggerFound };
   }
 
   async isDraftClear() {
-    const previewVisible = Boolean(
-      await this.firstVisible(
-        whatsappWebStableSelectors.mediaPreview.map((selector) =>
-          this.page.locator(selector),
-        ),
-      ),
+    const deadline = Date.now() + Math.min(this.actionTimeoutMs, 5_000);
+    do {
+      if (await this.isDraftClearOnce()) return true;
+      await this.page.waitForTimeout(150);
+    } while (Date.now() < deadline);
+    const activeMediaCaptionFound = Boolean(
+      await this.findCaptionInputInMediaSurface(),
     );
-    if (previewVisible) return false;
+    const discardTriggerVisible = Boolean(await this.findDiscardTrigger());
+    const composer = await this.findWritableComposer();
+    const normalComposerEmpty =
+      !composer.found ||
+      !composer.locator ||
+      normalizedText(await composer.locator.innerText().catch(() => "")) === "";
+    throw await this.stageError(
+      "DRAFT_CLEANUP_FAILED",
+      {},
+      {
+        activeMediaCaptionFound,
+        discardTriggerVisible,
+        normalComposerEmpty,
+      },
+    );
+  }
+
+  private async isDraftClearOnce() {
+    if (await this.findCaptionInputInMediaSurface()) {
+      return false;
+    }
+    if (await this.findDiscardTrigger()) return false;
     const composer = await this.findWritableComposer();
     if (!composer.found || !composer.locator) return true;
     return (
@@ -873,6 +1141,19 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
   }
 
   private async findCaptionInput() {
+    const scoped = await this.findCaptionInputInMediaSurface();
+    if (scoped) return scoped;
+    return this.firstVisible([
+      ...whatsappWebAccessibleAliases.caption.map((name) =>
+        this.page.getByRole("textbox", { name, exact: false }),
+      ),
+      ...whatsappWebStableSelectors.captionInput.map((selector) =>
+        this.page.locator(selector),
+      ),
+    ]);
+  }
+
+  private async findCaptionInputInMediaSurface() {
     for (const selector of whatsappWebStableSelectors.mediaSurface) {
       const surfaces = this.page.locator(selector);
       const count = await surfaces.count().catch(() => 0);
@@ -889,30 +1170,88 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
         if (candidate) return candidate;
       }
     }
-    return this.firstVisible([
-      ...whatsappWebAccessibleAliases.caption.map((name) =>
-        this.page.getByRole("textbox", { name, exact: false }),
-      ),
-      ...whatsappWebStableSelectors.captionInput.map((selector) =>
+    return null;
+  }
+
+  private async visibleMediaSurface() {
+    return (await this.visibleMediaSurfaces())[0] ?? null;
+  }
+
+  private async visibleMediaSurfaces() {
+    const visible: Locator[] = [];
+    for (const selector of whatsappWebStableSelectors.mediaSurface) {
+      const candidates = this.page.locator(selector);
+      const count = await candidates.count().catch(() => 0);
+      for (let index = 0; index < count; index += 1) {
+        const candidate = candidates.nth(index);
+        if (await candidate.isVisible().catch(() => false)) {
+          visible.push(candidate);
+        }
+      }
+    }
+    return visible;
+  }
+
+  private async isInsideCurrentMediaEditor(candidate: Locator) {
+    const editorAncestor = candidate.locator(
+      "xpath=ancestor::*[.//*[@contenteditable='true'] and (.//*[@data-testid='media-caption-input-container'] or .//*[@data-testid='media-preview'] or @role='dialog' or @aria-modal='true')][1]",
+    );
+    return (await editorAncestor.count().catch(() => 0)) === 1;
+  }
+
+  private async findMediaCloseTrigger() {
+    const aliases = [
+      ...whatsappWebAccessibleAliases.close,
+      ...whatsappWebAccessibleAliases.cancel,
+      ...whatsappWebAccessibleAliases.back,
+    ];
+    for (const surface of await this.visibleMediaSurfaces()) {
+      const candidate = await this.firstVisible(
+        aliases.map((name) =>
+          surface.getByRole("button", { name, exact: true }),
+        ),
+      );
+      if (candidate) return candidate;
+    }
+    for (const name of aliases) {
+      const candidates = this.page.getByRole("button", { name, exact: true });
+      const count = await candidates.count().catch(() => 0);
+      for (let index = 0; index < count; index += 1) {
+        const candidate = candidates.nth(index);
+        if (
+          (await candidate.isVisible().catch(() => false)) &&
+          (await this.isInsideCurrentMediaEditor(candidate))
+        ) {
+          return candidate;
+        }
+      }
+    }
+    return this.firstVisible(
+      whatsappWebStableSelectors.mediaClose.map((selector) =>
         this.page.locator(selector),
       ),
-    ]);
+    );
   }
 
   private async clickDiscardIfVisible() {
     const deadline = Date.now() + 2_000;
     do {
-      const discard = await this.firstVisible(
-        whatsappWebAccessibleAliases.discard.map((name) =>
-          this.page.getByRole("button", { name, exact: true }),
-        ),
-      );
+      const discard = await this.findDiscardTrigger();
       if (discard) {
         await discard.click();
-        return;
+        return true;
       }
       await this.page.waitForTimeout(100);
     } while (Date.now() < deadline);
+    return false;
+  }
+
+  private async findDiscardTrigger() {
+    return this.firstVisible(
+      whatsappWebAccessibleAliases.discard.map((name) =>
+        this.page.getByRole("button", { name, exact: true }),
+      ),
+    );
   }
 
   private async waitForImageFileInput(timeoutMs: number) {

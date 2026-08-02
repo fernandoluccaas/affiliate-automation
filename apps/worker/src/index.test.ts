@@ -7,6 +7,7 @@ import {
   createLockedWorkerDependencies,
   createPublicationIdempotently,
   getChannelMessageFooter,
+  hasBlockedWhatsAppWebSendState,
   hasAssistedGroupPendingCapacity,
   headlineFromMessagePayload,
   isExperimentalWhatsAppGroup,
@@ -92,6 +93,28 @@ describe("experimental WhatsApp group isolation", () => {
         type: "TELEGRAM",
         configuration: { publicationMode: "WEB_EXPERIMENTAL" },
       } as unknown as Channel),
+    ).toBe(false);
+  });
+
+  it("blocks automatic reuse after send initiation or uncertain delivery", () => {
+    expect(
+      hasBlockedWhatsAppWebSendState({
+        sendClickStartedAt: "2026-08-02T10:00:00.000Z",
+        sendWasClicked: false,
+        retryAuthorized: false,
+      }),
+    ).toBe(true);
+    expect(
+      hasBlockedWhatsAppWebSendState({
+        deliveryUncertain: true,
+        retryAuthorized: false,
+      }),
+    ).toBe(true);
+    expect(
+      hasBlockedWhatsAppWebSendState({
+        sendClickStartedAt: "2026-08-02T10:00:00.000Z",
+        retryAuthorized: true,
+      }),
     ).toBe(false);
   });
 });

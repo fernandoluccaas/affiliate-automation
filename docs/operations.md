@@ -278,7 +278,8 @@ The assisted flow remains the stable fallback. The experimental Web flow has a s
 5. Authenticate manually with `npm run whatsapp:web:login -- --profile principal`. Scan the QR only in the visible browser; it is never captured.
 6. Run `npm run whatsapp:web:health -- --profile principal`, then `npm run whatsapp:web:diagnose -- --profile principal`, and finally `npm run whatsapp:web:locate -- --channel-id <id>`. Diagnose does not type, open a conversation or create a draft; locate uses the persisted exact group name and does not prepare content.
 7. Run `npm run whatsapp:web:dry-run -- --publication-id <id>`. It must return `READY_TO_SEND`; no send button is called and the draft must be cleared.
-8. After human review only, set `WHATSAPP_WEB_DRY_RUN=false` and run `npm run whatsapp:web:publish -- --publication-id <id> --confirm-send`. Omitting `--confirm-send` refuses delivery.
+8. Run `npm run whatsapp:web:preflight -- --publication-id <id>`. It must return `READY_TO_COMMIT_SEND`, report one visible and enabled trigger scoped to the current media editor, never click it, and clear the draft.
+9. After human review only, set `WHATSAPP_WEB_DRY_RUN=false` and run `npm run whatsapp:web:publish -- --publication-id <id> --confirm-send`. Omitting `--confirm-send` refuses delivery. Once `sendClickStartedAt` exists, automatic retry remains blocked even if the click result is unknown.
 
 Redis is mandatory for Web mode. Missing Chromium reports `WHATSAPP_WEB_BROWSER_UNAVAILABLE`; missing login, selector mismatch, ambiguity or permission errors pause only the affected group. After the first confirmed success the group auto-pauses with `WHATSAPP_WEB_FIRST_SUCCESS_REVIEW_REQUIRED`. If send was clicked but confirmation is inconclusive, verify the group manually and use the authenticated review actions; retry stays blocked until explicitly authorized.
 
