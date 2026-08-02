@@ -261,6 +261,8 @@ async function main() {
       webLastAttemptAt: result.dryRunAt,
       webLastDryRunStatus: result.status,
       webLastError: result.errorCode ?? null,
+      webLastDryRunStage: result.stage ?? null,
+      webLastDryRunDiagnostics: result.diagnostics ?? null,
       ...(result.status === "READY_TO_SEND"
         ? {
             lastSuccessfulDryRunAt: result.dryRunAt,

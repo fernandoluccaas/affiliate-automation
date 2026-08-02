@@ -13,6 +13,8 @@ import {
   type WhatsAppGroupLocationResult,
   type WhatsAppWebControlResult,
   type WhatsAppWebDiagnosticStage,
+  type WhatsAppWebErrorCode,
+  type WhatsAppWebMediaAttachmentResult,
   type WhatsAppWebPageAdapter,
   type WhatsAppWebSafeDiagnostics,
   type WhatsAppWebStructureDiagnosticResult,
@@ -20,6 +22,41 @@ import {
 
 function normalizedText(value: string) {
   return value.replace(/\s+/g, " ").trim();
+}
+
+function errorCodeForDiagnosticStage(
+  stage: WhatsAppWebDiagnosticStage,
+): WhatsAppWebErrorCode {
+  if (
+    stage === "FILE_NOT_WRITTEN" ||
+    stage === "FILE_NOT_FOUND_ON_DISK" ||
+    stage === "FILE_SIZE_ZERO" ||
+    stage === "FILE_MIME_INVALID"
+  ) {
+    return "WHATSAPP_WEB_MEDIA_PREPARATION_FAILED";
+  }
+  if (
+    stage === "ATTACH_TRIGGER_NOT_FOUND" ||
+    stage === "ATTACH_MENU_NOT_FOUND" ||
+    stage === "IMAGE_OPTION_NOT_FOUND" ||
+    stage === "FILE_INPUT_NOT_FOUND" ||
+    stage === "FILE_CHOOSER_NOT_OPENED" ||
+    stage === "MEDIA_UPLOAD_FAILED" ||
+    stage === "MEDIA_PREVIEW_NOT_FOUND"
+  ) {
+    return "WHATSAPP_WEB_MEDIA_UPLOAD_FAILED";
+  }
+  if (stage === "DRAFT_CLEANUP_FAILED") {
+    return "WHATSAPP_WEB_DRAFT_CLEANUP_FAILED";
+  }
+  if (
+    stage === "CAPTION_INPUT_NOT_FOUND" ||
+    stage === "CAPTION_NOT_EDITABLE" ||
+    stage === "DRAFT_VALIDATION_FAILED"
+  ) {
+    return "WHATSAPP_WEB_DRAFT_VALIDATION_FAILED";
+  }
+  return "WHATSAPP_WEB_SELECTOR_MISMATCH";
 }
 
 type LocatedControl = WhatsAppWebControlResult & {
@@ -358,32 +395,134 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
     throw await this.stageError("COMPOSER_NOT_FOUND");
   }
 
-  async attachImage(path: string) {
+  async attachImage(path: string): Promise<WhatsAppWebMediaAttachmentResult> {
+    const diagnostic = {
+      usedFileChooser: false,
+      usedSetInputFiles: false,
+      previewDetected: false,
+    };
+    const main = this.page.locator("#main, main");
     const attach = await this.firstVisible([
-      this.page.locator(whatsappWebStableSelectors.attachButton),
       ...whatsappWebAccessibleAliases.attach.map((name) =>
-        this.page.getByRole("button", { name, exact: true }),
+        main.getByRole("button", { name, exact: true }),
+      ),
+      ...whatsappWebStableSelectors.attachTrigger.map((selector) =>
+        this.page.locator(selector),
       ),
     ]);
-    if (!attach) throw new Error("WHATSAPP_WEB_SELECTOR_MISMATCH");
-    await attach.click();
-    const input = this.page.locator("input[type='file'][accept*='image']");
-    if ((await input.count()) === 0)
-      throw new Error("WHATSAPP_WEB_MEDIA_UPLOAD_FAILED");
-    await input.last().setInputFiles(path);
+    if (!attach) {
+      throw await this.stageError("ATTACH_TRIGGER_NOT_FOUND", {}, diagnostic);
+    }
+
+    const directChooserPromise = this.page
+      .waitForEvent("filechooser", { timeout: 1_500 })
+      .catch(() => null);
+    try {
+      await attach.click();
+    } catch {
+      throw await this.stageError("MEDIA_UPLOAD_FAILED", {}, diagnostic);
+    }
+
+    const directChooser = await directChooserPromise;
+    if (directChooser) {
+      diagnostic.usedFileChooser = true;
+      try {
+        await directChooser.setFiles(path);
+      } catch {
+        throw await this.stageError("FILE_NOT_WRITTEN", {}, diagnostic);
+      }
+      return this.waitForMediaPreview("DIRECT_FILE_CHOOSER", diagnostic);
+    }
+
+    const attachMenu = await this.waitForVisible(
+      whatsappWebStableSelectors.attachMenu.map((selector) =>
+        this.page.locator(selector),
+      ),
+      2_000,
+    );
+    const imageOption = await this.findImageOption();
+    if (imageOption) {
+      const chooserPromise = this.page
+        .waitForEvent("filechooser", { timeout: 2_000 })
+        .catch(() => null);
+      try {
+        await imageOption.click();
+      } catch {
+        throw await this.stageError("IMAGE_OPTION_NOT_FOUND", {}, diagnostic);
+      }
+      const chooser = await chooserPromise;
+      if (chooser) {
+        diagnostic.usedFileChooser = true;
+        try {
+          await chooser.setFiles(path);
+        } catch {
+          throw await this.stageError("FILE_NOT_WRITTEN", {}, diagnostic);
+        }
+        return this.waitForMediaPreview(
+          "IMAGE_OPTION_FILE_CHOOSER",
+          diagnostic,
+        );
+      }
+    }
+
+    const fileInput = await this.waitForImageFileInput(2_000);
+    if (fileInput) {
+      diagnostic.usedSetInputFiles = true;
+      try {
+        await fileInput.setInputFiles(path);
+      } catch {
+        throw await this.stageError("FILE_NOT_WRITTEN", {}, diagnostic);
+      }
+      return this.waitForMediaPreview("SET_INPUT_FILES", diagnostic);
+    }
+
+    if (!attachMenu) {
+      throw await this.stageError("ATTACH_MENU_NOT_FOUND", {}, diagnostic);
+    }
+    if (!imageOption) {
+      throw await this.stageError("IMAGE_OPTION_NOT_FOUND", {}, diagnostic);
+    }
+    throw await this.stageError("FILE_CHOOSER_NOT_OPENED", {}, diagnostic);
   }
 
   async fillCaption(text: string) {
-    const caption = await this.firstVisible([
-      ...whatsappWebAccessibleAliases.caption.map((name) =>
-        this.page.getByRole("textbox", { name }),
-      ),
-      this.page.locator(
-        "[data-testid='media-caption-input-container'] [contenteditable='true']",
-      ),
-    ]);
-    if (!caption) throw new Error("WHATSAPP_WEB_SELECTOR_MISMATCH");
-    await caption.fill(text);
+    const deadline = Date.now() + this.actionTimeoutMs;
+    let caption: Locator | null = null;
+    do {
+      caption = await this.findCaptionInput();
+      if (caption) break;
+      await this.page.waitForTimeout(150);
+    } while (Date.now() < deadline);
+    if (!caption) {
+      throw await this.stageError(
+        "CAPTION_INPUT_NOT_FOUND",
+        {},
+        {
+          captionDetected: false,
+        },
+      );
+    }
+    if (!(await caption.isEditable().catch(() => false))) {
+      throw await this.stageError(
+        "CAPTION_NOT_EDITABLE",
+        {},
+        {
+          captionDetected: true,
+        },
+      );
+    }
+    try {
+      await caption.fill(text);
+    } catch {
+      throw await this.stageError(
+        "CAPTION_NOT_EDITABLE",
+        {},
+        {
+          captionDetected: true,
+        },
+      );
+    }
+    return { captionDetected: true as const };
   }
 
   async fillText(text: string) {
@@ -402,10 +541,13 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
       .locator("footer, [data-testid='media-caption-input-container']")
       .allInnerTexts();
     const text = normalizedText(draftText.join(" "));
-    const mediaFound = await this.page
-      .locator(whatsappWebStableSelectors.mediaPreview)
-      .isVisible()
-      .catch(() => false);
+    const mediaFound = Boolean(
+      await this.firstVisible(
+        whatsappWebStableSelectors.mediaPreview.map((selector) =>
+          this.page.locator(selector),
+        ),
+      ),
+    );
     return {
       affiliateUrlFound: text.includes(input.affiliateUrl),
       textSnippetFound: text.includes(normalizedText(input.textSnippet)),
@@ -461,24 +603,59 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
   }
 
   async clearDraft() {
-    const captionOrComposer = await this.firstVisible([
-      ...whatsappWebAccessibleAliases.caption.map((name) =>
-        this.page.getByRole("textbox", { name }),
-      ),
-      ...whatsappWebStableSelectors.composeBox.map((selector) =>
+    const captionOrComposer =
+      (await this.findCaptionInput()) ??
+      (await this.firstVisible([
+        ...whatsappWebStableSelectors.composeBox.map((selector) =>
+          this.page.locator(selector),
+        ),
+      ]));
+    if (captionOrComposer) await captionOrComposer.fill("");
+    const mediaSurface = await this.firstVisible(
+      whatsappWebStableSelectors.mediaSurface.map((selector) =>
         this.page.locator(selector),
       ),
-    ]);
-    if (captionOrComposer) await captionOrComposer.fill("");
-    const cancel = await this.firstVisible(
-      whatsappWebAccessibleAliases.cancel.map((name) =>
-        this.page.getByRole("button", { name, exact: true }),
-      ),
     );
-    if (cancel) await cancel.click();
+    if (mediaSurface) {
+      const close = await this.firstVisible([
+        ...whatsappWebAccessibleAliases.close.map((name) =>
+          mediaSurface.getByRole("button", { name, exact: true }),
+        ),
+        ...whatsappWebAccessibleAliases.cancel.map((name) =>
+          mediaSurface.getByRole("button", { name, exact: true }),
+        ),
+        ...whatsappWebStableSelectors.mediaClose.map((selector) =>
+          this.page.locator(selector),
+        ),
+      ]);
+      if (close) {
+        await close.click();
+      } else {
+        await this.page.keyboard.press("Escape");
+      }
+      await this.clickDiscardIfVisible();
+      if (
+        await this.firstVisible(
+          whatsappWebStableSelectors.mediaPreview.map((selector) =>
+            this.page.locator(selector),
+          ),
+        )
+      ) {
+        await this.page.keyboard.press("Escape");
+        await this.clickDiscardIfVisible();
+      }
+    }
   }
 
   async isDraftClear() {
+    const previewVisible = Boolean(
+      await this.firstVisible(
+        whatsappWebStableSelectors.mediaPreview.map((selector) =>
+          this.page.locator(selector),
+        ),
+      ),
+    );
+    if (previewVisible) return false;
     const composer = await this.findWritableComposer();
     if (!composer.found || !composer.locator) return true;
     return (
@@ -676,6 +853,123 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
     return false;
   }
 
+  private async findImageOption() {
+    const menu = await this.firstVisible(
+      whatsappWebStableSelectors.attachMenu.map((selector) =>
+        this.page.locator(selector),
+      ),
+    );
+    const scope = menu ?? this.page.locator("#main, main");
+    return this.firstVisible([
+      ...whatsappWebAccessibleAliases.photo.flatMap((name) => [
+        scope.getByRole("menuitem", { name, exact: true }),
+        scope.getByRole("button", { name, exact: true }),
+        scope.getByText(name, { exact: true }),
+      ]),
+      ...whatsappWebStableSelectors.imageOption.map((selector) =>
+        this.page.locator(selector),
+      ),
+    ]);
+  }
+
+  private async findCaptionInput() {
+    for (const selector of whatsappWebStableSelectors.mediaSurface) {
+      const surfaces = this.page.locator(selector);
+      const count = await surfaces.count().catch(() => 0);
+      for (let index = 0; index < count; index += 1) {
+        const surface = surfaces.nth(index);
+        if (!(await surface.isVisible().catch(() => false))) continue;
+        const candidate = await this.firstVisible([
+          ...whatsappWebAccessibleAliases.caption.map((name) =>
+            surface.getByRole("textbox", { name, exact: false }),
+          ),
+          surface.locator("[contenteditable='true'][role='textbox']"),
+          surface.locator("[contenteditable='true']"),
+        ]);
+        if (candidate) return candidate;
+      }
+    }
+    return this.firstVisible([
+      ...whatsappWebAccessibleAliases.caption.map((name) =>
+        this.page.getByRole("textbox", { name, exact: false }),
+      ),
+      ...whatsappWebStableSelectors.captionInput.map((selector) =>
+        this.page.locator(selector),
+      ),
+    ]);
+  }
+
+  private async clickDiscardIfVisible() {
+    const deadline = Date.now() + 2_000;
+    do {
+      const discard = await this.firstVisible(
+        whatsappWebAccessibleAliases.discard.map((name) =>
+          this.page.getByRole("button", { name, exact: true }),
+        ),
+      );
+      if (discard) {
+        await discard.click();
+        return;
+      }
+      await this.page.waitForTimeout(100);
+    } while (Date.now() < deadline);
+  }
+
+  private async waitForImageFileInput(timeoutMs: number) {
+    const deadline = Date.now() + timeoutMs;
+    do {
+      for (const selector of whatsappWebStableSelectors.imageFileInput) {
+        const inputs = this.page.locator(selector);
+        const count = await inputs.count().catch(() => 0);
+        if (count > 0) return inputs.nth(count - 1);
+      }
+      await this.page.waitForTimeout(100);
+    } while (Date.now() < deadline);
+    return null;
+  }
+
+  private async waitForMediaPreview(
+    strategy: WhatsAppWebMediaAttachmentResult["attachStrategyUsed"],
+    diagnostic: {
+      usedFileChooser: boolean;
+      usedSetInputFiles: boolean;
+      previewDetected: boolean;
+    },
+  ): Promise<WhatsAppWebMediaAttachmentResult> {
+    const preview = await this.waitForVisible(
+      whatsappWebStableSelectors.mediaPreview.map((selector) =>
+        this.page.locator(selector),
+      ),
+      this.actionTimeoutMs,
+    );
+    if (!preview) {
+      throw await this.stageError(
+        "MEDIA_PREVIEW_NOT_FOUND",
+        {},
+        {
+          ...diagnostic,
+          attachStrategyUsed: strategy,
+        },
+      );
+    }
+    return {
+      attachStrategyUsed: strategy,
+      usedFileChooser: diagnostic.usedFileChooser,
+      usedSetInputFiles: diagnostic.usedSetInputFiles,
+      previewDetected: true,
+    };
+  }
+
+  private async waitForVisible(locators: Locator[], timeoutMs: number) {
+    const deadline = Date.now() + timeoutMs;
+    do {
+      const visible = await this.firstVisible(locators);
+      if (visible) return visible;
+      await this.page.waitForTimeout(100);
+    } while (Date.now() < deadline);
+    return null;
+  }
+
   private async sidebar() {
     return this.firstVisible(
       whatsappWebStableSelectors.sidebar.map((selector) =>
@@ -831,6 +1125,8 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
   private async stageError(
     stage: WhatsAppWebDiagnosticStage,
     state: Partial<WhatsAppWebControlResult> = {},
+    diagnostic: Partial<WhatsAppWebSafeDiagnostics> = {},
+    code: WhatsAppWebErrorCode = errorCodeForDiagnosticStage(stage),
   ) {
     return new WhatsAppWebStageError(
       stage,
@@ -839,9 +1135,11 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
         visible: state.visible ?? false,
         enabled: state.enabled ?? false,
         ...(state.editable !== undefined ? { editable: state.editable } : {}),
-        errorCode: "WHATSAPP_WEB_SELECTOR_MISMATCH",
+        ...diagnostic,
+        errorCode: code,
         rootCause: stage,
       }),
+      code,
     );
   }
 

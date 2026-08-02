@@ -284,6 +284,8 @@ Redis is mandatory for Web mode. Missing Chromium reports `WHATSAPP_WEB_BROWSER_
 
 Selector failures expose a sanitized `stage` such as `SEARCH_INPUT_NOT_FOUND`, `SEARCH_RESULTS_NOT_READY`, `GROUP_HEADER_MISMATCH` or `COMPOSER_NOT_FOUND`. For local visual diagnosis only, `WHATSAPP_WEB_SLOW_MO_MS` may slow Playwright and `WHATSAPP_WEB_KEEP_OPEN_ON_ERROR=true` may keep a failed diagnose/locate browser open for the bounded `WHATSAPP_WEB_KEEP_OPEN_ON_ERROR_TIMEOUT_MS`; both default to inert, never affect the continuous worker, and never disable final browser/lock cleanup.
 
+Media dry-run failures preserve a specific sanitized stage (`ATTACH_TRIGGER_NOT_FOUND`, `IMAGE_OPTION_NOT_FOUND`, `FILE_CHOOSER_NOT_OPENED`, `MEDIA_PREVIEW_NOT_FOUND`, `CAPTION_INPUT_NOT_FOUND`, `DRAFT_VALIDATION_FAILED` or `DRAFT_CLEANUP_FAILED`) instead of collapsing to a selector mismatch. Inspect only `webLastDryRunStage` and `webLastDryRunDiagnostics`; these fields contain structural booleans, strategy, temporary file size/extension and duration, never the temporary path, group name, caption, conversations or session secrets.
+
 To recover an expired session, rerun the login command against the same logical profile. To erase a local session, stop every command holding that profile lock and remove only its directory below `.local/whatsapp-web`; never copy, archive or commit it. Debug screenshots are off by default and can expose private content when explicitly enabled.
 The retry timestamp is persisted in `Publication.scheduledAt`. A Channel with a
 pending transient failure is not used for another delivery until that timestamp

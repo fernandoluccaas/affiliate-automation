@@ -54,12 +54,32 @@ export type WhatsAppWebDiagnosticStage =
   | "MULTIPLE_EXACT_GROUP_RESULTS"
   | "GROUP_RESULT_NOT_INTERACTABLE"
   | "GROUP_OPEN_FAILED"
+  | "GROUP_REOPEN_FAILED"
   | "GROUP_HEADER_NOT_FOUND"
   | "GROUP_HEADER_MISMATCH"
   | "COMPOSER_NOT_FOUND"
+  | "ATTACH_TRIGGER_NOT_FOUND"
+  | "ATTACH_MENU_NOT_FOUND"
+  | "IMAGE_OPTION_NOT_FOUND"
+  | "FILE_INPUT_NOT_FOUND"
+  | "FILE_CHOOSER_NOT_OPENED"
+  | "FILE_NOT_WRITTEN"
+  | "FILE_NOT_FOUND_ON_DISK"
+  | "FILE_SIZE_ZERO"
+  | "FILE_MIME_INVALID"
+  | "MEDIA_UPLOAD_FAILED"
+  | "MEDIA_PREVIEW_NOT_FOUND"
+  | "CAPTION_INPUT_NOT_FOUND"
+  | "CAPTION_NOT_EDITABLE"
+  | "DRAFT_VALIDATION_FAILED"
+  | "DRAFT_CLEANUP_FAILED"
   | "PUBLISH_PERMISSION_UNDETERMINED"
   | "READY_FOR_GROUP_SEARCH"
-  | "GROUP_FOUND";
+  | "GROUP_FOUND"
+  | "DRY_RUN_READY";
+
+export type WhatsAppWebAttachStrategy =
+  "DIRECT_FILE_CHOOSER" | "IMAGE_OPTION_FILE_CHOOSER" | "SET_INPUT_FILES";
 
 export type WhatsAppWebSafeDiagnostics = {
   currentOrigin: "https://web.whatsapp.com";
@@ -74,6 +94,27 @@ export type WhatsAppWebSafeDiagnostics = {
   durationMs?: number;
   errorCode?: WhatsAppWebErrorCode;
   rootCause?: WhatsAppWebDiagnosticStage;
+  attachStrategyUsed?: WhatsAppWebAttachStrategy;
+  usedFileChooser?: boolean;
+  usedSetInputFiles?: boolean;
+  tempFileExists?: boolean;
+  tempFileSize?: number;
+  tempFileExtension?: string;
+  previewDetected?: boolean;
+  captionDetected?: boolean;
+  draftValidated?: boolean;
+  draftCleared?: boolean;
+};
+
+export type WhatsAppWebMediaAttachmentResult = {
+  attachStrategyUsed: WhatsAppWebAttachStrategy;
+  usedFileChooser: boolean;
+  usedSetInputFiles: boolean;
+  previewDetected: true;
+};
+
+export type WhatsAppWebCaptionResult = {
+  captionDetected: true;
 };
 
 export type WhatsAppWebControlResult = {
@@ -148,8 +189,8 @@ export interface WhatsAppWebPageAdapter {
   openGroup(name: string): Promise<void>;
   verifyOpenedGroup(name: string): Promise<boolean>;
   verifyPublishPermission(): Promise<boolean>;
-  attachImage(path: string): Promise<void>;
-  fillCaption(text: string): Promise<void>;
+  attachImage(path: string): Promise<WhatsAppWebMediaAttachmentResult>;
+  fillCaption(text: string): Promise<WhatsAppWebCaptionResult>;
   fillText(text: string): Promise<void>;
   inspectPreparedDraft(input: {
     affiliateUrl: string;

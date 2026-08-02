@@ -112,8 +112,13 @@ function adapter(
     openGroup: vi.fn().mockResolvedValue(undefined),
     verifyOpenedGroup: vi.fn().mockResolvedValue(true),
     verifyPublishPermission: vi.fn().mockResolvedValue(true),
-    attachImage: vi.fn().mockResolvedValue(undefined),
-    fillCaption: vi.fn().mockResolvedValue(undefined),
+    attachImage: vi.fn().mockResolvedValue({
+      attachStrategyUsed: "SET_INPUT_FILES",
+      usedFileChooser: false,
+      usedSetInputFiles: true,
+      previewDetected: true,
+    }),
+    fillCaption: vi.fn().mockResolvedValue({ captionDetected: true }),
     fillText: vi.fn().mockResolvedValue(undefined),
     inspectPreparedDraft: vi.fn().mockResolvedValue({
       affiliateUrlFound: true,
@@ -511,6 +516,8 @@ describe("WhatsAppGroupsWebPublisher dry run", () => {
       status: "READY_TO_SEND",
       affiliateUrlConfirmedInDraft: true,
       draftCleared: true,
+      sendCalled: false,
+      stage: "DRY_RUN_READY",
     });
     expect(page.fillText).toHaveBeenCalled();
     expect(page.send).not.toHaveBeenCalled();
@@ -526,6 +533,8 @@ describe("WhatsAppGroupsWebPublisher dry run", () => {
       profileLock: lock(),
     }).dryRun(input());
     expect(result.errorCode).toBe("WHATSAPP_WEB_DRAFT_CLEANUP_FAILED");
+    expect(result.stage).toBe("DRAFT_CLEANUP_FAILED");
+    expect(result.sendCalled).toBe(false);
   });
 
   it("returns exact group failures without clicking anything", async () => {
@@ -544,6 +553,22 @@ describe("WhatsAppGroupsWebPublisher dry run", () => {
     }).dryRun(input());
     expect(result.errorCode).toBe("WHATSAPP_WEB_GROUP_AMBIGUOUS");
     expect(page.openGroup).not.toHaveBeenCalled();
+  });
+
+  it("preserves GROUP_REOPEN_FAILED when the opened header cannot be revalidated", async () => {
+    const result = await new WhatsAppGroupsWebPublisher({
+      config: config(),
+      launcher: launcher(
+        adapter({ verifyOpenedGroup: vi.fn().mockResolvedValue(false) }),
+      ),
+      profileLock: lock(),
+    }).dryRun(input());
+    expect(result).toMatchObject({
+      status: "FAILED",
+      stage: "GROUP_REOPEN_FAILED",
+      errorCode: "WHATSAPP_WEB_SELECTOR_MISMATCH",
+      sendCalled: false,
+    });
   });
 
   it("uses a text fallback when media preparation fails", async () => {
@@ -576,6 +601,243 @@ describe("WhatsAppGroupsWebPublisher dry run", () => {
       prepareImage: vi.fn().mockRejectedValue(new Error("invalid")),
     }).dryRun(value);
     expect(result.errorCode).toBe("WHATSAPP_WEB_MEDIA_PREPARATION_FAILED");
+    expect(result.stage).toBe("MEDIA_UPLOAD_FAILED");
+  });
+
+  it("prepares image, caption and sanitized media diagnostics", async () => {
+    const value = input();
+    value.channel.sendImage = true;
+    value.imageUrl = "https://cdn.example/image.jpg";
+    const page = adapter();
+    const result = await new WhatsAppGroupsWebPublisher({
+      config: config(),
+      launcher: launcher(page),
+      profileLock: lock(),
+      prepareImage: vi.fn().mockResolvedValue({
+        bytes: new Uint8Array([1, 2, 3]),
+        contentType: "image/jpeg",
+        filename: "offer.jpg",
+      }),
+    }).dryRun(value);
+
+    expect(result).toMatchObject({
+      status: "READY_TO_SEND",
+      mediaPrepared: true,
+      affiliateUrlConfirmedInDraft: true,
+      draftCleared: true,
+      sendCalled: false,
+      diagnostics: {
+        attachStrategyUsed: "SET_INPUT_FILES",
+        usedFileChooser: false,
+        usedSetInputFiles: true,
+        tempFileExists: true,
+        tempFileSize: 3,
+        tempFileExtension: ".jpg",
+        previewDetected: true,
+        captionDetected: true,
+        draftValidated: true,
+        draftCleared: true,
+      },
+    });
+    expect(page.attachImage).toHaveBeenCalledOnce();
+    expect(page.fillCaption).toHaveBeenCalledOnce();
+    expect(page.send).not.toHaveBeenCalled();
+  });
+
+  it("returns FILE_NOT_FOUND_ON_DISK when the written temp file is absent", async () => {
+    const value = input();
+    value.channel.sendImage = true;
+    value.imageUrl = "https://cdn.example/image.jpg";
+    const result = await new WhatsAppGroupsWebPublisher({
+      config: config(),
+      launcher: launcher(),
+      profileLock: lock(),
+      prepareImage: vi.fn().mockResolvedValue({
+        bytes: new Uint8Array([1]),
+        contentType: "image/jpeg",
+        filename: "offer.jpg",
+      }),
+      writeTempFile: vi.fn().mockResolvedValue(undefined),
+      statTempFile: vi.fn().mockRejectedValue(new Error("missing")),
+    }).dryRun(value);
+
+    expect(result).toMatchObject({
+      status: "FAILED",
+      stage: "FILE_NOT_FOUND_ON_DISK",
+      errorCode: "WHATSAPP_WEB_MEDIA_PREPARATION_FAILED",
+      diagnostics: { tempFileExists: false, tempFileExtension: ".jpg" },
+    });
+  });
+
+  it("returns FILE_NOT_WRITTEN when temporary persistence fails", async () => {
+    const value = input();
+    value.channel.sendImage = true;
+    value.imageUrl = "https://cdn.example/image.jpg";
+    const result = await new WhatsAppGroupsWebPublisher({
+      config: config(),
+      launcher: launcher(),
+      profileLock: lock(),
+      prepareImage: vi.fn().mockResolvedValue({
+        bytes: new Uint8Array([1]),
+        contentType: "image/jpeg",
+        filename: "offer.jpg",
+      }),
+      writeTempFile: vi.fn().mockRejectedValue(new Error("disk error")),
+    }).dryRun(value);
+    expect(result).toMatchObject({
+      status: "FAILED",
+      stage: "FILE_NOT_WRITTEN",
+      errorCode: "WHATSAPP_WEB_MEDIA_PREPARATION_FAILED",
+    });
+  });
+
+  it("returns FILE_MIME_INVALID for incompatible image metadata", async () => {
+    const value = input();
+    value.channel.sendImage = true;
+    value.imageUrl = "https://cdn.example/image.jpg";
+    const result = await new WhatsAppGroupsWebPublisher({
+      config: config(),
+      launcher: launcher(),
+      profileLock: lock(),
+      prepareImage: vi.fn().mockResolvedValue({
+        bytes: new Uint8Array([1]),
+        contentType: "text/plain",
+        filename: "offer.jpg",
+      }),
+    }).dryRun(value);
+    expect(result).toMatchObject({
+      status: "FAILED",
+      stage: "FILE_MIME_INVALID",
+      diagnostics: { tempFileExtension: ".jpg" },
+    });
+  });
+
+  it("returns FILE_SIZE_ZERO for an empty temp file", async () => {
+    const value = input();
+    value.channel.sendImage = true;
+    value.imageUrl = "https://cdn.example/image.jpg";
+    const result = await new WhatsAppGroupsWebPublisher({
+      config: config(),
+      launcher: launcher(),
+      profileLock: lock(),
+      prepareImage: vi.fn().mockResolvedValue({
+        bytes: new Uint8Array(),
+        contentType: "image/png",
+        filename: "offer.png",
+      }),
+      writeTempFile: vi.fn().mockResolvedValue(undefined),
+      statTempFile: vi.fn().mockResolvedValue({
+        size: 0,
+        isFile: () => true,
+      } as never),
+    }).dryRun(value);
+
+    expect(result).toMatchObject({
+      status: "FAILED",
+      stage: "FILE_SIZE_ZERO",
+      diagnostics: { tempFileExists: true, tempFileSize: 0 },
+    });
+  });
+
+  it("preserves MEDIA_PREVIEW_NOT_FOUND and attempts draft cleanup", async () => {
+    const value = input();
+    value.channel.sendImage = true;
+    value.imageUrl = "https://cdn.example/image.jpg";
+    const page = adapter({
+      attachImage: vi.fn().mockRejectedValue(
+        new WhatsAppWebStageError(
+          "MEDIA_PREVIEW_NOT_FOUND",
+          {
+            currentOrigin: "https://web.whatsapp.com",
+            usedFileChooser: true,
+            usedSetInputFiles: false,
+            previewDetected: false,
+            errorCode: "WHATSAPP_WEB_MEDIA_UPLOAD_FAILED",
+            rootCause: "MEDIA_PREVIEW_NOT_FOUND",
+          },
+          "WHATSAPP_WEB_MEDIA_UPLOAD_FAILED",
+        ),
+      ),
+    });
+    const result = await new WhatsAppGroupsWebPublisher({
+      config: config(),
+      launcher: launcher(page),
+      profileLock: lock(),
+      prepareImage: vi.fn().mockResolvedValue({
+        bytes: new Uint8Array([1]),
+        contentType: "image/jpeg",
+        filename: "offer.jpg",
+      }),
+    }).dryRun(value);
+
+    expect(result).toMatchObject({
+      status: "FAILED",
+      stage: "MEDIA_PREVIEW_NOT_FOUND",
+      errorCode: "WHATSAPP_WEB_MEDIA_UPLOAD_FAILED",
+      draftCleared: true,
+      sendCalled: false,
+    });
+    expect(page.clearDraft).toHaveBeenCalledOnce();
+    expect(page.send).not.toHaveBeenCalled();
+  });
+
+  it("preserves CAPTION_INPUT_NOT_FOUND", async () => {
+    const value = input();
+    value.channel.sendImage = true;
+    value.imageUrl = "https://cdn.example/image.jpg";
+    const page = adapter({
+      fillCaption: vi.fn().mockRejectedValue(
+        new WhatsAppWebStageError(
+          "CAPTION_INPUT_NOT_FOUND",
+          {
+            currentOrigin: "https://web.whatsapp.com",
+            captionDetected: false,
+            errorCode: "WHATSAPP_WEB_DRAFT_VALIDATION_FAILED",
+            rootCause: "CAPTION_INPUT_NOT_FOUND",
+          },
+          "WHATSAPP_WEB_DRAFT_VALIDATION_FAILED",
+        ),
+      ),
+    });
+    const result = await new WhatsAppGroupsWebPublisher({
+      config: config(),
+      launcher: launcher(page),
+      profileLock: lock(),
+      prepareImage: vi.fn().mockResolvedValue({
+        bytes: new Uint8Array([1]),
+        contentType: "image/jpeg",
+        filename: "offer.jpg",
+      }),
+    }).dryRun(value);
+
+    expect(result.stage).toBe("CAPTION_INPUT_NOT_FOUND");
+    expect(result.errorCode).toBe("WHATSAPP_WEB_DRAFT_VALIDATION_FAILED");
+    expect(result.sendCalled).toBe(false);
+  });
+
+  it("preserves DRAFT_VALIDATION_FAILED and clears the partial draft", async () => {
+    const page = adapter({
+      inspectPreparedDraft: vi.fn().mockResolvedValue({
+        affiliateUrlFound: false,
+        textSnippetFound: true,
+        mediaFound: true,
+      }),
+    });
+    const result = await new WhatsAppGroupsWebPublisher({
+      config: config(),
+      launcher: launcher(page),
+      profileLock: lock(),
+    }).dryRun(input());
+
+    expect(result).toMatchObject({
+      status: "FAILED",
+      stage: "DRAFT_VALIDATION_FAILED",
+      errorCode: "WHATSAPP_WEB_DRAFT_VALIDATION_FAILED",
+      draftCleared: true,
+      sendCalled: false,
+    });
+    expect(page.clearDraft).toHaveBeenCalledOnce();
+    expect(page.send).not.toHaveBeenCalled();
   });
 });
 

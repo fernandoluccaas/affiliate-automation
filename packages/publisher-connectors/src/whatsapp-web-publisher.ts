@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { extname, join, resolve } from "node:path";
 import { prepareRemoteImage } from "./media";
 import {
   getWhatsAppWebRuntimeConfig,
@@ -20,6 +20,7 @@ import type {
   WhatsAppWebErrorCode,
   WhatsAppWebPageAdapter,
   WhatsAppWebProfileLock,
+  WhatsAppWebSafeDiagnostics,
   WhatsAppWebStructureDiagnosticResult,
 } from "./whatsapp-web-types";
 import { WhatsAppWebStageError } from "./whatsapp-web-types";
@@ -61,8 +62,11 @@ export type WhatsAppWebDryRunResult = {
   mediaPrepared: boolean;
   mediaFallbackUsed: boolean;
   draftCleared: boolean;
+  sendCalled: false;
   configurationFingerprint: string;
   errorCode?: string;
+  stage?: import("./whatsapp-web-types").WhatsAppWebDiagnosticStage;
+  diagnostics?: WhatsAppWebSafeDiagnostics;
 };
 
 export type WhatsAppWebPublishResult = {
@@ -154,6 +158,8 @@ export class WhatsAppGroupsWebPublisher implements WhatsAppGroupsWebPublisherCon
       now?: () => Date;
       profileInitialized?: (path: string) => Promise<boolean>;
       localDiagnosticKeepOpenOnErrorMs?: number;
+      writeTempFile?: typeof writeFile;
+      statTempFile?: typeof stat;
     } = {},
   ) {}
 
@@ -359,8 +365,9 @@ export class WhatsAppGroupsWebPublisher implements WhatsAppGroupsWebPublisherCon
   async dryRun(
     input: WhatsAppWebPublicationInput,
   ): Promise<WhatsAppWebDryRunResult> {
+    const startedAt = Date.now();
     const fingerprint = whatsappWebConfigurationFingerprint(input.channel);
-    const base = {
+    const progress = {
       dryRun: true as const,
       dryRunAt: this.now().toISOString(),
       groupExactMatch: false,
@@ -368,7 +375,20 @@ export class WhatsAppGroupsWebPublisher implements WhatsAppGroupsWebPublisherCon
       mediaPrepared: false,
       mediaFallbackUsed: false,
       draftCleared: false,
+      sendCalled: false as const,
       configurationFingerprint: fingerprint,
+    };
+    const diagnostics: WhatsAppWebSafeDiagnostics = {
+      currentOrigin: "https://web.whatsapp.com",
+      usedFileChooser: false,
+      usedSetInputFiles: false,
+      tempFileExists: false,
+      tempFileSize: 0,
+      tempFileExtension: "",
+      previewDetected: false,
+      captionDetected: false,
+      draftValidated: false,
+      draftCleared: false,
     };
     try {
       this.assertChannelEnabled(input.channel);
@@ -383,42 +403,112 @@ export class WhatsAppGroupsWebPublisher implements WhatsAppGroupsWebPublisherCon
           );
           if (location.status !== "GROUP_FOUND")
             throw new Error(location.errorCode);
-          const media = await this.prepareMedia(input);
+          progress.groupExactMatch = true;
+          const media = await this.prepareMedia(input, diagnostics);
+          progress.mediaFallbackUsed = media.fallback;
+          let draftMutationAttempted = false;
+          let operationError: unknown;
+          let cleanupError: unknown;
           try {
-            await this.prepareDraft(adapter, input, media.path);
-            const inspection = await adapter.inspectPreparedDraft({
-              affiliateUrl: input.affiliateUrl,
-              textSnippet: uniqueSnippet(input.title),
-              mediaExpected: Boolean(media.path),
-            });
-            if (
-              !inspection.affiliateUrlFound ||
-              !inspection.textSnippetFound ||
-              !inspection.mediaFound
-            ) {
-              throw new Error("WHATSAPP_WEB_DRAFT_VALIDATION_FAILED");
+            try {
+              draftMutationAttempted = true;
+              if (media.path) {
+                const attachment = await adapter.attachImage(media.path);
+                Object.assign(diagnostics, attachment);
+                progress.mediaPrepared = true;
+                const caption = await adapter.fillCaption(input.message);
+                Object.assign(diagnostics, caption);
+              } else {
+                await adapter.fillText(input.message);
+              }
+              const inspection = await adapter.inspectPreparedDraft({
+                affiliateUrl: input.affiliateUrl,
+                textSnippet: uniqueSnippet(input.title),
+                mediaExpected: Boolean(media.path),
+              });
+              if (
+                !inspection.affiliateUrlFound ||
+                !inspection.textSnippetFound ||
+                !inspection.mediaFound
+              ) {
+                throw new WhatsAppWebStageError(
+                  "DRAFT_VALIDATION_FAILED",
+                  {
+                    ...diagnostics,
+                    draftValidated: false,
+                    rootCause: "DRAFT_VALIDATION_FAILED",
+                    errorCode: "WHATSAPP_WEB_DRAFT_VALIDATION_FAILED",
+                  },
+                  "WHATSAPP_WEB_DRAFT_VALIDATION_FAILED",
+                );
+              }
+              diagnostics.draftValidated = true;
+              progress.affiliateUrlConfirmedInDraft = true;
+              await this.captureDebugDraft(adapter, "dry-run-ready");
+            } catch (error) {
+              operationError = error;
             }
-            await this.captureDebugDraft(adapter, "dry-run-ready");
-            await adapter.clearDraft();
-            const draftCleared = await adapter.isDraftClear();
-            if (!draftCleared)
-              throw new Error("WHATSAPP_WEB_DRAFT_CLEANUP_FAILED");
-            return {
-              ...base,
-              status: "READY_TO_SEND",
-              groupExactMatch: true,
-              affiliateUrlConfirmedInDraft: true,
-              mediaPrepared: Boolean(media.path),
-              mediaFallbackUsed: media.fallback,
-              draftCleared: true,
-            };
+
+            if (draftMutationAttempted) {
+              try {
+                await adapter.clearDraft();
+                progress.draftCleared = await adapter.isDraftClear();
+                diagnostics.draftCleared = progress.draftCleared;
+                if (!progress.draftCleared) {
+                  throw new Error("draft remained visible");
+                }
+              } catch {
+                cleanupError = new WhatsAppWebStageError(
+                  "DRAFT_CLEANUP_FAILED",
+                  {
+                    ...diagnostics,
+                    draftCleared: false,
+                    rootCause: "DRAFT_CLEANUP_FAILED",
+                    errorCode: "WHATSAPP_WEB_DRAFT_CLEANUP_FAILED",
+                  },
+                  "WHATSAPP_WEB_DRAFT_CLEANUP_FAILED",
+                );
+              }
+            }
           } finally {
             await media.cleanup();
           }
+          if (cleanupError) throw cleanupError;
+          if (operationError) throw operationError;
+          return {
+            ...progress,
+            status: "READY_TO_SEND",
+            stage: "DRY_RUN_READY",
+            diagnostics: {
+              ...diagnostics,
+              durationMs: Date.now() - startedAt,
+            },
+          };
         },
       );
     } catch (error) {
-      return { ...base, status: "FAILED", errorCode: errorCode(error) };
+      if (error instanceof WhatsAppWebStageError) {
+        return {
+          ...progress,
+          status: "FAILED",
+          errorCode: error.errorCode,
+          stage: error.stage,
+          diagnostics: {
+            ...diagnostics,
+            ...error.diagnostics,
+            durationMs: Date.now() - startedAt,
+          },
+        };
+      }
+      return {
+        ...progress,
+        status: "FAILED",
+        errorCode: errorCode(error),
+        diagnostics: {
+          ...diagnostics,
+          durationMs: Date.now() - startedAt,
+        },
+      };
     }
   }
 
@@ -586,8 +676,13 @@ export class WhatsAppGroupsWebPublisher implements WhatsAppGroupsWebPublisherCon
     const located = await adapter.locateGroupExact(name);
     if (located.status !== "GROUP_FOUND") return located;
     await adapter.openGroup(name);
-    if (!(await adapter.verifyOpenedGroup(name)))
-      throw new Error("WHATSAPP_WEB_GROUP_NOT_FOUND");
+    if (!(await adapter.verifyOpenedGroup(name))) {
+      throw new WhatsAppWebStageError("GROUP_REOPEN_FAILED", {
+        currentOrigin: "https://web.whatsapp.com",
+        rootCause: "GROUP_REOPEN_FAILED",
+        errorCode: "WHATSAPP_WEB_SELECTOR_MISMATCH",
+      });
+    }
     if (!(await adapter.verifyPublishPermission()))
       throw new Error("WHATSAPP_WEB_NO_PUBLISH_PERMISSION");
     return { ...located, publishPermission: true };
@@ -606,30 +701,139 @@ export class WhatsAppGroupsWebPublisher implements WhatsAppGroupsWebPublisherCon
     }
   }
 
-  private async prepareMedia(input: WhatsAppWebPublicationInput) {
+  private async prepareMedia(
+    input: WhatsAppWebPublicationInput,
+    diagnostics?: WhatsAppWebSafeDiagnostics,
+  ) {
     if (!input.channel.sendImage || !input.imageUrl)
-      return { path: null, fallback: false, cleanup: async () => undefined };
+      return {
+        path: null,
+        contentType: null,
+        fallback: false,
+        cleanup: async () => undefined,
+      };
+    let image: Awaited<ReturnType<typeof prepareRemoteImage>>;
+    try {
+      image = await (this.dependencies.prepareImage ?? prepareRemoteImage)(
+        input.imageUrl,
+      );
+    } catch {
+      if (!this.config.allowTextFallback) {
+        throw new WhatsAppWebStageError(
+          "MEDIA_UPLOAD_FAILED",
+          {
+            currentOrigin: "https://web.whatsapp.com",
+            ...diagnostics,
+            rootCause: "MEDIA_UPLOAD_FAILED",
+            errorCode: "WHATSAPP_WEB_MEDIA_PREPARATION_FAILED",
+          },
+          "WHATSAPP_WEB_MEDIA_PREPARATION_FAILED",
+        );
+      }
+      return {
+        path: null,
+        contentType: null,
+        fallback: true,
+        cleanup: async () => undefined,
+      };
+    }
+
     let directory: string | null = null;
     try {
-      const image = await (
-        this.dependencies.prepareImage ?? prepareRemoteImage
-      )(input.imageUrl);
+      const extension = extname(image.filename).toLowerCase();
+      if (diagnostics) {
+        diagnostics.tempFileExtension = extension;
+      }
+      if (!isCompatibleImageFile(image.contentType, extension)) {
+        throw new WhatsAppWebStageError(
+          "FILE_MIME_INVALID",
+          {
+            currentOrigin: "https://web.whatsapp.com",
+            ...diagnostics,
+            tempFileExtension: extension,
+            rootCause: "FILE_MIME_INVALID",
+            errorCode: "WHATSAPP_WEB_MEDIA_PREPARATION_FAILED",
+          },
+          "WHATSAPP_WEB_MEDIA_PREPARATION_FAILED",
+        );
+      }
       directory = await mkdtemp(join(tmpdir(), "affiliate-wa-"));
       const path = join(directory, image.filename);
-      await writeFile(path, image.bytes);
+      try {
+        await (this.dependencies.writeTempFile ?? writeFile)(path, image.bytes);
+      } catch {
+        throw new WhatsAppWebStageError(
+          "FILE_NOT_WRITTEN",
+          {
+            currentOrigin: "https://web.whatsapp.com",
+            ...diagnostics,
+            tempFileExtension: extension,
+            rootCause: "FILE_NOT_WRITTEN",
+            errorCode: "WHATSAPP_WEB_MEDIA_PREPARATION_FAILED",
+          },
+          "WHATSAPP_WEB_MEDIA_PREPARATION_FAILED",
+        );
+      }
+      let fileStat: Awaited<ReturnType<typeof stat>>;
+      try {
+        fileStat = await (this.dependencies.statTempFile ?? stat)(path);
+      } catch {
+        throw new WhatsAppWebStageError(
+          "FILE_NOT_FOUND_ON_DISK",
+          {
+            currentOrigin: "https://web.whatsapp.com",
+            ...diagnostics,
+            tempFileExists: false,
+            tempFileExtension: extension,
+            rootCause: "FILE_NOT_FOUND_ON_DISK",
+            errorCode: "WHATSAPP_WEB_MEDIA_PREPARATION_FAILED",
+          },
+          "WHATSAPP_WEB_MEDIA_PREPARATION_FAILED",
+        );
+      }
+      if (diagnostics) {
+        diagnostics.tempFileExists = true;
+        diagnostics.tempFileSize = fileStat.size;
+      }
+      if (!fileStat.isFile()) {
+        throw new WhatsAppWebStageError(
+          "FILE_NOT_FOUND_ON_DISK",
+          {
+            currentOrigin: "https://web.whatsapp.com",
+            ...diagnostics,
+            tempFileExists: false,
+            rootCause: "FILE_NOT_FOUND_ON_DISK",
+            errorCode: "WHATSAPP_WEB_MEDIA_PREPARATION_FAILED",
+          },
+          "WHATSAPP_WEB_MEDIA_PREPARATION_FAILED",
+        );
+      }
+      if (fileStat.size <= 0) {
+        throw new WhatsAppWebStageError(
+          "FILE_SIZE_ZERO",
+          {
+            currentOrigin: "https://web.whatsapp.com",
+            ...diagnostics,
+            tempFileExists: true,
+            tempFileSize: fileStat.size,
+            rootCause: "FILE_SIZE_ZERO",
+            errorCode: "WHATSAPP_WEB_MEDIA_PREPARATION_FAILED",
+          },
+          "WHATSAPP_WEB_MEDIA_PREPARATION_FAILED",
+        );
+      }
       return {
         path,
+        contentType: image.contentType,
         fallback: false,
         cleanup: async () => rm(directory!, { recursive: true, force: true }),
       };
-    } catch {
+    } catch (error) {
       if (directory)
         await rm(directory, { recursive: true, force: true }).catch(
           () => undefined,
         );
-      if (!this.config.allowTextFallback)
-        throw new Error("WHATSAPP_WEB_MEDIA_PREPARATION_FAILED");
-      return { path: null, fallback: true, cleanup: async () => undefined };
+      throw error;
     }
   }
 
@@ -665,6 +869,19 @@ export class WhatsAppGroupsWebPublisher implements WhatsAppGroupsWebPublisherCon
 
 function uniqueSnippet(title: string) {
   return title.replace(/\s+/g, " ").trim().slice(0, 60);
+}
+
+function isCompatibleImageFile(contentType: string, extension: string) {
+  const allowed = new Map<string, ReadonlySet<string>>([
+    ["image/jpeg", new Set([".jpg", ".jpeg"])],
+    ["image/png", new Set([".png"])],
+    ["image/webp", new Set([".webp"])],
+    ["image/gif", new Set([".gif"])],
+  ]);
+  return (
+    contentType.startsWith("image/") &&
+    allowed.get(contentType)?.has(extension) === true
+  );
 }
 
 function errorCode(error: unknown): WhatsAppWebErrorCode {

@@ -15,6 +15,7 @@ type FakeNode = {
   title?: string;
   onClick?: () => void;
   onFill?: (value: string) => void;
+  onSetInputFiles?: (path: string) => void;
 };
 
 class FakeLocator {
@@ -89,13 +90,20 @@ class FakeLocator {
   }
   async waitFor() {}
   async screenshot() {}
-  async setInputFiles() {}
+  async setInputFiles(path: string) {
+    this.page.files.push({ strategy: "input", path });
+    this.node()?.onSetInputFiles?.(path);
+  }
 }
 
 class FakePage {
   readonly nodes = new Map<string, FakeNode[]>();
   readonly clicks: string[] = [];
   readonly fills: Array<{ key: string; value: string }> = [];
+  readonly files: Array<{ strategy: "chooser" | "input"; path: string }> = [];
+  readonly fileChoosers: Array<null | {
+    setFiles(path: string): Promise<void>;
+  }> = [];
   onWait?: () => void;
 
   add(key: string, ...nodes: FakeNode[]) {
@@ -118,10 +126,25 @@ class FakePage {
     );
   }
   async goto() {}
+  async waitForEvent(event: string) {
+    if (event !== "filechooser") throw new Error("unsupported event");
+    const chooser = this.fileChoosers.shift() ?? null;
+    if (!chooser) throw new Error("no file chooser");
+    return chooser;
+  }
   async waitForTimeout() {
     this.onWait?.();
     await new Promise((resolve) => setTimeout(resolve, 1));
   }
+}
+
+function fileChooser(page: FakePage, onSet?: () => void) {
+  return {
+    setFiles: async (path: string) => {
+      page.files.push({ strategy: "chooser", path });
+      onSet?.();
+    },
+  };
 }
 
 function pageWithShell() {
@@ -382,6 +405,90 @@ describe("PlaywrightWhatsAppWebPageAdapter exact group fail-safe", () => {
     expect(result.diagnostics).toMatchObject({
       currentOrigin: "https://web.whatsapp.com",
       interfaceLanguage: "pt",
+    });
+  });
+});
+
+describe("PlaywrightWhatsAppWebPageAdapter media draft", () => {
+  it("uploads through a direct file chooser and waits for preview", async () => {
+    const page = pageWithShell();
+    page.add("css:#main, main", { visible: true });
+    page.add("css:#main footer button[aria-label*='attach' i]", {
+      visible: true,
+      enabled: true,
+    });
+    page.fileChoosers.push(
+      fileChooser(page, () =>
+        page.add("css:[data-testid='media-preview']", { visible: true }),
+      ),
+    );
+
+    await expect(
+      adapter(page).attachImage("C:\\temp\\offer.jpg"),
+    ).resolves.toEqual({
+      attachStrategyUsed: "DIRECT_FILE_CHOOSER",
+      usedFileChooser: true,
+      usedSetInputFiles: false,
+      previewDetected: true,
+    });
+    expect(page.files).toEqual([
+      { strategy: "chooser", path: "C:\\temp\\offer.jpg" },
+    ]);
+  });
+
+  it("falls back to the semantic image file input and waits for preview", async () => {
+    const page = pageWithShell();
+    page.add("css:#main, main", { visible: true });
+    page.add("css:#main footer button[aria-label*='attach' i]", {
+      visible: true,
+      enabled: true,
+      onClick: () => {
+        page.add("css:[role='menu']", { visible: true });
+        page.add("css:input[type='file'][accept*='image']", {
+          onSetInputFiles: () =>
+            page.add("css:[data-testid='media-preview']", { visible: true }),
+        });
+      },
+    });
+    page.fileChoosers.push(null);
+
+    await expect(
+      adapter(page).attachImage("C:\\temp\\offer.jpg"),
+    ).resolves.toEqual({
+      attachStrategyUsed: "SET_INPUT_FILES",
+      usedFileChooser: false,
+      usedSetInputFiles: true,
+      previewDetected: true,
+    });
+    expect(page.files[0]).toEqual({
+      strategy: "input",
+      path: "C:\\temp\\offer.jpg",
+    });
+  });
+
+  it("preserves MEDIA_PREVIEW_NOT_FOUND instead of selector mismatch", async () => {
+    const page = pageWithShell();
+    page.add("css:#main, main", { visible: true });
+    page.add("css:#main footer button[aria-label*='attach' i]", {
+      visible: true,
+      enabled: true,
+    });
+    page.fileChoosers.push(fileChooser(page));
+
+    await expect(
+      adapter(page, 10).attachImage("C:\\temp\\offer.jpg"),
+    ).rejects.toMatchObject({
+      stage: "MEDIA_PREVIEW_NOT_FOUND",
+      errorCode: "WHATSAPP_WEB_MEDIA_UPLOAD_FAILED",
+    });
+  });
+
+  it("preserves CAPTION_INPUT_NOT_FOUND", async () => {
+    await expect(
+      adapter(pageWithShell(), 10).fillCaption("draft"),
+    ).rejects.toMatchObject({
+      stage: "CAPTION_INPUT_NOT_FOUND",
+      errorCode: "WHATSAPP_WEB_DRAFT_VALIDATION_FAILED",
     });
   });
 });
