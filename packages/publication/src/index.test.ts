@@ -461,6 +461,28 @@ describe("channel policy", () => {
     ).toMatchObject({ ok: false, code: "CHANNEL_TYPE_UNAVAILABLE" });
   });
 
+  it("supports assisted WhatsApp groups and rejects the legacy channel type", () => {
+    const offer = {
+      marketplace: "SHOPEE",
+      category: "Casa",
+      score: 90,
+      discountPercentage: 20,
+    };
+
+    expect(
+      isOfferCompatibleWithChannel(offer, {
+        ...channel,
+        type: "WHATSAPP_GROUPS",
+      }),
+    ).toEqual({ ok: true });
+    expect(
+      isOfferCompatibleWithChannel(offer, {
+        ...channel,
+        type: "WHATSAPP_CHANNEL",
+      }),
+    ).toMatchObject({ ok: false, code: "CHANNEL_TYPE_UNAVAILABLE" });
+  });
+
   it("checks daily limit, interval and product repeat", () => {
     const now = new Date("2026-07-23T15:00:00.000Z");
 

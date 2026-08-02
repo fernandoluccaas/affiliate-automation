@@ -7,6 +7,7 @@ import {
   createLockedWorkerDependencies,
   createPublicationIdempotently,
   getChannelMessageFooter,
+  hasAssistedGroupPendingCapacity,
   headlineFromMessagePayload,
   publicationRetryDelayMs,
   publishScheduledOffers,
@@ -51,6 +52,23 @@ describe("promotional message channel context", () => {
       headlineFromMessagePayload({ message: "\n  PROMO DO DIA  \n\nProduto" }),
     ).toBe("PROMO DO DIA");
     expect(headlineFromMessagePayload({ message: 123 })).toBeNull();
+  });
+});
+
+describe("assisted WhatsApp group capacity", () => {
+  it("applies pending limits independently per group", () => {
+    const group = (id: string, maxPendingPublications: number) =>
+      ({
+        id,
+        type: "WHATSAPP_GROUPS",
+        configuration: {
+          publicationMode: "ASSISTED",
+          maxPendingPublications,
+        },
+      }) as unknown as Channel;
+
+    expect(hasAssistedGroupPendingCapacity(group("group-a", 3), 3)).toBe(false);
+    expect(hasAssistedGroupPendingCapacity(group("group-b", 3), 0)).toBe(true);
   });
 });
 
@@ -313,8 +331,8 @@ describe("createPublicationIdempotently", () => {
     };
     const channel = {
       id: "channel-whatsapp",
-      name: "Canal principal",
-      type: "WHATSAPP_CHANNEL",
+      name: "Grupo principal",
+      type: "WHATSAPP_GROUPS",
       enabled: true,
       timezone: "America/Fortaleza",
       dailyPublicationLimit: 10,
@@ -326,18 +344,34 @@ describe("createPublicationIdempotently", () => {
       productRepeatIntervalDays: 0,
       allowedMarketplaces: ["MERCADO_LIVRE"],
       allowedCategories: [],
-      configuration: { publicationMode: "ASSISTED", maxPending: 5, sendImage: true },
+      configuration: {
+        publicationMode: "ASSISTED",
+        groupDisplayName: "Grupo principal",
+        maxPendingPublications: 5,
+        sendImage: true,
+      },
       createdAt: now,
       updatedAt: now,
     };
-    const upsert = vi.fn().mockResolvedValue({ id: "publication-whatsapp" });
+    let publicationCreated = false;
+    const upsert = vi.fn().mockImplementation(() => {
+      publicationCreated = true;
+      return { id: "publication-whatsapp" };
+    });
+    const findFirst = vi.fn().mockImplementation((input: {
+      where?: { idempotencyKey?: string };
+    }) =>
+      input?.where?.idempotencyKey && publicationCreated
+        ? { id: "publication-whatsapp" }
+        : null,
+    );
     const offerUpdate = vi.fn().mockResolvedValue(offer);
     Object.assign(actual.prisma, {
       offer: { findMany: vi.fn().mockResolvedValue([offer]), update: offerUpdate },
       channel: { findMany: vi.fn().mockResolvedValue([channel]) },
       publication: {
         count: vi.fn().mockResolvedValue(0),
-        findFirst: vi.fn().mockResolvedValue(null),
+        findFirst,
         findMany: vi.fn().mockResolvedValue([]),
         upsert,
       },
@@ -350,7 +384,7 @@ describe("createPublicationIdempotently", () => {
     expect(first).toMatchObject({
       scheduled: 1,
       published: 0,
-      whatsappAssistedPrepared: 1,
+      whatsappGroupAssistedPrepared: 1,
     });
     expect(upsert).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -358,13 +392,73 @@ describe("createPublicationIdempotently", () => {
         create: expect.objectContaining({
           status: "AWAITING_MANUAL_PUBLICATION",
           imageUrlSnapshot: "https://cdn.example.com/image.jpg",
-          metadata: expect.objectContaining({ publicationMode: "ASSISTED" }),
+          metadata: expect.objectContaining({
+            publicationMode: "ASSISTED",
+            whatsappDestinationType: "GROUP",
+            groupDisplayNameSnapshot: "Grupo principal",
+          }),
         }),
       }),
     );
     expect(offerUpdate).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ status: "SCHEDULED" }) }),
     );
+
+    const second = await scheduleReadyOffers(now);
+    expect(second.scheduled).toBe(0);
+    expect(second.skipReasons.DUPLICATE_PUBLICATION).toBe(1);
+    expect(upsert).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not create new assisted publications for legacy WHATSAPP_CHANNEL records", async () => {
+    const actual = await import("@affiliate/database");
+    const upsert = vi.fn();
+    Object.assign(actual.prisma, {
+      offer: {
+        findMany: vi.fn().mockResolvedValue([
+          {
+            id: "offer-legacy",
+            marketplace: "MERCADO_LIVRE",
+            category: null,
+            score: 90,
+            scoreCompletenessPercentage: 100,
+            discountPercentage: 20,
+            stockStatus: "IN_STOCK",
+            shippingStatus: "FREE",
+            affiliateLinks: [],
+          },
+        ]),
+      },
+      channel: {
+        findMany: vi.fn().mockResolvedValue([
+          {
+            id: "legacy-channel",
+            type: "WHATSAPP_CHANNEL",
+            enabled: true,
+            timezone: "America/Fortaleza",
+            dailyPublicationLimit: 3,
+            minimumIntervalMinutes: 60,
+            allowedStartTime: null,
+            allowedEndTime: null,
+            minimumScore: 0,
+            minDiscountPercentage: 0,
+            productRepeatIntervalDays: 0,
+            allowedMarketplaces: [],
+            allowedCategories: [],
+            configuration: { publicationMode: "ASSISTED" },
+          },
+        ]),
+      },
+      publication: { upsert },
+    });
+
+    const metrics = await scheduleReadyOffers(
+      new Date("2026-08-02T12:00:00.000Z"),
+    );
+
+    expect(metrics.scheduled).toBe(0);
+    expect(metrics.skipReasons.CHANNEL_TYPE_UNAVAILABLE).toBe(1);
+    expect(upsert).not.toHaveBeenCalled();
   });
 
   it("schedules the same Offer version once for each compatible channel", async () => {
@@ -396,8 +490,8 @@ describe("createPublicationIdempotently", () => {
       affiliateLinks: [],
     };
     const channelBase = {
-      name: "Telegram",
-      type: "MANUAL_EXPORT",
+      name: "Grupo",
+      type: "WHATSAPP_GROUPS",
       enabled: true,
       timezone: "America/Sao_Paulo",
       dailyPublicationLimit: 10,
@@ -409,13 +503,31 @@ describe("createPublicationIdempotently", () => {
       productRepeatIntervalDays: 0,
       allowedMarketplaces: ["MERCADO_LIVRE"],
       allowedCategories: [],
-      configuration: null,
+      configuration: {
+        publicationMode: "ASSISTED",
+        groupDisplayName: "Grupo",
+        maxPendingPublications: 3,
+      },
       createdAt: now,
       updatedAt: now,
     };
     const channels = [
-      { ...channelBase, id: "channel-general" },
-      { ...channelBase, id: "channel-tech" },
+      {
+        ...channelBase,
+        id: "channel-general",
+        configuration: {
+          ...channelBase.configuration,
+          groupDisplayName: "Grupo geral",
+        },
+      },
+      {
+        ...channelBase,
+        id: "channel-tech",
+        configuration: {
+          ...channelBase.configuration,
+          groupDisplayName: "Grupo tecnologia",
+        },
+      },
     ];
     const upsert = vi.fn().mockImplementation(({ create }) => ({
       ...create,

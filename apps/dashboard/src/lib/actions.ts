@@ -48,6 +48,8 @@ import {
   assistedCancellationData,
   assistedConfirmationData,
   assistedFailureData,
+  convertLegacyWhatsAppConfiguration,
+  groupDisplayNameFromSnapshot,
 } from "./assisted-publications";
 
 const loginSchema = z.object({
@@ -135,6 +137,7 @@ const channelSchema = z.object({
   type: z.enum([
     "TELEGRAM",
     "MANUAL_EXPORT",
+    "WHATSAPP_GROUPS",
     "WHATSAPP_CHANNEL",
     "WHATSAPP_CLOUD_API",
     "WHATSAPP_GROUPS_API",
@@ -155,11 +158,11 @@ const channelSchema = z.object({
   allowedCategories: z.string().optional(),
   telegramChatId: z.string().optional(),
   publicationMode: z.enum(["ASSISTED", "WEB_EXPERIMENTAL"]).optional(),
-  channelDisplayName: z.string().trim().optional(),
+  groupDisplayName: z.string().trim().optional(),
   customHeader: z.string().trim().max(500).optional(),
   customFooter: z.string().trim().max(500).optional(),
   sendImage: z.boolean().optional(),
-  maxPending: z.coerce.number().int().min(1).max(50).optional(),
+  maxPendingPublications: z.coerce.number().int().min(1).max(50).optional(),
 });
 
 const mercadoLivreConfigSchema = z.object({
@@ -228,11 +231,11 @@ function channelPayload(formData: FormData) {
     allowedCategories: formData.get("allowedCategories")?.toString(),
     telegramChatId: formData.get("telegramChatId")?.toString(),
     publicationMode: formData.get("publicationMode")?.toString() || "ASSISTED",
-    channelDisplayName: formData.get("channelDisplayName")?.toString(),
+    groupDisplayName: formData.get("groupDisplayName")?.toString(),
     customHeader: formData.get("customHeader")?.toString(),
     customFooter: formData.get("customFooter")?.toString(),
     sendImage: formData.get("sendImage") === "on",
-    maxPending: formData.get("maxPending") || 5,
+    maxPendingPublications: formData.get("maxPendingPublications") || 3,
   });
 
   if (!parsed.success) {
@@ -243,7 +246,7 @@ function channelPayload(formData: FormData) {
 
   const channel = parsed.data;
   if (
-    channel.type === "WHATSAPP_CHANNEL" &&
+    channel.type === "WHATSAPP_GROUPS" &&
     channel.publicationMode === "WEB_EXPERIMENTAL"
   ) {
     throw new Error(
@@ -255,14 +258,15 @@ function channelPayload(formData: FormData) {
     ? channel.telegramChatId
       ? { chatId: channel.telegramChatId.trim() }
       : Prisma.JsonNull
-    : channel.type === "WHATSAPP_CHANNEL"
+    : channel.type === "WHATSAPP_GROUPS"
       ? {
           publicationMode: "ASSISTED",
-          channelDisplayName: channel.channelDisplayName || null,
+          whatsappDestinationType: "GROUP",
+          groupDisplayName: channel.groupDisplayName || channel.name,
           customHeader: channel.customHeader || null,
           customFooter: channel.customFooter || null,
           sendImage: channel.sendImage ?? true,
-          maxPending: channel.maxPending ?? 5,
+          maxPendingPublications: channel.maxPendingPublications ?? 3,
         }
       : Prisma.JsonNull;
 
@@ -293,7 +297,10 @@ function channelPayload(formData: FormData) {
 }
 
 export async function createChannelAction(formData: FormData) {
-  const { data } = channelPayload(formData);
+  const { channel, data } = channelPayload(formData);
+  if (channel.type === "WHATSAPP_CHANNEL") {
+    throw new Error("WHATSAPP_CHANNEL e legado e nao aceita novos registros.");
+  }
   await prisma.channel.create({ data });
   revalidatePath("/canais");
   redirect("/canais?message=created");
@@ -355,6 +362,32 @@ export async function testTelegramChannelAction(formData: FormData) {
   redirect(`/canais?message=${ok ? "telegram-ok" : "telegram-failed"}`);
 }
 
+export async function convertLegacyWhatsAppChannelAction(formData: FormData) {
+  await requireSession();
+  const id = formData.get("id")?.toString();
+  if (!id) throw new Error("Canal legado nao informado.");
+
+  const legacy = await prisma.channel.findFirst({
+    where: { id, type: "WHATSAPP_CHANNEL" },
+    select: { id: true, name: true, configuration: true },
+  });
+  if (!legacy) throw new Error("Registro WHATSAPP_CHANNEL legado nao encontrado.");
+
+  await prisma.channel.update({
+    where: { id: legacy.id },
+    data: {
+      type: "WHATSAPP_GROUPS",
+      configuration: convertLegacyWhatsAppConfiguration(
+        legacy.configuration,
+        legacy.name,
+      ),
+    },
+  });
+  revalidatePath("/canais");
+  revalidatePath("/publicacoes-assistidas");
+  redirect("/canais?message=legacy-converted");
+}
+
 async function assistedPublication(formData: FormData) {
   const id = formData.get("publicationId")?.toString();
   if (!id) throw new Error("Publicacao nao informada.");
@@ -362,9 +395,14 @@ async function assistedPublication(formData: FormData) {
     where: {
       id,
       status: "AWAITING_MANUAL_PUBLICATION",
-      channel: { type: "WHATSAPP_CHANNEL" },
+      channel: { type: "WHATSAPP_GROUPS" },
     },
-    select: { id: true, offerId: true, metadata: true },
+    select: {
+      id: true,
+      offerId: true,
+      metadata: true,
+      channel: { select: { name: true, configuration: true } },
+    },
   });
   if (!publication) throw new Error("Pendencia assistida nao encontrada.");
   return publication;
@@ -374,10 +412,20 @@ export async function confirmAssistedPublicationAction(formData: FormData) {
   const user = await requireSession();
   const publication = await assistedPublication(formData);
   const now = new Date();
+  const groupDisplayName = groupDisplayNameFromSnapshot(
+    publication.metadata,
+    publication.channel.configuration,
+    publication.channel.name,
+  );
   await prisma.$transaction([
     prisma.publication.update({
       where: { id: publication.id },
-      data: assistedConfirmationData(publication.metadata, user.id, now),
+      data: assistedConfirmationData(
+        publication.metadata,
+        user.id,
+        now,
+        groupDisplayName,
+      ),
     }),
     prisma.offer.update({
       where: { id: publication.offerId },

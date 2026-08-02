@@ -257,19 +257,19 @@ Transient failures use bounded backoff:
 
 Telegram `Retry-After` is used whenever it is longer than the normal backoff.
 
-## Assisted WhatsApp Channel runbook
+## Assisted WhatsApp Groups runbook
 
-1. Apply migrations and create a `WHATSAPP_CHANNEL` in `/canais`.
-2. Keep `publicationMode=ASSISTED`, set a permissive test window and a daily limit of one.
+1. Apply migrations and create a `WHATSAPP_GROUPS` record in `/canais`, or explicitly convert a legacy `WHATSAPP_CHANNEL` record on that page.
+2. Keep `publicationMode=ASSISTED`. Recommended initial settings are daily limit 3, minimum interval 60 minutes and maximum 3 pending publications.
 3. Run `npm run worker:once` (or the workspace equivalent).
 4. Open `/publicacoes-assistidas`; verify the exact snapshot, affiliate URL and image.
 5. Copy only through the user-triggered button, download the image and open `https://web.whatsapp.com/`.
-6. Publish manually in the intended Canal, then click `Marcar como publicada` and confirm.
-7. Run the worker again and verify the same Channel plus Offer version is not duplicated.
+6. Select and publish manually in the intended group, then click `Marcar como publicada` and confirm the snapshotted group name.
+7. Run the worker again and verify the same group plus Offer version is not duplicated. A second configured group remains independently eligible.
 
 An awaiting item reserves one daily slot and the worker creates no more than `WHATSAPP_ASSISTED_MAX_PENDING_PER_CHANNEL` pending rows (default 5). The image download endpoint permits HTTPS images only, rejects local/private literal addresses and unsafe redirects, validates the media type, enforces timeout and size limits, and does not expose a server path.
 
-There is no WhatsApp Web login, dry run or real-send procedure in this phase. Reserved Web variables remain inert and the disabled adapter reports `WHATSAPP_WEB_AUTOMATION_NOT_AUTHORIZED`.
+The real assisted test already validated copy, image download, opening WhatsApp Web, manual publication, status confirmation and idempotency. There is no automated WhatsApp Web login, group lookup, composer fill, dry run or real-send procedure in this phase. Reserved Web variables remain inert and the disabled adapter reports `WHATSAPP_WEB_AUTOMATION_NOT_AUTHORIZED`.
 The retry timestamp is persisted in `Publication.scheduledAt`. A Channel with a
 pending transient failure is not used for another delivery until that timestamp
 passes. Permanent failures become `PUBLICATION_FAILED` immediately; transient

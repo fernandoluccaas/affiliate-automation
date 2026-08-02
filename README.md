@@ -65,13 +65,13 @@ To test Telegram:
 
 The worker creates `Publication` with historical snapshots, sends the saved message, records `PublicationAttempt`, and updates the dashboard with real publication and click data.
 
-### Canal do WhatsApp assistido
+### Grupos do WhatsApp assistidos
 
-Create a `WHATSAPP_CHANNEL` in `/canais` with publication mode `ASSISTED`. The shared scheduler applies the same timezone, daily limit, interval, repeat and marketplace policies used by other channels, then creates one idempotent `AWAITING_MANUAL_PUBLICATION` snapshot per Channel and Offer version. Pending items reserve daily capacity and are capped at five per channel by default.
+Create one or more `WHATSAPP_GROUPS` records in `/canais` with publication mode `ASSISTED`. Each group has independent timezone, daily limit, interval, repeat, score and marketplace policies. The shared scheduler creates one idempotent `AWAITING_MANUAL_PUBLICATION` snapshot per group and Offer version; pending items reserve capacity separately for each group.
 
-Use `/publicacoes-assistidas` to copy the exact saved message, download the validated image, open WhatsApp Web and manually confirm delivery. Confirmation records the authenticated user and `publishedAt`; it does not fabricate an external message ID. Cancelling or failing an item prevents automatic delivery.
+Use `/publicacoes-assistidas` to filter by group, status, marketplace or date, copy the exact saved message, download the validated image, open WhatsApp Web and manually publish in the intended group. Confirmation records the snapshotted group name, authenticated user and `publishedAt`; it does not fabricate an external message ID.
 
-WhatsApp Web automation is not implemented. The `WEB_EXPERIMENTAL` contract reports `DISABLED` because the current repository policy does not authorize unofficial WhatsApp Web automation. No browser profile, QR code, cookies, local storage or Playwright dependency is used.
+`WHATSAPP_CHANNEL` is legacy and can be converted explicitly in `/canais` without changing its ID or Publications. `WHATSAPP_GROUPS_API` remains unused. WhatsApp Web automation is not implemented; the experimental contract reports `DISABLED`, and no browser profile, QR code, cookies, local storage or Playwright dependency is used.
 
 Manual export channels create `EXPORTED` publications. They do not count as external publications and do not update the offer as published.
 

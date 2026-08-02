@@ -11,7 +11,7 @@ import {
   type MessageGenerationResult,
 } from "@affiliate/ai-copywriter";
 import {
-  AssistedWhatsAppChannelPublisher,
+  AssistedWhatsAppGroupsPublisher,
   ManualExportPublisher,
   TelegramPublisher,
   type PublicationPayload,
@@ -56,10 +56,10 @@ type JobMetrics = {
   skipped: number;
   aiGenerated: number;
   aiFallbackUsed: number;
-  whatsappAssistedPrepared: number;
-  whatsappAssistedConfirmed: number;
-  whatsappAssistedSkipped: number;
-  whatsappAssistedFailed: number;
+  whatsappGroupAssistedPrepared: number;
+  whatsappGroupAssistedConfirmed: number;
+  whatsappGroupAssistedSkipped: number;
+  whatsappGroupAssistedFailed: number;
   skipReasons: Record<string, number>;
 };
 
@@ -100,10 +100,10 @@ function emptyMetrics(): JobMetrics {
     skipped: 0,
     aiGenerated: 0,
     aiFallbackUsed: 0,
-    whatsappAssistedPrepared: 0,
-    whatsappAssistedConfirmed: 0,
-    whatsappAssistedSkipped: 0,
-    whatsappAssistedFailed: 0,
+    whatsappGroupAssistedPrepared: 0,
+    whatsappGroupAssistedConfirmed: 0,
+    whatsappGroupAssistedSkipped: 0,
+    whatsappGroupAssistedFailed: 0,
     skipReasons: {},
   };
 }
@@ -120,10 +120,10 @@ function mergeMetrics(target: JobMetrics, source: JobMetrics) {
     "skipped",
     "aiGenerated",
     "aiFallbackUsed",
-    "whatsappAssistedPrepared",
-    "whatsappAssistedConfirmed",
-    "whatsappAssistedSkipped",
-    "whatsappAssistedFailed",
+    "whatsappGroupAssistedPrepared",
+    "whatsappGroupAssistedConfirmed",
+    "whatsappGroupAssistedSkipped",
+    "whatsappGroupAssistedFailed",
   ];
 
   for (const key of numericKeys) {
@@ -237,7 +237,7 @@ async function messagePayloadFor(
     recentHeadlines,
   });
 
-  const message = isAssistedWhatsAppChannel(channel)
+  const message = isAssistedWhatsAppGroup(channel)
     ? new WhatsAppMessageFormatter().format({
         title: offer.title,
         marketplace: offer.marketplace,
@@ -265,7 +265,7 @@ async function messagePayloadFor(
     trackingUrl: publicationUrl.url,
     message,
     imageUrl:
-      isAssistedWhatsAppChannel(channel) &&
+      isAssistedWhatsAppGroup(channel) &&
       channelConfiguration(channel).sendImage === false
         ? null
         : offer.imageUrl,
@@ -292,19 +292,33 @@ function channelConfigString(channel: Channel, key: string) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
-export function isAssistedWhatsAppChannel(channel: Channel) {
+export function isAssistedWhatsAppGroup(channel: Channel) {
   return (
-    channel.type === "WHATSAPP_CHANNEL" &&
+    channel.type === "WHATSAPP_GROUPS" &&
     channelConfiguration(channel).publicationMode === "ASSISTED"
   );
 }
 
+function whatsappGroupDisplayName(channel: Channel) {
+  return channelConfigString(channel, "groupDisplayName") ?? channel.name;
+}
+
 function assistedMaxPending(channel: Channel) {
-  const configured = Number(channelConfiguration(channel).maxPending);
+  const configuration = channelConfiguration(channel);
+  const configured = Number(
+    configuration.maxPendingPublications ?? configuration.maxPending,
+  );
   const fallback = Number(
     process.env.WHATSAPP_ASSISTED_MAX_PENDING_PER_CHANNEL ?? 5,
   );
   return Math.max(1, Number.isFinite(configured) ? configured : fallback);
+}
+
+export function hasAssistedGroupPendingCapacity(
+  channel: Channel,
+  pending: number,
+) {
+  return pending < assistedMaxPending(channel);
 }
 
 export function getChannelMessageFooter(
@@ -514,6 +528,8 @@ export async function createPublicationIdempotently(
         status === "AWAITING_MANUAL_PUBLICATION"
           ? {
               publicationMode: "ASSISTED",
+              whatsappDestinationType: "GROUP",
+              groupDisplayNameSnapshot: whatsappGroupDisplayName(channel),
               confirmationStrategy: "MANUAL",
               mediaFallbackUsed: !payload.imageUrl,
             }
@@ -588,7 +604,7 @@ export async function scheduleReadyOffers(now = new Date()) {
 
       const publisher = publisherForChannel(channel);
 
-      const assisted = isAssistedWhatsAppChannel(channel);
+      const assisted = isAssistedWhatsAppGroup(channel);
       if (!publisher && !assisted) {
         recordSkip(metrics, "PUBLISHER_UNAVAILABLE");
         continue;
@@ -601,9 +617,9 @@ export async function scheduleReadyOffers(now = new Date()) {
             status: "AWAITING_MANUAL_PUBLICATION",
           },
         });
-        if (pending >= assistedMaxPending(channel)) {
+        if (!hasAssistedGroupPendingCapacity(channel, pending)) {
           recordSkip(metrics, "CHANNEL_DAILY_LIMIT");
-          metrics.whatsappAssistedSkipped += 1;
+          metrics.whatsappGroupAssistedSkipped += 1;
           continue;
         }
       }
@@ -665,7 +681,11 @@ export async function scheduleReadyOffers(now = new Date()) {
 
       try {
         if (assisted) {
-          await new AssistedWhatsAppChannelPublisher().publish(payload);
+          await new AssistedWhatsAppGroupsPublisher().publish({
+            ...payload,
+            destinationType: "GROUP",
+            groupDisplayName: whatsappGroupDisplayName(channel),
+          });
         }
         await prisma.$transaction(async (tx) => {
           await createPublicationIdempotently(
@@ -682,7 +702,7 @@ export async function scheduleReadyOffers(now = new Date()) {
           });
         });
         metrics.scheduled += 1;
-        if (assisted) metrics.whatsappAssistedPrepared += 1;
+        if (assisted) metrics.whatsappGroupAssistedPrepared += 1;
         scheduledChannelIds.add(channel.id);
       } finally {
         await lock.release();
@@ -1534,10 +1554,13 @@ export async function startWorker(
             publicationsFailed: published.failed,
             aiGenerated: scheduled.aiGenerated,
             aiFallbackUsed: scheduled.aiFallbackUsed,
-            whatsappAssistedPrepared: scheduled.whatsappAssistedPrepared,
-            whatsappAssistedConfirmed: 0,
-            whatsappAssistedSkipped: scheduled.whatsappAssistedSkipped,
-            whatsappAssistedFailed: scheduled.whatsappAssistedFailed,
+            whatsappGroupAssistedPrepared:
+              scheduled.whatsappGroupAssistedPrepared,
+            whatsappGroupAssistedConfirmed: 0,
+            whatsappGroupAssistedSkipped:
+              scheduled.whatsappGroupAssistedSkipped,
+            whatsappGroupAssistedFailed:
+              scheduled.whatsappGroupAssistedFailed,
           },
         };
       },

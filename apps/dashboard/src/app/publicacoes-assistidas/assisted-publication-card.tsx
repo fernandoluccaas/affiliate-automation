@@ -7,10 +7,13 @@ import {
   confirmAssistedPublicationAction,
   failAssistedPublicationAction,
 } from "@/lib/actions";
+import { assistedGroupConfirmationPrompt } from "@/lib/assisted-publications";
 
 export type AssistedPublicationCardProps = {
   id: string;
-  channelName: string;
+  groupDisplayName: string;
+  status: string;
+  marketplace: string;
   headline: string;
   title: string;
   price: string;
@@ -48,7 +51,8 @@ export function AssistedPublicationCard(props: AssistedPublicationCardProps) {
       </div>
       <div className="grid gap-3">
         <div>
-          <p className="text-sm text-[var(--muted-foreground)]">{props.channelName} · preparada em {props.preparedAt}</p>
+          <p className="text-sm font-medium">Grupo: {props.groupDisplayName}</p>
+          <p className="text-sm text-[var(--muted-foreground)]">{props.marketplace} · {props.status} · preparada em {props.preparedAt}</p>
           <h2 className="font-semibold">{props.headline}</h2>
           <p>{props.title}</p>
           <p className="font-medium">{props.price}</p>
@@ -60,24 +64,24 @@ export function AssistedPublicationCard(props: AssistedPublicationCardProps) {
           <a href="https://web.whatsapp.com/" target="_blank" rel="noreferrer">
             <Button type="button" variant="outline">Abrir WhatsApp Web</Button>
           </a>
-          <form
+          {props.status === "AWAITING_MANUAL_PUBLICATION" ? (<form
             action={confirmAssistedPublicationAction}
             onSubmit={(event) => {
-              if (!window.confirm("Confirma que esta oferta foi publicada no Canal?")) event.preventDefault();
+              if (!window.confirm(assistedGroupConfirmationPrompt(props.groupDisplayName))) event.preventDefault();
             }}
           >
             <input type="hidden" name="publicationId" value={props.id} />
             <Button type="submit">Marcar como publicada</Button>
-          </form>
-          <form action={cancelAssistedPublicationAction}>
+          </form>) : null}
+          {props.status === "AWAITING_MANUAL_PUBLICATION" ? (<form action={cancelAssistedPublicationAction}>
             <input type="hidden" name="publicationId" value={props.id} />
             <Button type="submit" variant="outline">Ignorar</Button>
-          </form>
-          <form action={failAssistedPublicationAction} className="flex gap-2">
+          </form>) : null}
+          {props.status === "AWAITING_MANUAL_PUBLICATION" ? (<form action={failAssistedPublicationAction} className="flex gap-2">
             <input type="hidden" name="publicationId" value={props.id} />
             <input name="reason" className="rounded-md border px-3 text-sm" maxLength={500} placeholder="Motivo opcional" />
             <Button type="submit" variant="outline">Marcar como falha</Button>
-          </form>
+          </form>) : null}
         </div>
       </div>
     </article>

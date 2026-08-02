@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  AssistedWhatsAppChannelPublisher,
+  AssistedWhatsAppGroupsPublisher,
   DisabledWhatsAppWebPublisher,
   ManualExportPublisher,
   TelegramPublisher,
@@ -13,6 +13,11 @@ const payload: PublicationPayload = {
   trackingUrl: "https://example.com/go/slug",
   message: "Mensagem confirmada",
   imageUrl: "https://example.com/image.jpg",
+};
+const groupPayload = {
+  ...payload,
+  destinationType: "GROUP" as const,
+  groupDisplayName: "Grupo de teste",
 };
 
 describe("ManualExportPublisher", () => {
@@ -27,21 +32,24 @@ describe("ManualExportPublisher", () => {
   });
 });
 
-describe("WhatsApp Channel publishers", () => {
+describe("WhatsApp Groups publishers", () => {
   it("prepares assisted output without claiming delivery", async () => {
     await expect(
-      new AssistedWhatsAppChannelPublisher().publish(payload),
+      new AssistedWhatsAppGroupsPublisher().publish(groupPayload),
     ).resolves.toEqual({
       status: "AWAITING_MANUAL_PUBLICATION",
       publicationMode: "ASSISTED",
+      destinationType: "GROUP",
+      groupDisplayName: "Grupo de teste",
       mediaFallbackUsed: false,
     });
   });
 
   it("keeps Web automation inert regardless of feature flags", async () => {
-    process.env.WHATSAPP_CHANNEL_WEB_EXPERIMENTAL_ENABLED = "true";
-    await expect(new DisabledWhatsAppWebPublisher().publish(payload)).resolves.toMatchObject({
+    process.env.WHATSAPP_GROUPS_WEB_EXPERIMENTAL_ENABLED = "true";
+    await expect(new DisabledWhatsAppWebPublisher().publish(groupPayload)).resolves.toMatchObject({
       status: "DISABLED",
+      destinationType: "GROUP",
       errorCode: "WHATSAPP_WEB_AUTOMATION_NOT_AUTHORIZED",
     });
   });

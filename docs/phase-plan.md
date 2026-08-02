@@ -138,13 +138,15 @@ Status: implemented.
 - Reused the existing Mercado Livre service and valid affiliate links.
 - Did not add Shopee, WhatsApp or new marketplace authentication.
 
-## Phase 5A - Assisted WhatsApp Channel
+## Phase 5A - Assisted WhatsApp Groups
 
-- Added one `WHATSAPP_CHANNEL` type configured with `publicationMode=ASSISTED`.
+- Adapted the validated assisted pipeline to existing `WHATSAPP_GROUPS`, with one independently configured Channel per group.
 - Added deterministic WhatsApp formatting on top of persisted offer facts.
 - Added idempotent `AWAITING_MANUAL_PUBLICATION` snapshots, pending caps and daily slot reservation.
 - Added the authenticated `/publicacoes-assistidas` queue with copy, secure image download, open-Web, confirm, cancel and fail actions.
 - Added uniform assisted/Web publisher contracts and an explicitly disabled Web adapter.
+- Deprecated `WHATSAPP_CHANNEL` for new scheduling and added an explicit same-record conversion that preserves Publications and snapshots.
+- Kept `WHATSAPP_GROUPS_API` unused.
 - Did not add Playwright, QR handling, persistent sessions, selectors, Web login or automatic WhatsApp sending because those remain prohibited by `AGENTS.md`.
 
 ## Phase 5 - Tracking and Attribution

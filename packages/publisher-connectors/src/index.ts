@@ -35,46 +35,68 @@ export interface PublisherAdapter {
 }
 
 export type WhatsAppPublicationMode = "ASSISTED" | "WEB_EXPERIMENTAL";
+export type WhatsAppDestinationType = "GROUP";
+
+export type WhatsAppGroupPublicationInput = PublicationPayload & {
+  destinationType: "GROUP";
+  groupDisplayName: string;
+};
 
 export type WhatsAppPublishResult =
   | {
       status: "AWAITING_MANUAL_PUBLICATION";
       publicationMode: "ASSISTED";
+      destinationType: "GROUP";
+      groupDisplayName: string;
       mediaFallbackUsed: boolean;
     }
   | {
       status: "DISABLED";
       publicationMode: "WEB_EXPERIMENTAL";
+      destinationType: "GROUP";
       errorCode: "WHATSAPP_WEB_AUTOMATION_NOT_AUTHORIZED";
       errorMessage: string;
     };
 
 export type WhatsAppHealthResult =
-  | { status: "CONNECTED"; publicationMode: "ASSISTED" }
+  | {
+      status: "CONNECTED";
+      publicationMode: "ASSISTED";
+      destinationType: "GROUP";
+    }
   | {
       status: "DISABLED";
       publicationMode: "WEB_EXPERIMENTAL";
+      destinationType: "GROUP";
       errorCode: "WHATSAPP_WEB_AUTOMATION_NOT_AUTHORIZED";
     };
 
 export interface WhatsAppChannelPublisher {
-  publish(input: PublicationPayload): Promise<WhatsAppPublishResult>;
+  publish(input: WhatsAppGroupPublicationInput): Promise<WhatsAppPublishResult>;
   healthCheck(): Promise<WhatsAppHealthResult>;
 }
 
-export class AssistedWhatsAppChannelPublisher
+export class AssistedWhatsAppGroupsPublisher
   implements WhatsAppChannelPublisher
 {
-  async publish(input: PublicationPayload): Promise<WhatsAppPublishResult> {
+  async publish(
+    input: WhatsAppGroupPublicationInput,
+  ): Promise<WhatsAppPublishResult> {
     return {
       status: "AWAITING_MANUAL_PUBLICATION",
       publicationMode: "ASSISTED",
+      destinationType: "GROUP",
+      groupDisplayName: input.groupDisplayName,
       mediaFallbackUsed: !isValidHttpsUrl(input.imageUrl),
     };
   }
 
   async healthCheck(): Promise<WhatsAppHealthResult> {
-    return { status: "CONNECTED", publicationMode: "ASSISTED" };
+    return {
+      status: "CONNECTED",
+      publicationMode: "ASSISTED",
+      destinationType: "GROUP",
+    };
   }
 }
 
@@ -83,10 +105,13 @@ export class AssistedWhatsAppChannelPublisher
  * WhatsApp Web automation. It has no browser/session dependency or side effect.
  */
 export class DisabledWhatsAppWebPublisher implements WhatsAppChannelPublisher {
-  async publish(_input: PublicationPayload): Promise<WhatsAppPublishResult> {
+  async publish(
+    _input: WhatsAppGroupPublicationInput,
+  ): Promise<WhatsAppPublishResult> {
     return {
       status: "DISABLED",
       publicationMode: "WEB_EXPERIMENTAL",
+      destinationType: "GROUP",
       errorCode: "WHATSAPP_WEB_AUTOMATION_NOT_AUTHORIZED",
       errorMessage:
         "WhatsApp Web automation is disabled by the repository policy.",
@@ -97,6 +122,7 @@ export class DisabledWhatsAppWebPublisher implements WhatsAppChannelPublisher {
     return {
       status: "DISABLED",
       publicationMode: "WEB_EXPERIMENTAL",
+      destinationType: "GROUP",
       errorCode: "WHATSAPP_WEB_AUTOMATION_NOT_AUTHORIZED",
     };
   }

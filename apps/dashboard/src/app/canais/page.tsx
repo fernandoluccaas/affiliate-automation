@@ -7,6 +7,7 @@ import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import {
   createChannelAction,
+  convertLegacyWhatsAppChannelAction,
   testTelegramChannelAction,
   toggleChannelAction,
   updateChannelAction,
@@ -21,7 +22,8 @@ type ChannelsPageProps = {
 const channelTypes = [
   { value: "TELEGRAM", label: "Telegram", disabled: false },
   { value: "MANUAL_EXPORT", label: "Exportacao manual", disabled: false },
-  { value: "WHATSAPP_CHANNEL", label: "Canal do WhatsApp", disabled: false },
+  { value: "WHATSAPP_GROUPS", label: "Grupo do WhatsApp", disabled: false },
+  { value: "WHATSAPP_CHANNEL", label: "Canal do WhatsApp (legado)", disabled: true },
   { value: "WHATSAPP_CLOUD_API", label: "WhatsApp Cloud API indisponivel", disabled: true },
   { value: "WHATSAPP_GROUPS_API", label: "WhatsApp Groups API indisponivel", disabled: true },
 ];
@@ -69,6 +71,7 @@ function messageText(message?: string | string[]) {
   if (value === "disabled") return "Canal desativado.";
   if (value === "telegram-ok") return "Integracao Telegram validada.";
   if (value === "telegram-failed") return "Falha ao validar Telegram.";
+  if (value === "legacy-converted") return "Registro legado convertido para Grupo do WhatsApp sem alterar seu historico.";
   return null;
 }
 
@@ -127,6 +130,17 @@ export default async function ChannelsPage({ searchParams }: ChannelsPageProps) 
                   ) : null}
                 </div>
               </div>
+              {channel.type === "WHATSAPP_CHANNEL" ? (
+                <div className="grid gap-3 rounded-md border border-amber-300 bg-amber-50 p-4 text-sm">
+                  <p>
+                    Este registro usa o tipo legado WHATSAPP_CHANNEL. Converta-o explicitamente para Grupo do WhatsApp; o ID, as publicacoes e os snapshots serao preservados.
+                  </p>
+                  <form action={convertLegacyWhatsAppChannelAction}>
+                    <input type="hidden" name="id" value={channel.id} />
+                    <Button type="submit">Converter para Grupo do WhatsApp</Button>
+                  </form>
+                </div>
+              ) : (
               <ChannelForm
                 action={updateChannelAction}
                 submitLabel="Salvar alteracoes"
@@ -147,13 +161,14 @@ export default async function ChannelsPage({ searchParams }: ChannelsPageProps) 
                   allowedCategories: listText(channel.allowedCategories),
                   telegramChatId: configChatId(channel.configuration),
                   publicationMode: configText(channel.configuration, "publicationMode") || "ASSISTED",
-                  channelDisplayName: configText(channel.configuration, "channelDisplayName"),
+                  groupDisplayName: configText(channel.configuration, "groupDisplayName"),
                   customHeader: configText(channel.configuration, "customHeader"),
                   customFooter: configText(channel.configuration, "customFooter"),
                   sendImage: configBoolean(channel.configuration, "sendImage", true),
-                  maxPending: configNumber(channel.configuration, "maxPending", 5),
+                  maxPendingPublications: configNumber(channel.configuration, "maxPendingPublications", 3),
                 }}
               />
+              )}
             </section>
           ))}
         </div>
@@ -179,11 +194,11 @@ type ChannelFormValue = {
   allowedCategories?: string;
   telegramChatId?: string;
   publicationMode?: string;
-  channelDisplayName?: string;
+  groupDisplayName?: string;
   customHeader?: string;
   customFooter?: string;
   sendImage?: boolean;
-  maxPending?: number;
+  maxPendingPublications?: number;
 };
 
 function ChannelForm({
@@ -295,12 +310,13 @@ function ChannelForm({
         </Select>
       </label>
       <label className="grid gap-2">
-        <Label>Nome exibido do Canal</Label>
-        <Input name="channelDisplayName" defaultValue={channel?.channelDisplayName ?? ""} />
+        <Label>Nome exato do Grupo</Label>
+        <Input name="groupDisplayName" defaultValue={channel?.groupDisplayName ?? ""} />
       </label>
       <label className="grid gap-2">
         <Label>Maximo de pendencias assistidas</Label>
-        <Input name="maxPending" type="number" min="1" max="50" defaultValue={channel?.maxPending ?? 5} />
+        <Input name="maxPendingPublications" type="number" min="1" max="50" defaultValue={channel?.maxPendingPublications ?? 3} />
+        <span className="text-xs text-[var(--muted-foreground)]">Recomendado inicialmente: 3, com limite diario 3 e intervalo de 60 minutos.</span>
       </label>
       <label className="grid gap-2 md:col-span-3">
         <Label>Cabecalho personalizado</Label>

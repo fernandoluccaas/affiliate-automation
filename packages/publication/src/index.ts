@@ -490,7 +490,7 @@ export function isOfferCompatibleWithChannel(
     return { ok: false, code: "CHANNEL_DISABLED", reason: "Canal desativado." };
   }
 
-  if (!["TELEGRAM", "MANUAL_EXPORT", "WHATSAPP_CHANNEL"].includes(channel.type)) {
+  if (!["TELEGRAM", "MANUAL_EXPORT", "WHATSAPP_GROUPS"].includes(channel.type)) {
     return {
       ok: false,
       code: "CHANNEL_TYPE_UNAVAILABLE",

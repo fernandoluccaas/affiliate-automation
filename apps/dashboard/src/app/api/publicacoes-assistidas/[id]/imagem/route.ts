@@ -8,7 +8,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
   if (!(await getSession())) return new Response("Unauthorized", { status: 401 });
   const { id } = await context.params;
   const publication = await prisma.publication.findFirst({
-    where: { id, channel: { type: "WHATSAPP_CHANNEL" } },
+    where: { id, channel: { type: "WHATSAPP_GROUPS" } },
     select: { imageUrlSnapshot: true },
   });
   if (!publication?.imageUrlSnapshot) return new Response("Not found", { status: 404 });

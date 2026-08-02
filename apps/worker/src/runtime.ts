@@ -45,10 +45,10 @@ export type WorkerOperationalMetrics = {
   publicationsRetried: number;
   aiGenerated: number;
   aiFallbackUsed: number;
-  whatsappAssistedPrepared: number;
-  whatsappAssistedConfirmed: number;
-  whatsappAssistedSkipped: number;
-  whatsappAssistedFailed: number;
+  whatsappGroupAssistedPrepared: number;
+  whatsappGroupAssistedConfirmed: number;
+  whatsappGroupAssistedSkipped: number;
+  whatsappGroupAssistedFailed: number;
   whatsappWebDryRuns: number;
   whatsappWebAttempts: number;
   whatsappWebPublished: number;
@@ -271,10 +271,10 @@ function emptyOperationalMetrics(): WorkerOperationalMetrics {
     publicationsRetried: 0,
     aiGenerated: 0,
     aiFallbackUsed: 0,
-    whatsappAssistedPrepared: 0,
-    whatsappAssistedConfirmed: 0,
-    whatsappAssistedSkipped: 0,
-    whatsappAssistedFailed: 0,
+    whatsappGroupAssistedPrepared: 0,
+    whatsappGroupAssistedConfirmed: 0,
+    whatsappGroupAssistedSkipped: 0,
+    whatsappGroupAssistedFailed: 0,
     whatsappWebDryRuns: 0,
     whatsappWebAttempts: 0,
     whatsappWebPublished: 0,
