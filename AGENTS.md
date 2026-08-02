@@ -79,3 +79,37 @@ Do not start Phase 2 until Phase 1 is complete.
 - `npm run lint`
 - `npm run typecheck`
 - `npm run test`
+
+## Exceção autorizada — WhatsApp Groups Web Experimental
+
+É autorizada uma implementação experimental, opcional e desativada por padrão
+para publicar ofertas em grupos do WhatsApp administrados pelo proprietário do
+projeto, exclusivamente por controle da interface do WhatsApp Web com Playwright.
+
+Restrições obrigatórias:
+
+- feature flag desativada por padrão;
+- uso somente em grupos pertencentes ou administrados pelo proprietário;
+- login e leitura do QR Code exclusivamente manuais;
+- nenhuma automação de senha, SMS, PIN, MFA ou CAPTCHA;
+- nenhuma captura ou exibição de QR Code;
+- nenhuma extração, exportação ou exibição de cookies ou localStorage;
+- sessão armazenada apenas em diretório local ignorado pelo Git;
+- perfil Chromium exclusivo do projeto;
+- não utilizar o perfil principal do navegador do usuário;
+- dry run ativado por padrão;
+- limite inicial de uma publicação por execução;
+- nenhuma execução paralela usando o mesmo perfil;
+- Redis lock obrigatório antes de abrir o navegador;
+- nenhum envio para contatos individuais;
+- nenhuma automação de grupos que o usuário não administra;
+- nenhuma biblioteca de protocolo não oficial do WhatsApp;
+- somente Playwright sobre a interface do WhatsApp Web;
+- nenhum contorno de proteções, autenticação ou verificações;
+- falha após clique em enviar deve resultar em DELIVERY_UNCERTAIN;
+- DELIVERY_UNCERTAIN nunca recebe retry automático;
+- LOGIN_REQUIRED, SELECTOR_MISMATCH e NO_PUBLISH_PERMISSION pausam apenas
+  o grupo afetado;
+- Telegram e modo assistido permanecem independentes;
+- possibilidade de desativação imediata por variável de ambiente;
+- mudanças na interface do WhatsApp Web podem interromper a automação.
