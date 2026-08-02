@@ -79,3 +79,110 @@ Do not start Phase 2 until Phase 1 is complete.
 - `npm run lint`
 - `npm run typecheck`
 - `npm run test`
+
+## Exceção autorizada — WhatsApp Groups Web Experimental
+
+O proprietário do projeto autoriza uma implementação experimental, opcional e
+desativada por padrão para publicar ofertas exclusivamente em grupos do WhatsApp
+aos quais pertence ou que administra.
+
+A implementação autorizada deve utilizar somente Playwright para controlar a
+interface visual do WhatsApp Web.
+
+### Escopo permitido
+
+É permitido:
+
+- abrir o WhatsApp Web com Chromium controlado por Playwright;
+- utilizar perfil persistente exclusivo do projeto;
+- realizar login manual por QR Code;
+- verificar o estado autenticado da sessão;
+- localizar um grupo pelo nome exato configurado;
+- verificar se o compositor está disponível;
+- preparar imagem e legenda;
+- executar dry run sem envio;
+- realizar no máximo uma publicação por execução quando explicitamente
+  confirmado pelo proprietário;
+- confirmar visualmente o envio;
+- utilizar Redis lock para impedir concorrência;
+- pausar automaticamente o grupo após o primeiro envio bem-sucedido;
+- registrar estados operacionais sanitizados;
+- classificar envios inconclusivos como DELIVERY_UNCERTAIN;
+- realizar diagnóstico seguro de seletores, shell autenticado, pesquisa,
+  resultados, header e compositor.
+
+### Restrições obrigatórias
+
+A implementação deve permanecer:
+
+- desativada por padrão;
+- com dry run ativado por padrão;
+- limitada inicialmente a uma publicação por execução;
+- limitada a grupos explicitamente configurados;
+- restrita aos grupos pertencentes ou administrados pelo proprietário;
+- independente do Telegram e do modo assistido;
+- interrompível imediatamente por feature flag;
+- protegida por Redis lock antes de abrir o navegador.
+
+É proibido:
+
+- usar bibliotecas que implementem protocolo não oficial do WhatsApp;
+- usar whatsapp-web.js, Baileys ou ferramentas semelhantes;
+- enviar mensagens para números individuais;
+- automatizar grupos não configurados;
+- enumerar ou armazenar grupos e conversas;
+- coletar membros, telefones ou histórico de mensagens;
+- ler conteúdo de mensagens que não seja necessário para confirmar a própria
+  publicação recém-enviada;
+- automatizar senha, SMS, PIN, MFA ou CAPTCHA;
+- capturar, exportar ou exibir QR Code;
+- exportar cookies, localStorage, storageState ou arquivos de sessão;
+- enviar arquivos do perfil do navegador ao dashboard, banco ou logs;
+- utilizar o perfil principal do navegador pessoal;
+- usar cliques por coordenadas;
+- selecionar resultados por correspondência parcial ou aproximada;
+- clicar no primeiro resultado sem correspondência exata;
+- executar disparos em massa;
+- fazer retry automático após o clique em enviar quando a entrega for
+  inconclusiva;
+- registrar nomes de outras conversas, mensagens, telefones ou dados privados
+  em diagnósticos;
+- capturar screenshots de QR Code ou da lista ampla de conversas por padrão;
+- contornar autenticação, limitações ou proteções da plataforma.
+
+### Dry run
+
+O dry run deve ser estruturalmente separado do envio real.
+
+Durante o dry run:
+
+- o grupo exato pode ser localizado;
+- imagem e texto podem ser preparados;
+- o rascunho pode ser validado;
+- o botão de envio nunca pode ser acionado;
+- o rascunho deve ser limpo ao final;
+- a Publication não pode ser marcada como PUBLISHED.
+
+### Envio real
+
+O envio real exige simultaneamente:
+
+- feature experimental explicitamente habilitada;
+- dry run desativado explicitamente;
+- confirmação de propriedade/autorização do grupo;
+- grupo configurado em modo WEB_EXPERIMENTAL;
+- perfil autenticado;
+- Redis disponível;
+- correspondência exata do grupo;
+- dry run válido para a configuração atual;
+- comando explícito com confirmação de envio;
+- limite máximo de uma publicação por execução.
+
+Se o clique em enviar tiver ocorrido, mas a confirmação não for conclusiva:
+
+- usar DELIVERY_UNCERTAIN;
+- bloquear retry automático;
+- exigir revisão manual antes de qualquer nova tentativa.
+
+Mudanças na interface do WhatsApp Web podem interromper essa automação. O modo
+assistido deve permanecer disponível como fallback.
