@@ -9,10 +9,15 @@
   "scripts": {
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:integration:whatsapp-web": "vitest run src/whatsapp-web.integration.test.ts"
   },
   "devDependencies": {
     "typescript": "^5.8.3",
     "vitest": "^3.2.4"
+  },
+  "dependencies": {
+    "@affiliate/redis": "^0.1.0",
+    "playwright": "^1.62.1"
   }
 }

@@ -45,12 +45,14 @@ describe("WhatsApp Groups publishers", () => {
     });
   });
 
-  it("keeps Web automation inert regardless of feature flags", async () => {
+  it("keeps the disabled fallback inert regardless of feature flags", async () => {
     process.env.WHATSAPP_GROUPS_WEB_EXPERIMENTAL_ENABLED = "true";
-    await expect(new DisabledWhatsAppWebPublisher().publish(groupPayload)).resolves.toMatchObject({
+    await expect(
+      new DisabledWhatsAppWebPublisher().publish(groupPayload),
+    ).resolves.toMatchObject({
       status: "DISABLED",
       destinationType: "GROUP",
-      errorCode: "WHATSAPP_WEB_AUTOMATION_NOT_AUTHORIZED",
+      errorCode: "WHATSAPP_WEB_DISABLED",
     });
   });
 });

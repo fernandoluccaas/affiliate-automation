@@ -1,4 +1,9 @@
 export * from "./media";
+export * from "./whatsapp-web-page-adapter";
+export * from "./whatsapp-web-publisher";
+export * from "./whatsapp-web-selectors";
+export * from "./whatsapp-web-session";
+export * from "./whatsapp-web-types";
 
 export type PublicationPayload = {
   offerId: string;
@@ -54,7 +59,7 @@ export type WhatsAppPublishResult =
       status: "DISABLED";
       publicationMode: "WEB_EXPERIMENTAL";
       destinationType: "GROUP";
-      errorCode: "WHATSAPP_WEB_AUTOMATION_NOT_AUTHORIZED";
+      errorCode: "WHATSAPP_WEB_DISABLED";
       errorMessage: string;
     };
 
@@ -68,7 +73,7 @@ export type WhatsAppHealthResult =
       status: "DISABLED";
       publicationMode: "WEB_EXPERIMENTAL";
       destinationType: "GROUP";
-      errorCode: "WHATSAPP_WEB_AUTOMATION_NOT_AUTHORIZED";
+      errorCode: "WHATSAPP_WEB_DISABLED";
     };
 
 export interface WhatsAppChannelPublisher {
@@ -76,9 +81,7 @@ export interface WhatsAppChannelPublisher {
   healthCheck(): Promise<WhatsAppHealthResult>;
 }
 
-export class AssistedWhatsAppGroupsPublisher
-  implements WhatsAppChannelPublisher
-{
+export class AssistedWhatsAppGroupsPublisher implements WhatsAppChannelPublisher {
   async publish(
     input: WhatsAppGroupPublicationInput,
   ): Promise<WhatsAppPublishResult> {
@@ -100,10 +103,7 @@ export class AssistedWhatsAppGroupsPublisher
   }
 }
 
-/**
- * Deliberately inert until repository-level authorization permits unofficial
- * WhatsApp Web automation. It has no browser/session dependency or side effect.
- */
+/** Safe fallback used while the experimental feature flag is disabled. */
 export class DisabledWhatsAppWebPublisher implements WhatsAppChannelPublisher {
   async publish(
     _input: WhatsAppGroupPublicationInput,
@@ -112,9 +112,8 @@ export class DisabledWhatsAppWebPublisher implements WhatsAppChannelPublisher {
       status: "DISABLED",
       publicationMode: "WEB_EXPERIMENTAL",
       destinationType: "GROUP",
-      errorCode: "WHATSAPP_WEB_AUTOMATION_NOT_AUTHORIZED",
-      errorMessage:
-        "WhatsApp Web automation is disabled by the repository policy.",
+      errorCode: "WHATSAPP_WEB_DISABLED",
+      errorMessage: "WhatsApp Groups Web experimental publishing is disabled.",
     };
   }
 
@@ -123,7 +122,7 @@ export class DisabledWhatsAppWebPublisher implements WhatsAppChannelPublisher {
       status: "DISABLED",
       publicationMode: "WEB_EXPERIMENTAL",
       destinationType: "GROUP",
-      errorCode: "WHATSAPP_WEB_AUTOMATION_NOT_AUTHORIZED",
+      errorCode: "WHATSAPP_WEB_DISABLED",
     };
   }
 }
