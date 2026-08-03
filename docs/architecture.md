@@ -12,6 +12,8 @@ The ingestion boundary now separates candidate identity from enrichment. `market
 
 Phase 2B adds the publication and tracking loop. The worker selects active compatible channels for `READY_TO_PUBLISH` offers, creates idempotent `Publication` rows with deterministic message payloads, publishes scheduled rows through Telegram or manual export adapters, records `PublicationAttempt`, and updates publication status. `/go/[slug]` is public and records clicks before redirecting to the affiliate destination.
 
+Phase 5C separates Web planning from browser execution. The shared scheduler persists a `WEB_EXPERIMENTAL` Publication independently for each channel and Offer version, including immutable snapshots and explicit inspection/preflight gates. The normal worker dispatch stage always defers those rows and cannot instantiate the Playwright publisher. Only the explicit local WhatsApp CLI owns browser execution. Planning decisions and aggregate created/existing/executed/deferred/failed counters are stored in sanitized `AutomationRun.metrics`.
+
 Phase 4 runs that flow continuously with independent discovery, publication,
 retry and maintenance clocks. The publication scheduler chooses at most one
 Offer per Channel in a cadence, while the same Offer version may create one

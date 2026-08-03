@@ -271,6 +271,8 @@ An awaiting item reserves one daily slot and the worker creates no more than `WH
 
 The assisted flow remains the stable fallback. The experimental Web flow has a separate local runbook:
 
+The shared worker is a planner only for `WEB_EXPERIMENTAL`: `npm run worker:once` persists the immutable `SCHEDULED` row with `AWAITING_VISUAL_INSPECTION` and defers it without opening Playwright. Open `/publicacoes`, verify the badge and snapshot, and copy the local commands from its details panel. A second worker run must reuse the same channel/Offer-version decision rather than creating a duplicate.
+
 1. Start PostgreSQL and Redis and keep the feature disabled while configuring the group.
 2. Install Chromium once with `npm run whatsapp:web:install-browser`.
 3. In `/canais`, set the exact group name and logical profile key, confirm ownership, then activate Web experimental mode.

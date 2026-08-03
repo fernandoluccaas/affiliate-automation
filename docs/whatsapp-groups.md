@@ -34,6 +34,14 @@ WHATSAPP_WEB_DEVTOOLS="false"
 
 Profiles and debug output are Git-ignored. `webProfileKey` accepts only ASCII letters, digits, hyphen and underscore and is resolved below the configured root. Do not point it at or copy a personal browser profile.
 
+### Planejamento controlado pelo worker
+
+`npm run worker:once` may persist a Web Publication while `WHATSAPP_WEB_DRY_RUN=true`, but it does not launch Chromium, prepare a draft or call the Web publisher. Planning uses the immutable Offer snapshot and the idempotency key `publication:{channelId}:{offerId}`, so it is independent per channel and per Offer version. A Telegram Publication for the same Offer neither blocks nor replaces the WhatsApp decision.
+
+The new row keeps database status `SCHEDULED` and records `whatsappWebState=AWAITING_VISUAL_INSPECTION`, the planning run, mandatory visual-inspection/preflight gates, `realSendAuthorized=false` and `dispatchBlockedReason=VISUAL_DRAFT_INSPECTION_REQUIRED`. Disabled or paused channels are rejected before planning. Existing `DELIVERY_UNCERTAIN` state remains blocked and is never retried by the scheduler.
+
+`/publicacoes` displays the badge **AGUARDANDO INSPEÇÃO VISUAL**, immutable snapshot identifiers, price, affiliate URL, image, gates, latest attempt/error and only copyable no-send inspection commands. The dashboard does not run those commands or open a browser. Re-running the worker does not create another Publication for the same channel and Offer version.
+
 ### Local commands
 
 ```bash

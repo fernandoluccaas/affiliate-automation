@@ -4,6 +4,7 @@ import { createMercadoLivreDiscoveryMetrics } from "@affiliate/marketplace-disco
 import { generateMessageForOffer } from "@affiliate/ai-copywriter";
 import {
   compareReadyOfferPriority,
+  controlledChannelPlanningBlock,
   createLockedWorkerDependencies,
   createPublicationIdempotently,
   getChannelMessageFooter,
@@ -117,6 +118,34 @@ describe("experimental WhatsApp group isolation", () => {
       }),
     ).toBe(false);
   });
+
+  it("blocks controlled planning for disabled or paused channels", () => {
+    const base = {
+      type: "WHATSAPP_GROUPS",
+      configuration: { publicationMode: "WEB_EXPERIMENTAL" },
+    } as unknown as Channel;
+
+    expect(controlledChannelPlanningBlock({ ...base, enabled: false })).toEqual(
+      {
+        planningResult: "BLOCKED_BY_DISABLED_CHANNEL",
+        reason: "CHANNEL_DISABLED",
+      },
+    );
+    expect(
+      controlledChannelPlanningBlock({
+        ...base,
+        enabled: true,
+        configuration: {
+          publicationMode: "WEB_EXPERIMENTAL",
+          webAutomationPaused: true,
+          webAutomationPauseReason: "MANUAL_REVIEW",
+        },
+      }),
+    ).toEqual({
+      planningResult: "BLOCKED_BY_CHANNEL_PAUSE",
+      reason: "MANUAL_REVIEW",
+    });
+  });
 });
 
 vi.mock("@affiliate/redis", () => ({
@@ -195,7 +224,7 @@ describe("createPublicationIdempotently", () => {
     expect(resolvePublicationUrl(offer as never)).toBeNull();
   });
 
-  it("only queries READY_TO_PUBLISH offers for scheduling", async () => {
+  it("queries publishable Offer versions so a prior channel does not consume them globally", async () => {
     const actual = await import("@affiliate/database");
     const findManyOffers = vi.fn().mockResolvedValue([]);
     const findManyChannels = vi.fn().mockResolvedValue([]);
@@ -208,7 +237,9 @@ describe("createPublicationIdempotently", () => {
 
     expect(findManyOffers).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { status: "READY_TO_PUBLISH" },
+        where: {
+          status: { in: ["READY_TO_PUBLISH", "SCHEDULED", "PUBLISHED"] },
+        },
       }),
     );
   });
@@ -464,6 +495,186 @@ describe("createPublicationIdempotently", () => {
     expect(upsert).toHaveBeenCalledTimes(1);
   });
 
+  it("plans a missing Web publication for an Offer already published on Telegram", async () => {
+    const actual = await import("@affiliate/database");
+    const now = new Date("2026-08-03T12:00:00.000Z");
+    const previousEnabled =
+      process.env.WHATSAPP_GROUPS_WEB_EXPERIMENTAL_ENABLED;
+    const previousDryRun = process.env.WHATSAPP_WEB_DRY_RUN;
+    process.env.WHATSAPP_GROUPS_WEB_EXPERIMENTAL_ENABLED = "true";
+    process.env.WHATSAPP_WEB_DRY_RUN = "true";
+    const offer = {
+      id: "offer-web-v1",
+      status: "PUBLISHED",
+      productId: "product-web",
+      title: "Oferta Web",
+      externalProductId: "MLB-WEB",
+      marketplace: "MERCADO_LIVRE",
+      category: "Tecnologia",
+      imageUrl: "https://cdn.example.com/web.jpg",
+      originalPrice: 200,
+      currentPrice: 100,
+      discountPercentage: 50,
+      couponCode: null,
+      couponExpiration: null,
+      freeShipping: true,
+      shippingStatus: "FREE",
+      stockStatus: "IN_STOCK",
+      score: 95,
+      scoreCompletenessPercentage: 100,
+      affiliateUrl: "https://meli.la/web",
+      trackingStrategy: "DIRECT_AFFILIATE_LINK",
+      version: 1,
+      collectedAt: now,
+      publishedAt: null,
+      affiliateLinks: [],
+    };
+    const channel = {
+      id: "channel-web",
+      name: "Grupo autorizado",
+      type: "WHATSAPP_GROUPS",
+      enabled: true,
+      timezone: "America/Fortaleza",
+      dailyPublicationLimit: 10,
+      minimumIntervalMinutes: 0,
+      allowedStartTime: null,
+      allowedEndTime: null,
+      minimumScore: 0,
+      minDiscountPercentage: 0,
+      productRepeatIntervalDays: 0,
+      allowedMarketplaces: ["MERCADO_LIVRE"],
+      allowedCategories: [],
+      configuration: {
+        publicationMode: "WEB_EXPERIMENTAL",
+        groupDisplayName: "Grupo autorizado",
+        webAutomationEnabled: true,
+        webAutomationPaused: false,
+      },
+      createdAt: now,
+      updatedAt: now,
+    };
+    const upsert = vi.fn().mockResolvedValue({ id: "publication-web" });
+    const offerUpdate = vi.fn().mockResolvedValue(offer);
+    Object.assign(actual.prisma, {
+      offer: {
+        findMany: vi.fn().mockResolvedValue([offer]),
+        update: offerUpdate,
+      },
+      channel: { findMany: vi.fn().mockResolvedValue([channel]) },
+      publication: {
+        count: vi.fn().mockResolvedValue(0),
+        findFirst: vi.fn().mockResolvedValue(null),
+        findMany: vi.fn().mockResolvedValue([]),
+        upsert,
+      },
+      $transaction: vi.fn(async (callback: (tx: unknown) => unknown) =>
+        callback({ publication: { upsert }, offer: { update: offerUpdate } }),
+      ),
+    });
+
+    const metrics = await scheduleReadyOffers(now, {
+      planningRunId: "planning-run-web",
+    });
+
+    expect(metrics).toMatchObject({
+      offersSelected: 1,
+      publicationsPlanned: 1,
+      publicationsCreated: 1,
+      publicationsDeferred: 0,
+      publicationsExecuted: 0,
+      whatsappWebAttempts: 0,
+      planningDecisions: [
+        expect.objectContaining({
+          offerVersionId: "offer-web-v1",
+          channelId: "channel-web",
+          publicationMode: "WEB_EXPERIMENTAL",
+          planningResult: "CREATED",
+          executionResult: "DEFERRED",
+          reason: "VISUAL_DRAFT_INSPECTION_REQUIRED",
+        }),
+      ],
+    });
+    expect(upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          status: "SCHEDULED",
+          metadata: expect.objectContaining({
+            whatsappWebState: "AWAITING_VISUAL_INSPECTION",
+            plannedAt: now.toISOString(),
+            plannedBy: "WORKER",
+            planningRunId: "planning-run-web",
+            visualInspectionRequired: true,
+            visualInspectionConfirmed: false,
+            preflightRequired: true,
+            realSendAuthorized: false,
+            dispatchBlockedReason: "VISUAL_DRAFT_INSPECTION_REQUIRED",
+          }),
+        }),
+      }),
+    );
+    expect(offerUpdate).not.toHaveBeenCalled();
+
+    if (previousEnabled === undefined)
+      delete process.env.WHATSAPP_GROUPS_WEB_EXPERIMENTAL_ENABLED;
+    else process.env.WHATSAPP_GROUPS_WEB_EXPERIMENTAL_ENABLED = previousEnabled;
+    if (previousDryRun === undefined) delete process.env.WHATSAPP_WEB_DRY_RUN;
+    else process.env.WHATSAPP_WEB_DRY_RUN = previousDryRun;
+  });
+
+  it("defers queued Web publications without invoking a publisher or creating an attempt", async () => {
+    const actual = await import("@affiliate/database");
+    const now = new Date("2026-08-03T12:10:00.000Z");
+    const publicationUpdate = vi.fn().mockResolvedValue({});
+    const attemptCreate = vi.fn().mockResolvedValue({});
+    Object.assign(actual.prisma, {
+      publication: {
+        findMany: vi.fn().mockResolvedValue([
+          {
+            id: "publication-web-deferred",
+            offerId: "offer-web-deferred",
+            channelId: "channel-web-deferred",
+            status: "SCHEDULED",
+            scheduledAt: now,
+            metadata: { publicationMode: "WEB_EXPERIMENTAL" },
+            offer: { id: "offer-web-deferred", affiliateLinks: [] },
+            channel: {
+              id: "channel-web-deferred",
+              name: "Grupo autorizado",
+              type: "WHATSAPP_GROUPS",
+              configuration: {
+                publicationMode: "WEB_EXPERIMENTAL",
+                groupDisplayName: "Grupo autorizado",
+              },
+            },
+            attempts: [],
+          },
+        ]),
+        update: publicationUpdate,
+      },
+      publicationAttempt: { create: attemptCreate },
+    });
+
+    const metrics = await publishScheduledOffers(now);
+
+    expect(metrics).toMatchObject({
+      publicationsDeferred: 1,
+      publicationsExecuted: 0,
+      publicationsFailed: 0,
+      whatsappWebAttempts: 0,
+    });
+    expect(attemptCreate).not.toHaveBeenCalled();
+    expect(publicationUpdate).toHaveBeenCalledWith({
+      where: { id: "publication-web-deferred" },
+      data: {
+        metadata: expect.objectContaining({
+          whatsappWebState: "AWAITING_VISUAL_INSPECTION",
+          dispatchBlockedReason: "VISUAL_DRAFT_INSPECTION_REQUIRED",
+          realSendAuthorized: false,
+        }),
+      },
+    });
+  });
+
   it("does not create new assisted publications for legacy WHATSAPP_CHANNEL records", async () => {
     const actual = await import("@affiliate/database");
     const upsert = vi.fn();
@@ -619,6 +830,118 @@ describe("createPublicationIdempotently", () => {
       "channel-general",
       "channel-tech",
     ]);
+  });
+
+  it("isolates a Web planning failure so Telegram is still planned", async () => {
+    const actual = await import("@affiliate/database");
+    const now = new Date("2026-08-03T12:20:00.000Z");
+    const previousEnabled =
+      process.env.WHATSAPP_GROUPS_WEB_EXPERIMENTAL_ENABLED;
+    process.env.WHATSAPP_GROUPS_WEB_EXPERIMENTAL_ENABLED = "true";
+    const offer = {
+      id: "offer-isolated-v1",
+      status: "READY_TO_PUBLISH",
+      productId: "product-isolated",
+      title: "Oferta isolada",
+      externalProductId: "MLB-ISOLATED",
+      marketplace: "MERCADO_LIVRE",
+      category: "Tecnologia",
+      imageUrl: null,
+      originalPrice: 200,
+      currentPrice: 100,
+      discountPercentage: 50,
+      couponCode: null,
+      couponExpiration: null,
+      freeShipping: true,
+      shippingStatus: "FREE",
+      stockStatus: "IN_STOCK",
+      score: 95,
+      scoreCompletenessPercentage: 100,
+      affiliateUrl: "https://meli.la/isolated",
+      trackingStrategy: "DIRECT_AFFILIATE_LINK",
+      version: 1,
+      collectedAt: now,
+      publishedAt: null,
+      affiliateLinks: [],
+    };
+    const baseChannel = {
+      name: "Canal",
+      enabled: true,
+      timezone: "America/Fortaleza",
+      dailyPublicationLimit: 10,
+      minimumIntervalMinutes: 0,
+      allowedStartTime: null,
+      allowedEndTime: null,
+      minimumScore: 0,
+      minDiscountPercentage: 0,
+      productRepeatIntervalDays: 0,
+      allowedMarketplaces: ["MERCADO_LIVRE"],
+      allowedCategories: [],
+      createdAt: now,
+      updatedAt: now,
+    };
+    const channels = [
+      {
+        ...baseChannel,
+        id: "channel-web-fails",
+        type: "WHATSAPP_GROUPS",
+        configuration: {
+          publicationMode: "WEB_EXPERIMENTAL",
+          groupDisplayName: "Grupo autorizado",
+          webAutomationEnabled: true,
+        },
+      },
+      {
+        ...baseChannel,
+        id: "channel-telegram-survives",
+        type: "TELEGRAM",
+        configuration: { chatId: "configured-server-side" },
+      },
+    ];
+    vi.mocked(generateMessageForOffer).mockRejectedValueOnce(
+      new Error("Web planning failed"),
+    );
+    const upsert = vi.fn().mockResolvedValue({
+      id: "publication-telegram-survives",
+    });
+    const offerUpdate = vi.fn().mockResolvedValue(offer);
+    Object.assign(actual.prisma, {
+      offer: {
+        findMany: vi.fn().mockResolvedValue([offer]),
+        update: offerUpdate,
+      },
+      channel: { findMany: vi.fn().mockResolvedValue(channels) },
+      publication: {
+        count: vi.fn().mockResolvedValue(0),
+        findFirst: vi.fn().mockResolvedValue(null),
+        findMany: vi.fn().mockResolvedValue([]),
+        upsert,
+      },
+      $transaction: vi.fn(async (callback: (tx: unknown) => unknown) =>
+        callback({ publication: { upsert }, offer: { update: offerUpdate } }),
+      ),
+    });
+
+    const metrics = await scheduleReadyOffers(now);
+
+    expect(metrics).toMatchObject({
+      scheduled: 1,
+      publicationsCreated: 1,
+      publicationsFailed: 1,
+      skipReasons: { PLANNING_FAILED: 1 },
+    });
+    expect(upsert).toHaveBeenCalledTimes(1);
+    expect(upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          channelId: "channel-telegram-survives",
+        }),
+      }),
+    );
+
+    if (previousEnabled === undefined)
+      delete process.env.WHATSAPP_GROUPS_WEB_EXPERIMENTAL_ENABLED;
+    else process.env.WHATSAPP_GROUPS_WEB_EXPERIMENTAL_ENABLED = previousEnabled;
   });
 
   it("publishes at most one queued row per channel after restart", async () => {
@@ -866,6 +1189,32 @@ describe("createPublicationIdempotently", () => {
 
 function workerJobMetrics(
   overrides: Partial<{
+    offersSelected: number;
+    publicationsPlanned: number;
+    publicationsCreated: number;
+    publicationsAlreadyExisting: number;
+    publicationsExecuted: number;
+    publicationsDeferred: number;
+    publicationsFailed: number;
+    planningDecisions: Array<{
+      offerVersionId: string;
+      offerVersion: number;
+      channelId: string;
+      channelType: string;
+      publicationMode: string | null;
+      planningResult:
+        | "CREATED"
+        | "ALREADY_EXISTS"
+        | "BLOCKED_BY_DELIVERY_UNCERTAIN"
+        | "BLOCKED_BY_CHANNEL_PAUSE"
+        | "BLOCKED_BY_DISABLED_CHANNEL"
+        | "BLOCKED_BY_POLICY"
+        | "NO_ELIGIBLE_OFFER";
+      executionResult:
+        "DEFERRED" | "PENDING" | "PUBLISHED" | "EXPORTED" | "FAILED";
+      reason: string | null;
+      publicationId: string | null;
+    }>;
     readyOffersFound: number;
     scheduled: number;
     published: number;
@@ -877,6 +1226,13 @@ function workerJobMetrics(
   }> = {},
 ) {
   return {
+    offersSelected: 0,
+    publicationsPlanned: 0,
+    publicationsCreated: 0,
+    publicationsAlreadyExisting: 0,
+    publicationsExecuted: 0,
+    publicationsDeferred: 0,
+    publicationsFailed: 0,
     readyOffersFound: 0,
     scheduled: 0,
     published: 0,
@@ -886,6 +1242,7 @@ function workerJobMetrics(
     expired: 0,
     skipped: 0,
     skipReasons: {},
+    planningDecisions: [],
     ...overrides,
   };
 }
@@ -1057,7 +1414,9 @@ describe("runWorkerCycle", () => {
     expect(discovery).toHaveBeenCalledWith(now);
     expect(processLinkJobs).toHaveBeenCalledWith({ limit: 10 });
     expect(refresh).toHaveBeenCalledWith(now);
-    expect(schedule).toHaveBeenCalledWith(now);
+    expect(schedule).toHaveBeenCalledWith(now, {
+      planningRunId: "worker-run-1",
+    });
     expect(retry).toHaveBeenCalledWith(now);
     expect(publish).toHaveBeenCalledWith(now);
     expect(result).toMatchObject({
@@ -1111,6 +1470,18 @@ describe("runWorkerCycle", () => {
       systemAlert: { create: systemAlertCreate },
     });
     const now = new Date("2026-07-28T20:30:00.000Z");
+    const planningDecision = {
+      offerVersionId: "offer-v1",
+      offerVersion: 1,
+      channelId: "telegram-channel",
+      channelType: "TELEGRAM",
+      publicationMode: null,
+      planningResult: "CREATED" as const,
+      executionResult: "PENDING" as const,
+      reason: null,
+      publicationId: "publication-telegram",
+    };
+    const log = vi.spyOn(console, "info").mockImplementation(() => undefined);
 
     const result = await runWorkerCycle(now, {
       expireInvalidOffers: vi.fn().mockResolvedValue(workerJobMetrics()),
@@ -1139,18 +1510,44 @@ describe("runWorkerCycle", () => {
         priceUnavailable: 0,
         failures: [],
       }),
-      scheduleReadyOffers: vi
-        .fn()
-        .mockResolvedValue(workerJobMetrics({ scheduled: 1 })),
+      scheduleReadyOffers: vi.fn().mockResolvedValue(
+        workerJobMetrics({
+          scheduled: 1,
+          offersSelected: 1,
+          publicationsPlanned: 1,
+          publicationsCreated: 1,
+          planningDecisions: [planningDecision],
+        }),
+      ),
       retryFailedPublications: vi.fn().mockResolvedValue(workerJobMetrics()),
-      publishScheduledOffers: vi
-        .fn()
-        .mockResolvedValue(workerJobMetrics({ published: 1 })),
+      publishScheduledOffers: vi.fn().mockResolvedValue(
+        workerJobMetrics({
+          published: 1,
+          publicationsExecuted: 1,
+          planningDecisions: [
+            {
+              ...planningDecision,
+              planningResult: "ALREADY_EXISTS",
+              executionResult: "PUBLISHED",
+            },
+          ],
+        }),
+      ),
     } as never);
 
     expect(result).toMatchObject({
       scheduled: 1,
       published: 1,
+      offersSelected: 1,
+      publicationsPlanned: 1,
+      publicationsCreated: 1,
+      publicationsExecuted: 1,
+      planningDecisions: [
+        expect.objectContaining({
+          planningResult: "CREATED",
+          executionResult: "PUBLISHED",
+        }),
+      ],
       stages: {
         expire: { status: "SUCCEEDED" },
         discovery: { status: "SUCCEEDED" },
@@ -1172,6 +1569,10 @@ describe("runWorkerCycle", () => {
       }),
     );
     expect(systemAlertCreate).not.toHaveBeenCalled();
+    const logged = log.mock.calls.map(([entry]) => String(entry)).join("\n");
+    expect(logged).toContain('"executionResult":"PUBLISHED"');
+    expect(logged).not.toContain("ACHADINHO DO DIA");
+    log.mockRestore();
   });
 
   it("sanitizes a thrown stage error and still executes later independent stages", async () => {

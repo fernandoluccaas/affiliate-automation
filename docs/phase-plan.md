@@ -159,6 +159,14 @@ Status: implemented.
 - Preserved assisted groups and Telegram as independent delivery modes.
 - Did not run a real external send and did not add unofficial protocol libraries, individual recipients, credential automation, QR capture or conversation/member collection.
 
+## Phase 5C - Controlled WhatsApp Web planning
+
+- Separated shared-worker planning from explicit local browser execution.
+- Added idempotent Web Publications with `AWAITING_VISUAL_INSPECTION` metadata and immutable Offer-version snapshots.
+- Added sanitized per-channel planning decisions and created/existing/executed/deferred/failed metrics.
+- Added `/publicacoes` inspection gates, audit fields and copy-only no-send commands.
+- Preserved Telegram, assisted groups, uncertain-delivery review and explicit CLI confirmation as independent paths.
+
 ## Phase 5 - Tracking and Attribution
 
 - Implement `/go/[slug]` redirects with click tracking and rate limiting.

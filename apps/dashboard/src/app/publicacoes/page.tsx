@@ -3,6 +3,7 @@ import { AdminShell } from "@/components/admin-shell";
 import { EmptyState } from "@/components/empty-state";
 import { formatCurrency, formatDateTime, formatPercentage } from "@/lib/format";
 import { publicationTitleSnapshot } from "@/lib/publication-snapshot";
+import { whatsappWebPublicationView } from "@/lib/whatsapp-web-publication-view";
 import {
   authorizeWhatsAppWebRetryAction,
   reviewWhatsAppWebDeliveryAction,
@@ -32,7 +33,7 @@ export default async function PublicationsPage() {
         />
       ) : (
         <div className="overflow-x-auto rounded-md border bg-white">
-          <table className="w-full min-w-[1320px] text-left text-sm">
+          <table className="w-full min-w-[1540px] text-left text-sm">
             <thead className="border-b bg-[var(--muted)] text-xs uppercase text-[var(--muted-foreground)]">
               <tr>
                 <th className="px-4 py-3">Status</th>
@@ -48,6 +49,7 @@ export default async function PublicationsPage() {
                 <th className="px-4 py-3">Tentativas</th>
                 <th className="px-4 py-3">Erro</th>
                 <th className="px-4 py-3">ID externo</th>
+                <th className="px-4 py-3">Controle Web</th>
                 <th className="px-4 py-3">Revisao</th>
               </tr>
             </thead>
@@ -71,10 +73,19 @@ export default async function PublicationsPage() {
                 const manualNotDelivered =
                   metadata.manualDeliveryResolution ===
                   "MANUALLY_CONFIRMED_NOT_DELIVERED";
+                const webView = whatsappWebPublicationView(publication);
+                const latestAttempt = publication.attempts[0];
 
                 return (
                   <tr key={publication.id} className="border-b last:border-0">
-                    <td className="px-4 py-3">{publication.status}</td>
+                    <td className="px-4 py-3">
+                      <div>{publication.status}</div>
+                      {webView ? (
+                        <span className="mt-2 inline-flex rounded-full border border-amber-300 bg-amber-50 px-2 py-1 text-[11px] font-semibold text-amber-900">
+                          {webView.badge}
+                        </span>
+                      ) : null}
+                    </td>
                     <td className="max-w-[260px] px-4 py-3">
                       <div className="font-medium">
                         {publicationTitleSnapshot(publication)}
@@ -144,6 +155,117 @@ export default async function PublicationsPage() {
                     </td>
                     <td className="px-4 py-3">
                       {publication.externalId ?? "-"}
+                    </td>
+                    <td className="min-w-[360px] px-4 py-3">
+                      {webView ? (
+                        <details className="rounded border border-amber-200 bg-amber-50/50 p-3">
+                          <summary className="cursor-pointer font-medium">
+                            {webView.badge}
+                          </summary>
+                          <dl className="mt-3 grid grid-cols-[140px_1fr] gap-x-2 gap-y-1 text-xs">
+                            <dt>Publication ID</dt>
+                            <dd className="break-all font-mono">
+                              {publication.id}
+                            </dd>
+                            <dt>Oferta / versão</dt>
+                            <dd>
+                              {publication.offerId} / v
+                              {publication.offerVersionSnapshot}
+                            </dd>
+                            <dt>Canal / modo</dt>
+                            <dd>
+                              {publication.channel.type} / WEB_EXPERIMENTAL
+                            </dd>
+                            <dt>Estado Web</dt>
+                            <dd>{webView.state}</dd>
+                            <dt>Planejada</dt>
+                            <dd>{formatDateTime(webView.plannedAt)}</dd>
+                            <dt>Planejador / run</dt>
+                            <dd className="break-all">
+                              {webView.plannedBy ?? "-"} /{" "}
+                              {webView.planningRunId ?? "-"}
+                            </dd>
+                            <dt>Inspeção visual</dt>
+                            <dd>
+                              {webView.visualInspectionRequired
+                                ? "obrigatória"
+                                : "dispensada"}
+                              {" / "}
+                              {webView.visualInspectionConfirmed
+                                ? "confirmada"
+                                : "pendente"}
+                            </dd>
+                            <dt>Preflight</dt>
+                            <dd>
+                              {webView.preflightRequired
+                                ? "obrigatório"
+                                : "dispensado"}
+                              {" / "}
+                              {webView.preflightCompleted
+                                ? "concluído"
+                                : "pendente"}
+                            </dd>
+                            <dt>Envio real</dt>
+                            <dd>
+                              autorizado: {String(webView.realSendAuthorized)}
+                              {" / "}elegível:{" "}
+                              {String(webView.realSendEligible)}
+                            </dd>
+                            <dt>Bloqueio</dt>
+                            <dd>{webView.dispatchBlockedReason ?? "-"}</dd>
+                            <dt>Entrega incerta</dt>
+                            <dd>{String(webView.deliveryUncertain)}</dd>
+                            <dt>Entrega confirmada</dt>
+                            <dd>
+                              {formatDateTime(webView.deliveryConfirmedAt)}
+                            </dd>
+                            <dt>Resolução manual</dt>
+                            <dd>
+                              {webView.manualDeliveryResolution ?? "-"} /{" "}
+                              {formatDateTime(webView.manualDeliveryResolvedAt)}
+                            </dd>
+                            <dt>Retry autorizado</dt>
+                            <dd>{String(webView.retryAuthorized)}</dd>
+                            <dt>Stage / causa</dt>
+                            <dd>
+                              {webView.stage ?? "-"} /{" "}
+                              {webView.rootCause ?? "-"}
+                            </dd>
+                            <dt>Última tentativa</dt>
+                            <dd>
+                              {latestAttempt
+                                ? `${latestAttempt.status} / ${latestAttempt.errorMessage ?? "sem erro"}`
+                                : "nenhuma"}
+                            </dd>
+                            <dt>Preço / link</dt>
+                            <dd className="break-all">
+                              {formatCurrency(publication.currentPriceSnapshot)}
+                              {" / "}
+                              {publication.affiliateUrlSnapshot ?? "-"}
+                            </dd>
+                            <dt>Imagem</dt>
+                            <dd className="break-all">
+                              {publication.imageUrlSnapshot ?? "-"}
+                            </dd>
+                          </dl>
+                          <div className="mt-3 grid gap-2">
+                            <p className="text-xs font-medium">
+                              Comandos locais para copiar — não executados pelo
+                              dashboard:
+                            </p>
+                            {webView.commands.map((command) => (
+                              <code
+                                key={command}
+                                className="select-all overflow-x-auto rounded bg-slate-950 p-2 text-[11px] text-slate-50"
+                              >
+                                {command}
+                              </code>
+                            ))}
+                          </div>
+                        </details>
+                      ) : (
+                        "-"
+                      )}
                     </td>
                     <td className="min-w-[300px] px-4 py-3">
                       {deliveryUncertain ? (

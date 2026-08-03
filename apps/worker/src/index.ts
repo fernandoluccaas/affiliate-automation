@@ -14,11 +14,7 @@ import {
   AssistedWhatsAppGroupsPublisher,
   ManualExportPublisher,
   TelegramPublisher,
-  WhatsAppGroupsWebPublisher,
   getWhatsAppWebRuntimeConfig,
-  type WhatsAppWebChannelConfiguration,
-  type WhatsAppWebPublishResult,
-  type WhatsAppWebSendStateUpdate,
   type PublicationPayload,
   type PublisherAdapter,
   type PublisherResult,
@@ -51,6 +47,13 @@ const DEFAULT_MAX_ATTEMPTS = 4;
 const PUBLICATION_RETRY_MINUTES = [1, 5, 15, 30] as const;
 
 type JobMetrics = {
+  offersSelected: number;
+  publicationsPlanned: number;
+  publicationsCreated: number;
+  publicationsAlreadyExisting: number;
+  publicationsExecuted: number;
+  publicationsDeferred: number;
+  publicationsFailed: number;
   readyOffersFound: number;
   scheduled: number;
   published: number;
@@ -74,6 +77,28 @@ type JobMetrics = {
   whatsappWebSelectorMismatch: number;
   whatsappWebMediaFallback: number;
   skipReasons: Record<string, number>;
+  planningDecisions: PublicationPlanningDecision[];
+};
+
+export type PublicationPlanningResult =
+  | "CREATED"
+  | "ALREADY_EXISTS"
+  | "BLOCKED_BY_DELIVERY_UNCERTAIN"
+  | "BLOCKED_BY_CHANNEL_PAUSE"
+  | "BLOCKED_BY_DISABLED_CHANNEL"
+  | "BLOCKED_BY_POLICY"
+  | "NO_ELIGIBLE_OFFER";
+
+export type PublicationPlanningDecision = {
+  offerVersionId: string;
+  offerVersion: number;
+  channelId: string;
+  channelType: string;
+  publicationMode: string | null;
+  planningResult: PublicationPlanningResult;
+  executionResult: "DEFERRED" | "PENDING" | "PUBLISHED" | "EXPORTED" | "FAILED";
+  reason: string | null;
+  publicationId: string | null;
 };
 
 type OfferWithLinks = Offer & {
@@ -103,6 +128,13 @@ type GeneratedPublicationPayload = PublicationPayload & {
 
 function emptyMetrics(): JobMetrics {
   return {
+    offersSelected: 0,
+    publicationsPlanned: 0,
+    publicationsCreated: 0,
+    publicationsAlreadyExisting: 0,
+    publicationsExecuted: 0,
+    publicationsDeferred: 0,
+    publicationsFailed: 0,
     readyOffersFound: 0,
     scheduled: 0,
     published: 0,
@@ -126,11 +158,21 @@ function emptyMetrics(): JobMetrics {
     whatsappWebSelectorMismatch: 0,
     whatsappWebMediaFallback: 0,
     skipReasons: {},
+    planningDecisions: [],
   };
 }
 
 function mergeMetrics(target: JobMetrics, source: JobMetrics) {
-  const numericKeys: Array<Exclude<keyof JobMetrics, "skipReasons">> = [
+  const numericKeys: Array<
+    Exclude<keyof JobMetrics, "skipReasons" | "planningDecisions">
+  > = [
+    "offersSelected",
+    "publicationsPlanned",
+    "publicationsCreated",
+    "publicationsAlreadyExisting",
+    "publicationsExecuted",
+    "publicationsDeferred",
+    "publicationsFailed",
     "readyOffersFound",
     "scheduled",
     "published",
@@ -165,6 +207,22 @@ function mergeMetrics(target: JobMetrics, source: JobMetrics) {
   for (const [reason, count] of Object.entries(source.skipReasons)) {
     target.skipReasons[reason] = (target.skipReasons[reason] ?? 0) + count;
   }
+  for (const decision of source.planningDecisions ?? []) {
+    const existing = target.planningDecisions.find(
+      (candidate) =>
+        candidate.offerVersionId === decision.offerVersionId &&
+        candidate.channelId === decision.channelId,
+    );
+    if (!existing) {
+      target.planningDecisions.push(decision);
+      continue;
+    }
+    if (decision.executionResult !== "PENDING") {
+      existing.executionResult = decision.executionResult;
+    }
+    if (decision.reason) existing.reason = decision.reason;
+    if (decision.publicationId) existing.publicationId = decision.publicationId;
+  }
 }
 
 type WorkerSkipReason =
@@ -172,7 +230,10 @@ type WorkerSkipReason =
   | "PUBLISHER_UNAVAILABLE"
   | "OFFER_MISSING_AFFILIATE_LINK"
   | "LOCK_NOT_ACQUIRED"
-  | "DUPLICATE_PUBLICATION";
+  | "DUPLICATE_PUBLICATION"
+  | "CHANNEL_DISABLED"
+  | "CHANNEL_PAUSED"
+  | "PLANNING_FAILED";
 
 function recordSkip(metrics: JobMetrics, reason: WorkerSkipReason) {
   metrics.skipped += 1;
@@ -352,41 +413,132 @@ export function hasBlockedWhatsAppWebSendState(metadata: unknown) {
   );
 }
 
-function whatsappWebChannelConfiguration(
-  channel: Channel,
-): WhatsAppWebChannelConfiguration {
-  return {
-    channelId: channel.id,
-    channelType: channel.type,
-    channelEnabled: channel.enabled,
-    channelPaused: channelConfigBoolean(channel, "webAutomationPaused"),
-    publicationMode:
-      channelConfigString(channel, "publicationMode") ?? "ASSISTED",
-    groupDisplayName: whatsappGroupDisplayName(channel),
-    webProfileKey: channelConfigString(channel, "webProfileKey") ?? "principal",
-    webAutomationEnabled: channelConfigBoolean(channel, "webAutomationEnabled"),
-    webAutomationOwnershipConfirmed: channelConfigBoolean(
-      channel,
-      "webAutomationOwnershipConfirmed",
-    ),
-    webAutomationConfirmedAt: channelConfigString(
-      channel,
-      "webAutomationConfirmedAt",
-    ),
-    sendImage: channelConfigBoolean(channel, "sendImage", true),
-    lastSuccessfulDryRunAt: channelConfigString(
-      channel,
-      "lastSuccessfulDryRunAt",
-    ),
-    lastSuccessfulDryRunConfigurationFingerprint: channelConfigString(
-      channel,
-      "lastSuccessfulDryRunConfigurationFingerprint",
-    ),
-  };
-}
-
 function whatsappGroupDisplayName(channel: Channel) {
   return channelConfigString(channel, "groupDisplayName") ?? channel.name;
+}
+
+function publicationMode(channel: Channel) {
+  return channelConfigString(channel, "publicationMode");
+}
+
+export function controlledChannelPlanningBlock(channel: Channel): {
+  planningResult: "BLOCKED_BY_CHANNEL_PAUSE" | "BLOCKED_BY_DISABLED_CHANNEL";
+  reason: string;
+} | null {
+  if (!channel.enabled) {
+    return {
+      planningResult: "BLOCKED_BY_DISABLED_CHANNEL",
+      reason: "CHANNEL_DISABLED",
+    };
+  }
+  if (
+    isExperimentalWhatsAppGroup(channel) &&
+    channelConfigBoolean(channel, "webAutomationPaused")
+  ) {
+    return {
+      planningResult: "BLOCKED_BY_CHANNEL_PAUSE",
+      reason:
+        channelConfigString(channel, "webAutomationPauseReason") ??
+        "WHATSAPP_WEB_CHANNEL_PAUSED",
+    };
+  }
+  return null;
+}
+
+function recordPlanningDecision(
+  metrics: JobMetrics,
+  offer: Offer,
+  channel: Channel,
+  planningResult: PublicationPlanningResult,
+  options: {
+    executionResult?: PublicationPlanningDecision["executionResult"];
+    reason?: string | null;
+    publicationId?: string | null;
+  } = {},
+) {
+  metrics.planningDecisions.push({
+    offerVersionId: offer.id,
+    offerVersion: offer.version,
+    channelId: channel.id,
+    channelType: channel.type,
+    publicationMode: publicationMode(channel),
+    planningResult,
+    executionResult: options.executionResult ?? "PENDING",
+    reason: options.reason ?? null,
+    publicationId: options.publicationId ?? null,
+  });
+}
+
+function compactPlanningDecisions(decisions: PublicationPlanningDecision[]) {
+  const byChannel = new Map<string, PublicationPlanningDecision>();
+  const priority = (decision: PublicationPlanningDecision) => {
+    const executionPriority =
+      decision.executionResult === "PUBLISHED" ||
+      decision.executionResult === "EXPORTED"
+        ? 50
+        : decision.executionResult === "FAILED"
+          ? 40
+          : 0;
+    const planningPriority =
+      decision.planningResult === "CREATED"
+        ? 100
+        : decision.planningResult === "BLOCKED_BY_DELIVERY_UNCERTAIN"
+          ? 90
+          : decision.planningResult === "ALREADY_EXISTS"
+            ? 80
+            : decision.planningResult === "BLOCKED_BY_CHANNEL_PAUSE" ||
+                decision.planningResult === "BLOCKED_BY_DISABLED_CHANNEL"
+              ? 70
+              : 10;
+    return planningPriority + executionPriority;
+  };
+
+  for (const decision of decisions) {
+    const current = byChannel.get(decision.channelId);
+    if (!current || priority(decision) > priority(current)) {
+      byChannel.set(decision.channelId, decision);
+    }
+  }
+  return [...byChannel.values()];
+}
+
+function controlledWhatsAppPlanningMetadata(
+  channel: Channel,
+  now: Date,
+  planningRunId?: string,
+  previous: Record<string, unknown> = {},
+) {
+  return {
+    ...previous,
+    publicationMode: "WEB_EXPERIMENTAL",
+    whatsappDestinationType: "GROUP",
+    groupDisplayNameSnapshot: whatsappGroupDisplayName(channel),
+    confirmationStrategy: "VISUAL_OUTGOING_MESSAGE",
+    sendWasClicked: false,
+    whatsappWebState:
+      typeof previous.whatsappWebState === "string"
+        ? previous.whatsappWebState
+        : "AWAITING_VISUAL_INSPECTION",
+    plannedAt:
+      typeof previous.plannedAt === "string"
+        ? previous.plannedAt
+        : now.toISOString(),
+    plannedBy: "WORKER",
+    planningRunId:
+      typeof previous.planningRunId === "string"
+        ? previous.planningRunId
+        : (planningRunId ?? null),
+    visualInspectionRequired: true,
+    visualInspectionConfirmed: previous.visualInspectionConfirmed === true,
+    preflightRequired: true,
+    preflightCompleted: previous.preflightCompleted === true,
+    realSendAuthorized: false,
+    deliveryUncertain: previous.deliveryUncertain === true,
+    dispatchBlockedReason:
+      typeof previous.dispatchBlockedReason === "string"
+        ? previous.dispatchBlockedReason
+        : "VISUAL_DRAFT_INSPECTION_REQUIRED",
+  };
 }
 
 function assistedMaxPending(channel: Channel) {
@@ -610,6 +762,7 @@ export async function createPublicationIdempotently(
   payload: GeneratedPublicationPayload,
   now: Date,
   status: "SCHEDULED" | "AWAITING_MANUAL_PUBLICATION" = "SCHEDULED",
+  planningRunId?: string,
 ) {
   const idempotencyKey = `publication:${channel.id}:${offer.id}`;
 
@@ -634,13 +787,7 @@ export async function createPublicationIdempotently(
               mediaFallbackUsed: !payload.imageUrl,
             }
           : isExperimentalWhatsAppGroup(channel)
-            ? {
-                publicationMode: "WEB_EXPERIMENTAL",
-                whatsappDestinationType: "GROUP",
-                groupDisplayNameSnapshot: whatsappGroupDisplayName(channel),
-                confirmationStrategy: "VISUAL_OUTGOING_MESSAGE",
-                sendWasClicked: false,
-              }
+            ? controlledWhatsAppPlanningMetadata(channel, now, planningRunId)
             : Prisma.JsonNull,
       messageSource: payload.messageSource,
       aiProvider: payload.aiProvider,
@@ -672,11 +819,17 @@ export async function createPublicationIdempotently(
   });
 }
 
-export async function scheduleReadyOffers(now = new Date()) {
+export async function scheduleReadyOffers(
+  now = new Date(),
+  options: { planningRunId?: string } = {},
+) {
   const metrics = emptyMetrics();
   const [offers, channels] = await Promise.all([
     prisma.offer.findMany({
-      where: { status: "READY_TO_PUBLISH" },
+      where: {
+        status: { in: ["READY_TO_PUBLISH", "SCHEDULED", "PUBLISHED"] },
+      },
+      orderBy: { publishedAt: "asc" },
       take: 50,
       include: { affiliateLinks: true },
     }),
@@ -685,147 +838,234 @@ export async function scheduleReadyOffers(now = new Date()) {
   metrics.readyOffersFound = offers.length;
   const prioritizedOffers = [...offers].sort(compareReadyOfferPriority);
   const scheduledChannelIds = new Set<string>();
+  const selectedOfferIds = new Set<string>();
 
   for (const offer of prioritizedOffers) {
     for (const channel of channels) {
       if (scheduledChannelIds.has(channel.id)) continue;
 
-      const policy = channelPolicy(channel);
-      const compatibility = isOfferCompatibleWithChannel(
-        {
-          marketplace: offer.marketplace,
-          category: offer.category,
-          score: offer.score,
-          scoreCompletenessPercentage:
-            offer.scoreCompletenessPercentage?.toString() ?? null,
-          discountPercentage: offer.discountPercentage?.toString() ?? null,
-          stockStatus: offer.stockStatus,
-          shippingStatus: offer.shippingStatus,
-        },
-        policy,
-      );
-
-      if (!compatibility.ok) {
-        recordSkip(metrics, compatibility.code);
-        continue;
-      }
-
-      const publisher = publisherForChannel(channel);
-
-      const assisted = isAssistedWhatsAppGroup(channel);
-      const webExperimental = isExperimentalWhatsAppGroup(channel);
-      if (
-        !publisher &&
-        !assisted &&
-        !(
-          webExperimental &&
-          getWhatsAppWebRuntimeConfig().enabled &&
-          channelConfigBoolean(channel, "webAutomationEnabled")
-        )
-      ) {
-        recordSkip(metrics, "PUBLISHER_UNAVAILABLE");
-        continue;
-      }
-
-      if (assisted) {
-        const pending = await prisma.publication.count({
-          where: {
-            channelId: channel.id,
-            status: "AWAITING_MANUAL_PUBLICATION",
-          },
-        });
-        if (!hasAssistedGroupPendingCapacity(channel, pending)) {
-          recordSkip(metrics, "CHANNEL_DAILY_LIMIT");
-          metrics.whatsappGroupAssistedSkipped += 1;
-          continue;
-        }
-      }
-
-      const [publicationsToday, lastPublication, productPublication] =
-        await Promise.all([
-          channelDailyCount(channel, now),
-          lastChannelPublication(channel.id),
-          lastProductPublication(channel.id, offer.productId),
-        ]);
-      const windowResult = canScheduleInWindow({
-        channel: policy,
-        now,
-        publicationsToday,
-        lastPublicationAt:
-          lastPublication?.publishedAt ?? lastPublication?.scheduledAt ?? null,
-        lastProductPublicationAt:
-          productPublication?.publishedAt ??
-          productPublication?.scheduledAt ??
-          null,
-      });
-
-      if (!windowResult.ok) {
-        recordSkip(metrics, windowResult.code);
-        continue;
-      }
-
-      const idempotencyKey = `publication:${channel.id}:${offer.id}`;
-      const existingPublication = await prisma.publication.findFirst({
-        where: { idempotencyKey },
-        select: { id: true },
-      });
-      if (existingPublication) {
-        recordSkip(metrics, "DUPLICATE_PUBLICATION");
-        continue;
-      }
-
-      const payload = await messagePayloadFor(offer, channel);
-
-      if (!payload) {
-        recordSkip(metrics, "OFFER_MISSING_AFFILIATE_LINK");
-        continue;
-      }
-      if (payload.messageSource === "AI_GENERATED") {
-        metrics.aiGenerated += 1;
-      } else {
-        metrics.aiFallbackUsed += 1;
-      }
-
-      const lock = await acquireLock(
-        `publication:${channel.id}:${offer.id}`,
-        60_000,
-      );
-
-      if (!lock.acquired) {
-        recordSkip(metrics, "LOCK_NOT_ACQUIRED");
-        continue;
-      }
-
       try {
-        if (assisted) {
-          await new AssistedWhatsAppGroupsPublisher().publish({
-            ...payload,
-            destinationType: "GROUP",
-            groupDisplayName: whatsappGroupDisplayName(channel),
-          });
-        }
-        await prisma.$transaction(async (tx) => {
-          await createPublicationIdempotently(
-            tx,
+        const channelBlock = controlledChannelPlanningBlock(channel);
+        if (channelBlock) {
+          recordSkip(
+            metrics,
+            channelBlock.planningResult === "BLOCKED_BY_DISABLED_CHANNEL"
+              ? "CHANNEL_DISABLED"
+              : "CHANNEL_PAUSED",
+          );
+          recordPlanningDecision(
+            metrics,
             offer,
             channel,
-            payload,
-            now,
-            assisted ? "AWAITING_MANUAL_PUBLICATION" : "SCHEDULED",
+            channelBlock.planningResult,
+            { reason: channelBlock.reason },
           );
-          await tx.offer.update({
-            where: { id: offer.id },
-            data: { status: "SCHEDULED", scheduledAt: now },
+          continue;
+        }
+
+        const policy = channelPolicy(channel);
+        const compatibility = isOfferCompatibleWithChannel(
+          {
+            marketplace: offer.marketplace,
+            category: offer.category,
+            score: offer.score,
+            scoreCompletenessPercentage:
+              offer.scoreCompletenessPercentage?.toString() ?? null,
+            discountPercentage: offer.discountPercentage?.toString() ?? null,
+            stockStatus: offer.stockStatus,
+            shippingStatus: offer.shippingStatus,
+          },
+          policy,
+        );
+
+        if (!compatibility.ok) {
+          recordSkip(metrics, compatibility.code);
+          recordPlanningDecision(metrics, offer, channel, "BLOCKED_BY_POLICY", {
+            reason: compatibility.code,
           });
+          continue;
+        }
+
+        const publisher = publisherForChannel(channel);
+
+        const assisted = isAssistedWhatsAppGroup(channel);
+        const webExperimental = isExperimentalWhatsAppGroup(channel);
+        if (
+          !publisher &&
+          !assisted &&
+          !(
+            webExperimental &&
+            getWhatsAppWebRuntimeConfig().enabled &&
+            channelConfigBoolean(channel, "webAutomationEnabled")
+          )
+        ) {
+          recordSkip(metrics, "PUBLISHER_UNAVAILABLE");
+          recordPlanningDecision(metrics, offer, channel, "BLOCKED_BY_POLICY", {
+            reason: "PUBLISHER_UNAVAILABLE",
+          });
+          continue;
+        }
+
+        if (assisted) {
+          const pending = await prisma.publication.count({
+            where: {
+              channelId: channel.id,
+              status: "AWAITING_MANUAL_PUBLICATION",
+            },
+          });
+          if (!hasAssistedGroupPendingCapacity(channel, pending)) {
+            recordSkip(metrics, "CHANNEL_DAILY_LIMIT");
+            metrics.whatsappGroupAssistedSkipped += 1;
+            recordPlanningDecision(
+              metrics,
+              offer,
+              channel,
+              "BLOCKED_BY_POLICY",
+              {
+                reason: "CHANNEL_DAILY_LIMIT",
+              },
+            );
+            continue;
+          }
+        }
+
+        const [publicationsToday, lastPublication, productPublication] =
+          await Promise.all([
+            channelDailyCount(channel, now),
+            lastChannelPublication(channel.id),
+            lastProductPublication(channel.id, offer.productId),
+          ]);
+        const windowResult = canScheduleInWindow({
+          channel: policy,
+          now,
+          publicationsToday,
+          lastPublicationAt:
+            lastPublication?.publishedAt ??
+            lastPublication?.scheduledAt ??
+            null,
+          lastProductPublicationAt:
+            productPublication?.publishedAt ??
+            productPublication?.scheduledAt ??
+            null,
         });
-        metrics.scheduled += 1;
-        if (assisted) metrics.whatsappGroupAssistedPrepared += 1;
-        scheduledChannelIds.add(channel.id);
-      } finally {
-        await lock.release();
+
+        if (!windowResult.ok) {
+          recordSkip(metrics, windowResult.code);
+          recordPlanningDecision(metrics, offer, channel, "BLOCKED_BY_POLICY", {
+            reason: windowResult.code,
+          });
+          continue;
+        }
+
+        const idempotencyKey = `publication:${channel.id}:${offer.id}`;
+        const existingPublication = await prisma.publication.findFirst({
+          where: { idempotencyKey },
+          select: { id: true, metadata: true },
+        });
+        if (existingPublication) {
+          recordSkip(metrics, "DUPLICATE_PUBLICATION");
+          metrics.publicationsAlreadyExisting += 1;
+          selectedOfferIds.add(offer.id);
+          const blocked = hasBlockedWhatsAppWebSendState(
+            existingPublication.metadata,
+          );
+          recordPlanningDecision(
+            metrics,
+            offer,
+            channel,
+            blocked ? "BLOCKED_BY_DELIVERY_UNCERTAIN" : "ALREADY_EXISTS",
+            {
+              executionResult: isExperimentalWhatsAppGroup(channel)
+                ? "DEFERRED"
+                : "PENDING",
+              reason: blocked ? "WHATSAPP_WEB_DELIVERY_UNCERTAIN" : null,
+              publicationId: existingPublication.id,
+            },
+          );
+          continue;
+        }
+
+        const payload = await messagePayloadFor(offer, channel);
+
+        if (!payload) {
+          recordSkip(metrics, "OFFER_MISSING_AFFILIATE_LINK");
+          recordPlanningDecision(metrics, offer, channel, "BLOCKED_BY_POLICY", {
+            reason: "OFFER_MISSING_AFFILIATE_LINK",
+          });
+          continue;
+        }
+        if (payload.messageSource === "AI_GENERATED") {
+          metrics.aiGenerated += 1;
+        } else {
+          metrics.aiFallbackUsed += 1;
+        }
+
+        const lock = await acquireLock(
+          `publication:${channel.id}:${offer.id}`,
+          60_000,
+        );
+
+        if (!lock.acquired) {
+          recordSkip(metrics, "LOCK_NOT_ACQUIRED");
+          recordPlanningDecision(metrics, offer, channel, "BLOCKED_BY_POLICY", {
+            reason: "LOCK_NOT_ACQUIRED",
+          });
+          continue;
+        }
+
+        try {
+          if (assisted) {
+            await new AssistedWhatsAppGroupsPublisher().publish({
+              ...payload,
+              destinationType: "GROUP",
+              groupDisplayName: whatsappGroupDisplayName(channel),
+            });
+          }
+          let publicationId: string | null = null;
+          await prisma.$transaction(async (tx) => {
+            const publication = await createPublicationIdempotently(
+              tx,
+              offer,
+              channel,
+              payload,
+              now,
+              assisted ? "AWAITING_MANUAL_PUBLICATION" : "SCHEDULED",
+              options.planningRunId,
+            );
+            publicationId = publication.id;
+            if (offer.status !== "SCHEDULED" && offer.status !== "PUBLISHED") {
+              await tx.offer.update({
+                where: { id: offer.id },
+                data: { status: "SCHEDULED", scheduledAt: now },
+              });
+            }
+          });
+          metrics.scheduled += 1;
+          metrics.publicationsPlanned += 1;
+          metrics.publicationsCreated += 1;
+          if (assisted) metrics.whatsappGroupAssistedPrepared += 1;
+          selectedOfferIds.add(offer.id);
+          recordPlanningDecision(metrics, offer, channel, "CREATED", {
+            executionResult: webExperimental ? "DEFERRED" : "PENDING",
+            reason: webExperimental ? "VISUAL_DRAFT_INSPECTION_REQUIRED" : null,
+            publicationId,
+          });
+          scheduledChannelIds.add(channel.id);
+        } finally {
+          await lock.release();
+        }
+      } catch {
+        metrics.failed += 1;
+        metrics.publicationsFailed += 1;
+        recordSkip(metrics, "PLANNING_FAILED");
+        recordPlanningDecision(metrics, offer, channel, "BLOCKED_BY_POLICY", {
+          reason: "PLANNING_FAILED",
+        });
       }
     }
   }
+
+  metrics.offersSelected = selectedOfferIds.size;
 
   return metrics;
 }
@@ -959,187 +1199,6 @@ export function publicationRetryDelayMs(
   return Math.max(backoffMs, retryAfterMs);
 }
 
-const whatsappWebPauseCodes = new Set([
-  "WHATSAPP_WEB_LOGIN_REQUIRED",
-  "WHATSAPP_WEB_GROUP_AMBIGUOUS",
-  "WHATSAPP_WEB_NO_PUBLISH_PERMISSION",
-  "WHATSAPP_WEB_SELECTOR_MISMATCH",
-  "WHATSAPP_WEB_DELIVERY_UNCERTAIN",
-]);
-
-async function recordWhatsAppWebResult(
-  publication: PublicationWithRelations,
-  result: WhatsAppWebPublishResult,
-  now: Date,
-) {
-  const currentPublication = await prisma.publication.findUnique({
-    where: { id: publication.id },
-    select: { metadata: true },
-  });
-  const previousMetadata =
-    currentPublication?.metadata &&
-    typeof currentPublication.metadata === "object" &&
-    !Array.isArray(currentPublication.metadata)
-      ? (currentPublication.metadata as Record<string, unknown>)
-      : {};
-  const attemptNumber = publication.attempts.length + 1;
-  const deliveryUncertain = Boolean(
-    result.status !== "PUBLISHED" &&
-    (result.status === "DELIVERY_UNCERTAIN" ||
-      (previousMetadata.deliveryUncertain === true &&
-        typeof previousMetadata.deliveryConfirmedAt !== "string")),
-  );
-
-  await prisma.publicationAttempt.create({
-    data: {
-      publicationId: publication.id,
-      attemptNumber,
-      status: result.status === "PUBLISHED" ? "SUCCESS" : "FAILED",
-      requestPayload: {
-        publicationId: publication.id,
-        channelId: publication.channelId,
-        publicationMode: "WEB_EXPERIMENTAL",
-      },
-      responsePayload: {
-        status: result.status,
-        errorCode: result.errorCode ?? null,
-        stage: result.stage,
-        sendWasClicked: result.sendWasClicked,
-        sendClickStartedAt: result.sendClickStartedAt ?? null,
-        sendClickedAt: result.sendClickedAt ?? null,
-        deliveryUncertain: result.deliveryUncertain,
-      },
-      errorMessage: deliveryUncertain
-        ? "WHATSAPP_WEB_DELIVERY_UNCERTAIN"
-        : (result.errorCode ?? null),
-    },
-  });
-
-  await prisma.publication.update({
-    where: { id: publication.id },
-    data: {
-      status:
-        result.status === "PUBLISHED" ? "PUBLISHED" : "PUBLICATION_FAILED",
-      publishedAt: result.status === "PUBLISHED" ? now : null,
-      errorMessage: result.errorCode ?? null,
-      metadata: {
-        ...previousMetadata,
-        ...result.metadata,
-        rootCause: result.rootCause,
-        stage: result.stage,
-        deliveryUncertain,
-        retryAuthorized: false,
-      } as Prisma.InputJsonValue,
-    },
-  });
-
-  if (result.status === "PUBLISHED") {
-    await prisma.offer.update({
-      where: { id: publication.offerId },
-      data: { status: "PUBLISHED", publishedAt: now },
-    });
-  }
-
-  const channelConfiguration = channelConfigurationRecord(
-    publication.channel.configuration,
-  );
-  const shouldAutoPause =
-    result.status === "PUBLISHED" &&
-    (channelConfiguration.webAutoPauseAfterSuccess !== false
-      ? getWhatsAppWebRuntimeConfig().autoPauseAfterFirstSuccess
-      : false);
-  const shouldErrorPause =
-    result.errorCode !== undefined &&
-    whatsappWebPauseCodes.has(result.errorCode);
-
-  if (shouldAutoPause || shouldErrorPause) {
-    const pauseReason = shouldAutoPause
-      ? "WHATSAPP_WEB_FIRST_SUCCESS_REVIEW_REQUIRED"
-      : result.errorCode;
-    await prisma.channel.update({
-      where: { id: publication.channelId },
-      data: {
-        configuration: {
-          ...channelConfiguration,
-          webAutomationPaused: true,
-          webAutomationPauseReason: pauseReason,
-          webLastError: result.errorCode ?? null,
-          ...(result.status === "PUBLISHED"
-            ? { webLastSuccessAt: now.toISOString() }
-            : {}),
-        } as Prisma.InputJsonValue,
-      },
-    });
-  }
-
-  if (deliveryUncertain) {
-    await prisma.systemAlert.create({
-      data: {
-        severity: "CRITICAL",
-        source: "worker.whatsappWeb",
-        message:
-          "WhatsApp Web delivery is uncertain; verify the configured group before any action.",
-        metadata: {
-          publicationId: publication.id,
-          channelId: publication.channelId,
-          rootCause: "WHATSAPP_WEB_DELIVERY_UNCERTAIN",
-          retryBlocked: true,
-        },
-      },
-    });
-  }
-}
-
-async function persistWhatsAppWebSendState(update: WhatsAppWebSendStateUpdate) {
-  const publication = await prisma.publication.findUnique({
-    where: { id: update.publicationId },
-    select: { metadata: true },
-  });
-  if (!publication) throw new Error("PUBLICATION_NOT_FOUND");
-  const metadata =
-    publication.metadata &&
-    typeof publication.metadata === "object" &&
-    !Array.isArray(publication.metadata)
-      ? (publication.metadata as Record<string, unknown>)
-      : {};
-  const deliveryUncertain = Boolean(
-    update.deliveryUncertain ||
-    (metadata.deliveryUncertain === true &&
-      typeof metadata.deliveryConfirmedAt !== "string"),
-  );
-  await prisma.publication.update({
-    where: { id: update.publicationId },
-    data: {
-      ...(deliveryUncertain
-        ? {
-            status: "PUBLICATION_FAILED" as const,
-            errorMessage: "WHATSAPP_WEB_DELIVERY_UNCERTAIN",
-          }
-        : {}),
-      metadata: {
-        ...metadata,
-        stage: update.stage,
-        rootCause: update.stage,
-        sendWasClicked: update.sendWasClicked,
-        ...(update.sendClickStartedAt
-          ? { sendClickStartedAt: update.sendClickStartedAt }
-          : {}),
-        ...(update.sendClickedAt
-          ? { sendClickedAt: update.sendClickedAt }
-          : {}),
-        deliveryUncertain,
-        retryAuthorized: false,
-      } as Prisma.InputJsonValue,
-    },
-  });
-}
-
-function channelConfigurationRecord(value: Channel["configuration"]) {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
-}
-
 export async function publishScheduledOffers(now = new Date()) {
   const metrics = emptyMetrics();
   const maxAttempts = Number(
@@ -1166,21 +1225,55 @@ export async function publishScheduledOffers(now = new Date()) {
       attempts: { select: { id: true } },
     },
   });
-  const selectedChannelIds = new Set<string>();
-  let whatsappWebSelected = 0;
-  const selectedPublications = publications.filter((publication) => {
-    if (selectedChannelIds.has(publication.channelId)) return false;
-    if (isExperimentalWhatsAppGroup(publication.channel)) {
-      if (hasBlockedWhatsAppWebSendState(publication.metadata)) return false;
-      if (getWhatsAppWebRuntimeConfig().dryRun) return false;
-      if (
-        whatsappWebSelected >=
-        getWhatsAppWebRuntimeConfig().maxPublicationsPerRun
-      ) {
-        return false;
-      }
-      whatsappWebSelected += 1;
+
+  const controlledWebPublications = publications.filter((publication) =>
+    isExperimentalWhatsAppGroup(publication.channel),
+  );
+  for (const publication of controlledWebPublications) {
+    const metadata =
+      publication.metadata &&
+      typeof publication.metadata === "object" &&
+      !Array.isArray(publication.metadata)
+        ? (publication.metadata as Record<string, unknown>)
+        : {};
+    if (
+      typeof metadata.whatsappWebState !== "string" ||
+      metadata.visualInspectionRequired !== true ||
+      metadata.preflightRequired !== true ||
+      typeof metadata.dispatchBlockedReason !== "string"
+    ) {
+      await prisma.publication.update({
+        where: { id: publication.id },
+        data: {
+          metadata: controlledWhatsAppPlanningMetadata(
+            publication.channel,
+            publication.scheduledAt,
+            undefined,
+            metadata,
+          ) as Prisma.InputJsonValue,
+        },
+      });
     }
+    metrics.publicationsDeferred += 1;
+    recordPlanningDecision(
+      metrics,
+      publication.offer,
+      publication.channel,
+      "ALREADY_EXISTS",
+      {
+        executionResult: "DEFERRED",
+        reason: hasBlockedWhatsAppWebSendState(metadata)
+          ? "WHATSAPP_WEB_DELIVERY_UNCERTAIN"
+          : "VISUAL_DRAFT_INSPECTION_REQUIRED",
+        publicationId: publication.id,
+      },
+    );
+  }
+
+  const selectedChannelIds = new Set<string>();
+  const selectedPublications = publications.filter((publication) => {
+    if (isExperimentalWhatsAppGroup(publication.channel)) return false;
+    if (selectedChannelIds.has(publication.channelId)) return false;
     selectedChannelIds.add(publication.channelId);
     return true;
   });
@@ -1189,66 +1282,20 @@ export async function publishScheduledOffers(now = new Date()) {
     const payload = await payloadFromPublication(publication);
     const publisher = publisherForChannel(publication.channel);
 
-    if (payload && isExperimentalWhatsAppGroup(publication.channel)) {
-      const lock = await acquireLock(
-        `whatsapp-web:publication:${publication.id}`,
-        getWhatsAppWebRuntimeConfig().profileLockTtlMs,
-        { requireRedis: true },
-      );
-      if (!lock.acquired) {
-        metrics.failed += 1;
-        await prisma.publication.update({
-          where: { id: publication.id },
-          data: {
-            status: "PUBLICATION_FAILED",
-            errorMessage: lock.failureReason ?? "LOCK_ALREADY_HELD",
-          },
-        });
-        continue;
-      }
-      try {
-        const result = await new WhatsAppGroupsWebPublisher({
-          recordSendState: persistWhatsAppWebSendState,
-        }).publish({
-          publicationId: publication.id,
-          offerId: publication.offerId,
-          destinationType: "GROUP",
-          message: payload.message,
-          affiliateUrl: publication.affiliateUrlSnapshot ?? "",
-          title: publication.offerTitleSnapshot,
-          currentPrice: publication.currentPriceSnapshot.toString(),
-          imageUrl: publication.imageUrlSnapshot,
-          publicationStatus: publication.status,
-          publicationMetadata: publication.metadata,
-          channel: whatsappWebChannelConfiguration(publication.channel),
-        });
-        metrics.whatsappWebAttempts += 1;
-        if (result.mediaFallbackUsed) metrics.whatsappWebMediaFallback += 1;
-        if (result.errorCode === "WHATSAPP_WEB_LOGIN_REQUIRED") {
-          metrics.whatsappWebLoginRequired += 1;
-        }
-        if (result.errorCode === "WHATSAPP_WEB_SELECTOR_MISMATCH") {
-          metrics.whatsappWebSelectorMismatch += 1;
-        }
-        await recordWhatsAppWebResult(publication, result, now);
-        if (result.status === "PUBLISHED") {
-          metrics.published += 1;
-          metrics.whatsappWebPublished += 1;
-        } else {
-          metrics.failed += 1;
-          metrics.whatsappWebFailed += 1;
-          if (result.status === "DELIVERY_UNCERTAIN") {
-            metrics.whatsappWebDeliveryUncertain += 1;
-          }
-        }
-      } finally {
-        await lock.release();
-      }
-      continue;
-    }
-
     if (!payload || !publisher) {
       metrics.failed += 1;
+      metrics.publicationsFailed += 1;
+      recordPlanningDecision(
+        metrics,
+        publication.offer,
+        publication.channel,
+        "ALREADY_EXISTS",
+        {
+          executionResult: "FAILED",
+          reason: "PUBLISHER_UNAVAILABLE",
+          publicationId: publication.id,
+        },
+      );
       await prisma.publication.update({
         where: { id: publication.id },
         data: {
@@ -1260,6 +1307,7 @@ export async function publishScheduledOffers(now = new Date()) {
     }
 
     const result = await publisher.publish(payload);
+    metrics.publicationsExecuted += 1;
     const attemptNumber = publication.attempts.length + 1;
     await recordPublicationResult(
       publication,
@@ -1275,7 +1323,27 @@ export async function publishScheduledOffers(now = new Date()) {
       metrics.exported += 1;
     } else {
       metrics.failed += 1;
+      metrics.publicationsFailed += 1;
     }
+    recordPlanningDecision(
+      metrics,
+      publication.offer,
+      publication.channel,
+      "ALREADY_EXISTS",
+      {
+        executionResult:
+          result.status === "PUBLISHED"
+            ? "PUBLISHED"
+            : result.status === "EXPORTED"
+              ? "EXPORTED"
+              : "FAILED",
+        reason:
+          result.status === "FAILED"
+            ? (result.errorCode ?? "PUBLICATION_FAILED")
+            : null,
+        publicationId: publication.id,
+      },
+    );
   }
 
   return metrics;
@@ -1602,7 +1670,7 @@ export async function runWorkerCycle(
   if (refresh) metrics.refresh = refresh;
 
   const scheduled = await runStage("schedule", () =>
-    dependencies.scheduleReadyOffers(now),
+    dependencies.scheduleReadyOffers(now, { planningRunId: run.id }),
   );
   if (scheduled) mergeMetrics(metrics, scheduled);
 
@@ -1633,6 +1701,25 @@ export async function runWorkerCycle(
         : { status: "SUCCEEDED" },
   );
   if (published) mergeMetrics(metrics, published);
+
+  metrics.planningDecisions = compactPlanningDecisions(
+    metrics.planningDecisions,
+  );
+
+  console.info(
+    JSON.stringify({
+      event: "publication_planning_completed",
+      planningRunId: run.id,
+      offersSelected: metrics.offersSelected,
+      publicationsPlanned: metrics.publicationsPlanned,
+      publicationsCreated: metrics.publicationsCreated,
+      publicationsAlreadyExisting: metrics.publicationsAlreadyExisting,
+      publicationsExecuted: metrics.publicationsExecuted,
+      publicationsDeferred: metrics.publicationsDeferred,
+      publicationsFailed: metrics.publicationsFailed,
+      decisions: metrics.planningDecisions,
+    }),
+  );
 
   const errorMessage =
     issues.length > 0

@@ -11,5 +11,6 @@ playwright-report
 test-results
 .local/whatsapp-web/
 .local/whatsapp-debug/
+.local/*.png
 **/.local/whatsapp-web/
 **/.local/whatsapp-debug/
