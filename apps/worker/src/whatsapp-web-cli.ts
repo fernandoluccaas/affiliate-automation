@@ -1,4 +1,8 @@
-import { prisma, Prisma } from "@affiliate/database";
+import {
+  prisma,
+  Prisma,
+  resolveWhatsAppWebDelivery,
+} from "@affiliate/database";
 import { createInterface } from "node:readline";
 import {
   getWhatsAppWebRuntimeConfig,
@@ -251,6 +255,67 @@ async function main() {
     localDiagnosticKeepOpenOnErrorMs,
     recordSendState: recordPublicationSendState,
   });
+
+  if (command === "resolve-delivery") {
+    const publicationId = option("--publication-id");
+    const delivered = process.argv.includes("--delivered");
+    const notDelivered = process.argv.includes("--not-delivered");
+    const keepUncertain = process.argv.includes("--keep-uncertain");
+    const decisionCount = [delivered, notDelivered, keepUncertain].filter(
+      Boolean,
+    ).length;
+    if (!publicationId || decisionCount !== 1)
+      throw new Error("DELIVERY_RESOLUTION_DECISION_REQUIRED");
+    const confirmed = delivered
+      ? process.argv.includes("--confirm-delivered")
+      : process.argv.includes("--confirm-resolution");
+    if (!confirmed)
+      throw new Error("DELIVERY_RESOLUTION_CONFIRMATION_REQUIRED");
+    const result = await resolveWhatsAppWebDelivery(prisma, {
+      publicationId,
+      decision: delivered
+        ? "DELIVERED"
+        : notDelivered
+          ? "NOT_DELIVERED"
+          : "KEEP_UNCERTAIN",
+      actorId: "LOCAL_REPOSITORY_OWNER_CLI",
+      reason: option("--reason") || null,
+      autoPauseAfterFirstSuccess: runtimeConfig.autoPauseAfterFirstSuccess,
+    });
+    process.stdout.write(
+      `${JSON.stringify({
+        ...result,
+        browserOpened: false,
+        mediaPrepared: false,
+        sendCalled: false,
+      })}\n`,
+    );
+    return;
+  }
+
+  if (command === "inspect-delivery") {
+    const publicationId = option("--publication-id");
+    if (!publicationId) throw new Error("PUBLICATION_ID_REQUIRED");
+    const holdMs = inspectionHoldMs(20_000);
+    const { publication, input } = await publicationInput(publicationId);
+    const metadata = record(publication.metadata);
+    if (
+      publication.errorMessage !== "WHATSAPP_WEB_DELIVERY_UNCERTAIN" ||
+      metadata.deliveryUncertain !== true ||
+      typeof metadata.sendClickStartedAt !== "string"
+    ) {
+      throw new Error("DELIVERY_UNCERTAIN_NOT_FOUND");
+    }
+    const sentAfter = new Date(metadata.sendClickStartedAt);
+    if (Number.isNaN(sentAfter.getTime()))
+      throw new Error("DELIVERY_SEND_TIMESTAMP_INVALID");
+    const result = await publisher.inspectDelivery(input, {
+      holdMs,
+      sentAfter,
+    });
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    return;
+  }
 
   if (command === "login") {
     await login(option("--profile") || "");
@@ -588,7 +653,7 @@ async function main() {
   }
 
   throw new Error(
-    "USAGE: login|health|diagnose|locate|dry-run|preflight|inspect-layout|inspect-draft|config-check|publish",
+    "USAGE: login|health|diagnose|locate|dry-run|preflight|inspect-layout|inspect-draft|inspect-delivery|resolve-delivery|config-check|publish",
   );
 }
 

@@ -1,6 +1,11 @@
 "use server";
 
-import { Prisma, prisma } from "@affiliate/database";
+import {
+  Prisma,
+  authorizeWhatsAppWebRetry,
+  prisma,
+  resolveWhatsAppWebDelivery,
+} from "@affiliate/database";
 import {
   MessageGenerationService,
   OllamaAiProvider,
@@ -464,55 +469,34 @@ export async function reviewWhatsAppWebDeliveryAction(formData: FormData) {
   const user = await requireSession();
   const publicationId = formData.get("publicationId")?.toString();
   const decision = formData.get("decision")?.toString();
+  const confirmed = formData.get("confirmed") === "true";
+  const reason = formData.get("reason")?.toString().trim() || null;
   if (
     !publicationId ||
-    !["DELIVERED", "NOT_DELIVERED", "CANCEL_RETRY", "AUTHORIZE_RETRY"].includes(
-      decision || "",
-    )
+    !confirmed ||
+    !["DELIVERED", "NOT_DELIVERED", "KEEP_UNCERTAIN"].includes(decision || "")
   ) {
     throw new Error("Revisao invalida.");
   }
-  const publication = await prisma.publication.findUnique({
-    where: { id: publicationId },
+  await resolveWhatsAppWebDelivery(prisma, {
+    publicationId,
+    decision: decision as "DELIVERED" | "NOT_DELIVERED" | "KEEP_UNCERTAIN",
+    actorId: user.id,
+    reason,
+    autoPauseAfterFirstSuccess: true,
   });
-  const metadata =
-    publication?.metadata &&
-    typeof publication.metadata === "object" &&
-    !Array.isArray(publication.metadata)
-      ? (publication.metadata as Record<string, unknown>)
-      : {};
-  if (!publication || metadata.deliveryUncertain !== true)
-    throw new Error("DELIVERY_UNCERTAIN_NOT_FOUND");
-  const now = new Date();
-  await prisma.$transaction(async (tx) => {
-    await tx.publication.update({
-      where: { id: publication.id },
-      data: {
-        status:
-          decision === "DELIVERED"
-            ? "PUBLISHED"
-            : decision === "AUTHORIZE_RETRY"
-              ? "SCHEDULED"
-              : "PUBLICATION_FAILED",
-        scheduledAt:
-          decision === "AUTHORIZE_RETRY" ? now : publication.scheduledAt,
-        publishedAt: decision === "DELIVERED" ? now : null,
-        metadata: {
-          ...metadata,
-          deliveryUncertain: false,
-          deliveryUncertainReviewedAt: now.toISOString(),
-          deliveryUncertainReviewedBy: user.id,
-          deliveryUncertainDecision: decision,
-          retryAuthorized: decision === "AUTHORIZE_RETRY",
-        },
-      },
-    });
-    if (decision === "DELIVERED") {
-      await tx.offer.update({
-        where: { id: publication.offerId },
-        data: { status: "PUBLISHED", publishedAt: now },
-      });
-    }
+  revalidatePath("/publicacoes");
+}
+
+export async function authorizeWhatsAppWebRetryAction(formData: FormData) {
+  const user = await requireSession();
+  const publicationId = formData.get("publicationId")?.toString();
+  const confirmed =
+    formData.get("confirmation") === "AUTHORIZE_ONE_WHATSAPP_WEB_RETRY";
+  if (!publicationId || !confirmed) throw new Error("Revisao invalida.");
+  await authorizeWhatsAppWebRetry(prisma, {
+    publicationId,
+    actorId: user.id,
   });
   revalidatePath("/publicacoes");
 }

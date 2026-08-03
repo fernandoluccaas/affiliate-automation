@@ -23,6 +23,14 @@ import {
   type WhatsAppWebStructureDiagnosticResult,
 } from "./whatsapp-web-types";
 import { selectWhatsAppMediaCaptionCandidate } from "./whatsapp-web-layout";
+import {
+  buildOutgoingMessageBaseline,
+  evaluateOutgoingDelivery,
+  hashWhatsAppDeliveryValue,
+  normalizeWhatsAppDeliveryText,
+  type OutgoingMessageBaseline,
+  type OutgoingMessageCandidate,
+} from "./whatsapp-web-delivery-confirmation";
 
 function normalizedText(value: string) {
   return value.replace(/\s+/g, " ").trim();
@@ -30,6 +38,22 @@ function normalizedText(value: string) {
 
 function normalizedEditableText(value: string) {
   return value.replace(/\r\n?/g, "\n").replace(/\u00a0/g, " ");
+}
+
+function parseWhatsAppMessageTimestamp(value: string | null) {
+  if (!value) return null;
+  const match = value.match(
+    /\[?(\d{1,2}):(\d{2}),\s*(\d{1,2})\/(\d{1,2})\/(\d{4})\]?/,
+  );
+  if (!match) return null;
+  const [, hour, minute, day, month, year] = match;
+  return new Date(
+    Number(year),
+    Number(month) - 1,
+    Number(day),
+    Number(hour),
+    Number(minute),
+  ).getTime();
 }
 
 function errorCodeForDiagnosticStage(
@@ -1295,7 +1319,7 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
   }): Promise<WhatsAppWebSendTriggerInspection> {
     this.validatedSendTrigger = null;
     const outgoingCount = await this.page
-      .locator(whatsappWebStableSelectors.outgoingMessage)
+      .locator(whatsappWebStableSelectors.outgoingMessage.join(", "))
       .count()
       .catch(() => 0);
     let mediaLayout: WhatsAppWebMediaLayoutInspection | null = null;
@@ -1516,49 +1540,253 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
     await this.page.waitForTimeout(ms);
   }
 
+  private outgoingMessages() {
+    return this.page.locator(
+      whatsappWebStableSelectors.outgoingMessage.join(", "),
+    );
+  }
+
+  private async searchCurrentGroupForOwnAffiliateUrl(affiliateUrl: string) {
+    const inputStrategies =
+      whatsappWebStableSelectors.conversationSearchInput.map((selector) =>
+        this.page.locator(selector),
+      );
+    let input = await this.firstUniqueVisible(inputStrategies);
+    let triggerFound = false;
+    if (!input) {
+      const header = await this.firstVisible([
+        this.page.locator("#main header"),
+      ]);
+      if (!header)
+        return {
+          triggerFound: false,
+          inputFound: false,
+          queryFilled: false,
+          exactResultOpened: false,
+        };
+      const triggerStrategies = [
+        ...whatsappWebAccessibleAliases.conversationSearch.map((name) =>
+          header.getByRole("button", { name, exact: true }),
+        ),
+        ...whatsappWebStableSelectors.conversationSearchTrigger.map(
+          (selector) => this.page.locator(selector),
+        ),
+      ];
+      const trigger = await this.firstUniqueVisible(triggerStrategies);
+      if (!trigger)
+        return {
+          triggerFound: false,
+          inputFound: false,
+          queryFilled: false,
+          exactResultOpened: false,
+        };
+      triggerFound = true;
+      await trigger.click();
+      input = await this.firstUniqueVisible(inputStrategies);
+    }
+    if (!input || !(await input.isEditable().catch(() => false))) {
+      return {
+        triggerFound,
+        inputFound: false,
+        queryFilled: false,
+        exactResultOpened: false,
+      };
+    }
+    await input.fill(affiliateUrl);
+    await input.press("Enter").catch(() => undefined);
+    await this.page.waitForTimeout(750);
+    const exactResults = this.page.getByText(affiliateUrl, { exact: true });
+    const exactResult = await this.firstUniqueVisible([exactResults]);
+    let exactResultOpened = false;
+    if (exactResult) {
+      exactResultOpened = await exactResult
+        .click()
+        .then(() => true)
+        .catch(async () => {
+          const actionable = exactResult.locator(
+            "xpath=ancestor::*[@role='button' or @role='listitem' or @role='row'][1]",
+          );
+          if ((await actionable.count().catch(() => 0)) !== 1) return false;
+          return actionable
+            .click()
+            .then(() => true)
+            .catch(() => false);
+        });
+      if (exactResultOpened) await this.page.waitForTimeout(750);
+    }
+    if (!exactResultOpened) {
+      const exactUrlResultContainer = this.page
+        .getByText(affiliateUrl, { exact: false })
+        .locator(
+          "xpath=ancestor::*[@role='button' or @role='listitem' or @role='row'][1]",
+        );
+      const uniqueContainer = await this.firstUniqueVisible([
+        exactUrlResultContainer,
+      ]);
+      if (uniqueContainer) {
+        exactResultOpened = await uniqueContainer
+          .click()
+          .then(() => true)
+          .catch(() => false);
+        if (exactResultOpened) await this.page.waitForTimeout(750);
+      }
+    }
+    return {
+      triggerFound,
+      inputFound: true,
+      queryFilled: true,
+      exactResultOpened,
+    };
+  }
+
+  private async captureOutgoingCandidates(): Promise<
+    OutgoingMessageCandidate[]
+  > {
+    const outgoing = this.outgoingMessages();
+    const count = await outgoing.count().catch(() => 0);
+    const candidates: OutgoingMessageCandidate[] = [];
+    for (let order = 0; order < count; order += 1) {
+      const candidate = outgoing.nth(order);
+      if (!(await candidate.isVisible().catch(() => false))) continue;
+      const text = normalizeWhatsAppDeliveryText(
+        await candidate.innerText().catch(() => ""),
+      );
+      const linksLocator = candidate.locator("a[href]");
+      const linkCount = await linksLocator.count().catch(() => 0);
+      const links: string[] = [];
+      for (let linkIndex = 0; linkIndex < linkCount; linkIndex += 1) {
+        const href = await linksLocator
+          .nth(linkIndex)
+          .getAttribute("href")
+          .catch(() => null);
+        if (href) links.push(href);
+      }
+      const structuralValue =
+        (await candidate.getAttribute("data-id").catch(() => null)) ||
+        (await candidate.getAttribute("id").catch(() => null)) ||
+        `${order}:${await candidate.getAttribute("data-testid").catch(() => "")}`;
+      const timestampValue = await candidate
+        .locator("[data-pre-plain-text]")
+        .first()
+        .getAttribute("data-pre-plain-text")
+        .catch(() => null);
+      const mediaType =
+        (await candidate
+          .locator("video")
+          .count()
+          .catch(() => 0)) > 0
+          ? ("VIDEO" as const)
+          : (await candidate
+                .locator(
+                  "img[src^='blob:'], img[src*='mmg'], canvas, [data-testid*='media-content']",
+                )
+                .count()
+                .catch(() => 0)) > 0
+            ? ("IMAGE" as const)
+            : (await candidate
+                  .locator("[data-testid*='media']")
+                  .count()
+                  .catch(() => 0)) > 0
+              ? ("OTHER" as const)
+              : ("NONE" as const);
+      const hasError =
+        (await candidate
+          .locator(whatsappWebStableSelectors.outgoingErrorState.join(", "))
+          .count()
+          .catch(() => 0)) > 0;
+      const hasPending =
+        (await candidate
+          .locator(whatsappWebStableSelectors.outgoingPendingState.join(", "))
+          .count()
+          .catch(() => 0)) > 0;
+      const hasSent =
+        (await candidate
+          .locator(whatsappWebStableSelectors.outgoingSentState.join(", "))
+          .count()
+          .catch(() => 0)) > 0;
+      const deliveryState = hasError
+        ? ("ERROR" as const)
+        : hasPending
+          ? ("PENDING" as const)
+          : hasSent
+            ? ("SENT" as const)
+            : ("UNKNOWN" as const);
+      candidates.push({
+        identityHash: hashWhatsAppDeliveryValue(structuralValue),
+        contentHash: hashWhatsAppDeliveryValue(
+          JSON.stringify([
+            text,
+            links.map((link) => hashWhatsAppDeliveryValue(link)),
+          ]),
+        ),
+        order,
+        mediaType,
+        deliveryState,
+        text,
+        links,
+        observedTimestampMs: parseWhatsAppMessageTimestamp(timestampValue),
+      });
+    }
+    return candidates;
+  }
+
+  async captureOutgoingBaseline(): Promise<OutgoingMessageBaseline> {
+    const candidates = await this.captureOutgoingCandidates();
+    return buildOutgoingMessageBaseline(
+      candidates.map(
+        ({
+          text: _text,
+          links: _links,
+          observedTimestampMs: _time,
+          ...fingerprint
+        }) => fingerprint,
+      ),
+    );
+  }
+
   async confirmOutgoingMessage(input: {
     affiliateUrl: string;
     textSnippet: string;
     mediaExpected: boolean;
     sentAfter: Date;
-    outgoingCountBefore: number;
+    baseline: OutgoingMessageBaseline;
   }): Promise<OutgoingMessageConfirmation> {
     const deadline = Date.now() + this.confirmationTimeoutMs;
     let lastStage: OutgoingMessageConfirmation["stage"] =
       "OUTGOING_MESSAGE_NOT_FOUND";
+    let lastEvaluation = evaluateOutgoingDelivery({
+      baseline: input.baseline,
+      candidates: [],
+      affiliateUrl: input.affiliateUrl,
+      textSnippet: input.textSnippet,
+      mediaExpected: input.mediaExpected,
+      sentAfter: input.sentAfter,
+    });
     do {
-      const outgoing = this.page.locator(
-        whatsappWebStableSelectors.outgoingMessage,
-      );
-      const count = await outgoing.count().catch(() => 0);
-      for (let index = input.outgoingCountBefore; index < count; index += 1) {
-        const candidate = outgoing.nth(index);
-        if (!(await candidate.isVisible().catch(() => false))) continue;
-        const text = normalizedText(await candidate.innerText());
-        const affiliateUrlFound = text.includes(input.affiliateUrl);
-        const textSnippetFound = text.includes(
-          normalizedText(input.textSnippet),
-        );
-        const mediaFound = input.mediaExpected
-          ? (await candidate
-              .locator("img, [data-testid*='media']")
-              .count()
-              .catch(() => 0)) > 0
-          : true;
-        lastStage = !affiliateUrlFound
-          ? "OUTGOING_AFFILIATE_URL_NOT_CONFIRMED"
-          : !textSnippetFound
-            ? "OUTGOING_TEXT_NOT_CONFIRMED"
-            : !mediaFound
-              ? "OUTGOING_MEDIA_NOT_CONFIRMED"
-              : "DELIVERY_CONFIRMED";
-        if (lastStage !== "DELIVERY_CONFIRMED") continue;
+      lastEvaluation = evaluateOutgoingDelivery({
+        baseline: input.baseline,
+        candidates: await this.captureOutgoingCandidates(),
+        affiliateUrl: input.affiliateUrl,
+        textSnippet: input.textSnippet,
+        mediaExpected: input.mediaExpected,
+        sentAfter: input.sentAfter,
+      });
+      lastStage = lastEvaluation.stage;
+      if (lastEvaluation.confirmed) {
+        const editorClosed = !(await this.visibleMediaSurface());
         return {
           confirmed: true,
-          affiliateUrlFound,
-          affiliateUrlOccurrences: text.split(input.affiliateUrl).length - 1,
-          textSnippetFound,
-          mediaFound,
+          candidateFound: lastEvaluation.candidateFound,
+          candidateWasNewOrMutated: lastEvaluation.candidateWasNewOrMutated,
+          affiliateUrlFound: lastEvaluation.affiliateUrlFound,
+          affiliateUrlOccurrences: lastEvaluation.affiliateUrlOccurrences,
+          textSnippetFound: lastEvaluation.textSnippetFound,
+          mediaFound: lastEvaluation.mediaFound,
+          editorClosed,
+          pending: lastEvaluation.pending,
+          sent: lastEvaluation.sent,
+          errorVisible: lastEvaluation.errorVisible,
+          timestampCoherent: lastEvaluation.timestampCoherent,
           uploadErrorVisible: false,
           stage: "DELIVERY_CONFIRMED",
         };
@@ -1567,15 +1795,99 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
     } while (Date.now() < deadline);
     return {
       confirmed: false,
-      affiliateUrlFound: false,
-      affiliateUrlOccurrences: 0,
-      textSnippetFound: false,
-      mediaFound: false,
+      candidateFound: lastEvaluation.candidateFound,
+      candidateWasNewOrMutated: lastEvaluation.candidateWasNewOrMutated,
+      affiliateUrlFound: lastEvaluation.affiliateUrlFound,
+      affiliateUrlOccurrences: lastEvaluation.affiliateUrlOccurrences,
+      textSnippetFound: lastEvaluation.textSnippetFound,
+      mediaFound: lastEvaluation.mediaFound,
+      editorClosed: !(await this.visibleMediaSurface()),
+      pending: lastEvaluation.pending,
+      sent: lastEvaluation.sent,
+      errorVisible: lastEvaluation.errorVisible,
+      timestampCoherent: lastEvaluation.timestampCoherent,
       uploadErrorVisible: false,
       stage:
         lastStage === "OUTGOING_MESSAGE_NOT_FOUND"
           ? "DELIVERY_CONFIRMATION_TIMEOUT"
           : lastStage,
+    };
+  }
+
+  async inspectExistingDelivery(input: {
+    affiliateUrl: string;
+    textSnippet: string;
+    mediaExpected: boolean;
+    sentAfter: Date;
+    holdMs: number;
+  }) {
+    const deadline = Date.now() + input.holdMs;
+    let searchedCurrentGroup = false;
+    let groupSearch = {
+      triggerFound: false,
+      inputFound: false,
+      queryFilled: false,
+      exactResultOpened: false,
+    };
+    let evaluation = evaluateOutgoingDelivery({
+      baseline: buildOutgoingMessageBaseline([]),
+      candidates: [],
+      affiliateUrl: input.affiliateUrl,
+      textSnippet: input.textSnippet,
+      mediaExpected: input.mediaExpected,
+      requireMutation: false,
+      sentAfter: input.sentAfter,
+    });
+    do {
+      evaluation = evaluateOutgoingDelivery({
+        baseline: buildOutgoingMessageBaseline([]),
+        candidates: await this.captureOutgoingCandidates(),
+        affiliateUrl: input.affiliateUrl,
+        textSnippet: input.textSnippet,
+        mediaExpected: input.mediaExpected,
+        requireMutation: false,
+        sentAfter: input.sentAfter,
+      });
+      if (evaluation.confirmed || evaluation.errorVisible) break;
+      if (!evaluation.candidateFound && !searchedCurrentGroup) {
+        searchedCurrentGroup = true;
+        groupSearch = await this.searchCurrentGroupForOwnAffiliateUrl(
+          input.affiliateUrl,
+        ).catch(() => groupSearch);
+      }
+      await this.page.waitForTimeout(200);
+    } while (Date.now() < deadline);
+    const baseline = await this.captureOutgoingBaseline();
+    return {
+      status: evaluation.confirmed
+        ? ("DELIVERY_MATCH_FOUND" as const)
+        : ("DELIVERY_MATCH_NOT_FOUND" as const),
+      confirmed: evaluation.confirmed,
+      candidateFound: evaluation.candidateFound,
+      candidateWasNewOrMutated: evaluation.candidateWasNewOrMutated,
+      affiliateUrlFound: evaluation.affiliateUrlFound,
+      affiliateUrlOccurrences: evaluation.affiliateUrlOccurrences,
+      textSnippetFound: evaluation.textSnippetFound,
+      mediaFound: evaluation.mediaFound,
+      editorClosed: !(await this.visibleMediaSurface()),
+      pending: evaluation.pending,
+      sent: evaluation.sent,
+      errorVisible: evaluation.errorVisible,
+      timestampCoherent: evaluation.timestampCoherent,
+      uploadErrorVisible: false,
+      stage: evaluation.confirmed
+        ? ("DELIVERY_CONFIRMED" as const)
+        : evaluation.stage === "OUTGOING_MESSAGE_NOT_FOUND"
+          ? ("DELIVERY_CONFIRMATION_TIMEOUT" as const)
+          : evaluation.stage,
+      baselineCount: baseline.count,
+      baselineDigest: baseline.digest,
+      confirmationTimeoutMs: input.holdMs,
+      sendCalled: false as const,
+      groupSearchTriggerFound: groupSearch.triggerFound,
+      groupSearchInputFound: groupSearch.inputFound,
+      groupSearchQueryFilled: groupSearch.queryFilled,
+      groupSearchExactResultOpened: groupSearch.exactResultOpened,
     };
   }
 
@@ -2673,6 +2985,16 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
         const candidate = locator.nth(index);
         if (await candidate.isVisible().catch(() => false)) return candidate;
       }
+    }
+    return null;
+  }
+
+  private async firstUniqueVisible(locators: Locator[]) {
+    for (const locator of locators) {
+      const count = await locator.count().catch(() => 0);
+      if (count !== 1) continue;
+      const candidate = locator.first();
+      if (await candidate.isVisible().catch(() => false)) return candidate;
     }
     return null;
   }

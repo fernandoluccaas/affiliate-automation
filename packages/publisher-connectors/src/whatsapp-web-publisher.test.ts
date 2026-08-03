@@ -139,6 +139,10 @@ function adapter(
       ],
       captionCandidates: [],
       sendCalled: false,
+      groupSearchTriggerFound: false,
+      groupSearchInputFound: false,
+      groupSearchQueryFilled: false,
+      groupSearchExactResultOpened: false,
     }),
     fillCaption: vi.fn().mockResolvedValue({
       captionDetected: true,
@@ -196,14 +200,48 @@ function adapter(
     }),
     holdDraftOpen: vi.fn().mockResolvedValue(undefined),
     clickSendTrigger: vi.fn().mockResolvedValue(undefined),
+    captureOutgoingBaseline: vi.fn().mockResolvedValue({
+      capturedAt: "2026-08-02T10:00:00.000Z",
+      count: 0,
+      digest: "baseline-digest",
+      messages: [],
+    }),
     confirmOutgoingMessage: vi.fn().mockResolvedValue({
       confirmed: true,
+      candidateFound: true,
+      candidateWasNewOrMutated: true,
       affiliateUrlFound: true,
       affiliateUrlOccurrences: 1,
       textSnippetFound: true,
       mediaFound: true,
+      editorClosed: true,
+      pending: false,
+      sent: true,
+      errorVisible: false,
+      timestampCoherent: true,
       uploadErrorVisible: false,
       stage: "DELIVERY_CONFIRMED",
+    }),
+    inspectExistingDelivery: vi.fn().mockResolvedValue({
+      status: "DELIVERY_MATCH_FOUND",
+      confirmed: true,
+      candidateFound: true,
+      candidateWasNewOrMutated: true,
+      affiliateUrlFound: true,
+      affiliateUrlOccurrences: 1,
+      textSnippetFound: true,
+      mediaFound: true,
+      editorClosed: true,
+      pending: false,
+      sent: true,
+      errorVisible: false,
+      timestampCoherent: true,
+      uploadErrorVisible: false,
+      stage: "DELIVERY_CONFIRMED",
+      baselineCount: 1,
+      baselineDigest: "inspection-digest",
+      confirmationTimeoutMs: 20_000,
+      sendCalled: false,
     }),
     clearDraft: vi.fn().mockResolvedValue(undefined),
     isDraftClear: vi.fn().mockResolvedValue(true),
@@ -951,6 +989,31 @@ describe("WhatsAppGroupsWebPublisher dry run", () => {
 });
 
 describe("WhatsAppGroupsWebPublisher protected send", () => {
+  it("inspects a prior delivery without preparing media or calling send", async () => {
+    const page = adapter();
+    const publication = input();
+    publication.publicationStatus = "PUBLICATION_FAILED";
+    const result = await new WhatsAppGroupsWebPublisher({
+      config: config(),
+      launcher: launcher(page),
+      profileLock: lock(),
+    }).inspectDelivery(publication, {
+      holdMs: 20_000,
+      sentAfter: new Date("2026-08-02T10:00:00.000Z"),
+    });
+    expect(result).toMatchObject({
+      status: "DELIVERY_MATCH_FOUND",
+      sendCalled: false,
+      browserOpened: true,
+      browserClosed: true,
+      lockReleased: true,
+    });
+    expect(page.inspectExistingDelivery).toHaveBeenCalledOnce();
+    expect(page.attachImage).not.toHaveBeenCalled();
+    expect(page.fillCaption).not.toHaveBeenCalled();
+    expect(page.clickSendTrigger).not.toHaveBeenCalled();
+  });
+
   it.each([
     {
       name: "global feature disabled",
@@ -1176,7 +1239,9 @@ describe("WhatsAppGroupsWebPublisher protected send", () => {
 
   it("holds an unresolved layout before cleanup", async () => {
     const page = adapter({
-      inspectMediaLayout: vi.fn().mockRejectedValue(new Error("layout changed")),
+      inspectMediaLayout: vi
+        .fn()
+        .mockRejectedValue(new Error("layout changed")),
     });
     const result = await new WhatsAppGroupsWebPublisher({
       config: config(),
@@ -1520,7 +1585,7 @@ describe("WhatsAppGroupsWebPublisher protected send", () => {
     }).publish(input());
     expect(result).toMatchObject({ status: "PUBLISHED", sendWasClicked: true });
     expect(result.metadata).toMatchObject({
-      confirmationStrategy: "VISUAL_NEW_OUTGOING_MESSAGE",
+      confirmationStrategy: "STRUCTURAL_OUTGOING_FINGERPRINT_CONVERGENCE",
     });
     expect(recordSendState).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1541,10 +1606,17 @@ describe("WhatsAppGroupsWebPublisher protected send", () => {
     const page = adapter({
       confirmOutgoingMessage: vi.fn().mockResolvedValue({
         confirmed: false,
+        candidateFound: false,
+        candidateWasNewOrMutated: false,
         affiliateUrlFound: false,
         affiliateUrlOccurrences: 0,
         textSnippetFound: false,
         mediaFound: false,
+        editorClosed: true,
+        pending: false,
+        sent: false,
+        errorVisible: false,
+        timestampCoherent: false,
         uploadErrorVisible: false,
         stage: "DELIVERY_CONFIRMATION_TIMEOUT",
       }),

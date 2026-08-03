@@ -150,6 +150,13 @@ export type WhatsAppWebInspectLayoutResult =
     errorCode?: string;
   };
 
+export type WhatsAppWebInspectDeliveryResult =
+  import("./whatsapp-web-types").WhatsAppWebDeliveryInspection & {
+    browserOpened: true;
+    browserClosed: true;
+    lockReleased: true;
+  };
+
 export type WhatsAppWebSendStateUpdate = {
   publicationId: string;
   stage: WhatsAppWebDiagnosticStage;
@@ -298,6 +305,10 @@ export interface WhatsAppGroupsWebPublisherContract {
     input: WhatsAppWebPublicationInput,
     options: { holdMs: number; devtools?: boolean },
   ): Promise<WhatsAppWebInspectLayoutResult>;
+  inspectDelivery(
+    input: WhatsAppWebPublicationInput,
+    options: { holdMs: number; sentAfter: Date },
+  ): Promise<WhatsAppWebInspectDeliveryResult>;
   publish(
     input: WhatsAppWebPublicationInput,
   ): Promise<WhatsAppWebPublishResult>;
@@ -1238,6 +1249,8 @@ export class WhatsAppGroupsWebPublisher implements WhatsAppGroupsWebPublisherCon
                 input,
                 Boolean(media.path),
               );
+              const confirmationBaseline =
+                await adapter.captureOutgoingBaseline();
               currentStage = "SEND_CLICK_STARTED";
               sendClickStartedAt = this.now();
               await this.persistSendState({
@@ -1273,7 +1286,7 @@ export class WhatsAppGroupsWebPublisher implements WhatsAppGroupsWebPublisherCon
                 textSnippet: uniqueSnippet(input.title),
                 mediaExpected: Boolean(media.path),
                 sentAfter: sendClickedAt,
-                outgoingCountBefore: trigger.outgoingCount,
+                baseline: confirmationBaseline,
               });
               if (!confirmation.confirmed) {
                 currentStage = confirmation.stage;
@@ -1289,6 +1302,24 @@ export class WhatsAppGroupsWebPublisher implements WhatsAppGroupsWebPublisherCon
                     sendClickedAt: sendClickedAt.toISOString(),
                     deliveryUncertain: true,
                     confirmationStage: confirmation.stage,
+                    confirmationBaseline: {
+                      capturedAt: confirmationBaseline.capturedAt,
+                      count: confirmationBaseline.count,
+                      digest: confirmationBaseline.digest,
+                    },
+                    confirmationTimeoutMs: this.config.confirmationTimeoutMs,
+                    outgoingCandidateFound: confirmation.candidateFound,
+                    outgoingCandidateWasNewOrMutated:
+                      confirmation.candidateWasNewOrMutated,
+                    outgoingAffiliateUrlConfirmed:
+                      confirmation.affiliateUrlFound,
+                    outgoingTitleSnippetConfirmed:
+                      confirmation.textSnippetFound,
+                    outgoingMediaConfirmed: confirmation.mediaFound,
+                    outgoingPending: confirmation.pending,
+                    outgoingSent: confirmation.sent,
+                    outgoingErrorVisible: confirmation.errorVisible,
+                    mediaEditorClosedAfterClick: confirmation.editorClosed,
                   },
                 );
               }
@@ -1312,8 +1343,25 @@ export class WhatsAppGroupsWebPublisher implements WhatsAppGroupsWebPublisherCon
                   sendClickStartedAt: sendClickStartedAt.toISOString(),
                   sendClickedAt: sendClickedAt.toISOString(),
                   deliveryConfirmedAt: this.now().toISOString(),
-                  confirmationStrategy: "VISUAL_NEW_OUTGOING_MESSAGE",
+                  confirmationStrategy:
+                    "STRUCTURAL_OUTGOING_FINGERPRINT_CONVERGENCE",
                   confirmedMedia: Boolean(media.path),
+                  confirmationBaseline: {
+                    capturedAt: confirmationBaseline.capturedAt,
+                    count: confirmationBaseline.count,
+                    digest: confirmationBaseline.digest,
+                  },
+                  confirmationTimeoutMs: this.config.confirmationTimeoutMs,
+                  outgoingCandidateFound: confirmation.candidateFound,
+                  outgoingCandidateWasNewOrMutated:
+                    confirmation.candidateWasNewOrMutated,
+                  outgoingAffiliateUrlConfirmed: confirmation.affiliateUrlFound,
+                  outgoingTitleSnippetConfirmed: confirmation.textSnippetFound,
+                  outgoingMediaConfirmed: confirmation.mediaFound,
+                  outgoingPending: confirmation.pending,
+                  outgoingSent: confirmation.sent,
+                  outgoingErrorVisible: confirmation.errorVisible,
+                  mediaEditorClosedAfterClick: confirmation.editorClosed,
                 },
               );
             } catch (error) {
@@ -1354,6 +1402,44 @@ export class WhatsAppGroupsWebPublisher implements WhatsAppGroupsWebPublisherCon
         },
       );
     }
+  }
+
+  async inspectDelivery(
+    input: WhatsAppWebPublicationInput,
+    options: { holdMs: number; sentAfter: Date },
+  ): Promise<WhatsAppWebInspectDeliveryResult> {
+    this.assertChannelEnabled(input.channel);
+    if (!this.config.dryRun) throw new Error("WHATSAPP_WEB_DISABLED");
+    if (options.holdMs < 5_000 || options.holdMs > 60_000) {
+      throw new Error("WHATSAPP_WEB_UNEXPECTED_STATE");
+    }
+    validateWhatsAppWebPublication(input);
+    const inspection = await this.withConnectedSession(
+      input.channel.webProfileKey,
+      async (adapter) => {
+        const location = await this.openExactGroup(
+          adapter,
+          input.channel.groupDisplayName,
+        );
+        if (location.status !== "GROUP_FOUND") {
+          throw new Error(location.errorCode);
+        }
+        return adapter.inspectExistingDelivery({
+          affiliateUrl: input.affiliateUrl,
+          textSnippet: uniqueSnippet(input.title),
+          mediaExpected: Boolean(input.imageUrl && input.channel.sendImage),
+          sentAfter: options.sentAfter,
+          holdMs: options.holdMs,
+        });
+      },
+      { isFailure: () => false },
+    );
+    return {
+      ...inspection,
+      browserOpened: true,
+      browserClosed: true,
+      lockReleased: true,
+    };
   }
 
   private assertChannelEnabled(channel: WhatsAppWebChannelConfiguration) {

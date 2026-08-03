@@ -130,6 +130,12 @@ export type WhatsAppWebDiagnosticStage =
   | "SEND_STATE_PERSIST_FAILED"
   | "DELIVERY_CONFIRMATION_STARTED"
   | "OUTGOING_MESSAGE_NOT_FOUND"
+  | "OUTGOING_CANDIDATE_FOUND"
+  | "OUTGOING_CONTENT_CONFIRMED"
+  | "OUTGOING_MEDIA_CONFIRMED"
+  | "OUTGOING_PENDING"
+  | "OUTGOING_SENT"
+  | "OUTGOING_ERROR"
   | "OUTGOING_MEDIA_NOT_CONFIRMED"
   | "OUTGOING_TEXT_NOT_CONFIRMED"
   | "OUTGOING_AFFILIATE_URL_NOT_CONFIRMED"
@@ -388,10 +394,17 @@ export type PreparedDraftInspection = {
 
 export type OutgoingMessageConfirmation = {
   confirmed: boolean;
+  candidateFound: boolean;
+  candidateWasNewOrMutated: boolean;
   affiliateUrlFound: boolean;
   affiliateUrlOccurrences: number;
   textSnippetFound: boolean;
   mediaFound: boolean;
+  editorClosed: boolean;
+  pending: boolean;
+  sent: boolean;
+  errorVisible: boolean;
+  timestampCoherent: boolean;
   uploadErrorVisible: boolean;
   stage: WhatsAppWebDiagnosticStage;
 };
@@ -407,6 +420,18 @@ export type WhatsAppWebSendTriggerInspection = {
   topmostConfirmed: boolean;
   trialClickSucceeded: boolean;
   stage: WhatsAppWebDiagnosticStage;
+};
+
+export type WhatsAppWebDeliveryInspection = OutgoingMessageConfirmation & {
+  status: "DELIVERY_MATCH_FOUND" | "DELIVERY_MATCH_NOT_FOUND";
+  baselineCount: number;
+  baselineDigest: string;
+  confirmationTimeoutMs: number;
+  sendCalled: false;
+  groupSearchTriggerFound: boolean;
+  groupSearchInputFound: boolean;
+  groupSearchQueryFilled: boolean;
+  groupSearchExactResultOpened: boolean;
 };
 
 export interface WhatsAppWebPageAdapter {
@@ -443,13 +468,23 @@ export interface WhatsAppWebPageAdapter {
   }): Promise<WhatsAppWebSendTriggerInspection>;
   holdDraftOpen(ms: number): Promise<void>;
   clickSendTrigger(): Promise<void>;
+  captureOutgoingBaseline(): Promise<
+    import("./whatsapp-web-delivery-confirmation").OutgoingMessageBaseline
+  >;
   confirmOutgoingMessage(input: {
     affiliateUrl: string;
     textSnippet: string;
     mediaExpected: boolean;
     sentAfter: Date;
-    outgoingCountBefore: number;
+    baseline: import("./whatsapp-web-delivery-confirmation").OutgoingMessageBaseline;
   }): Promise<OutgoingMessageConfirmation>;
+  inspectExistingDelivery(input: {
+    affiliateUrl: string;
+    textSnippet: string;
+    mediaExpected: boolean;
+    sentAfter: Date;
+    holdMs: number;
+  }): Promise<WhatsAppWebDeliveryInspection>;
   clearDraft(): Promise<WhatsAppWebDraftCleanupResult>;
   isDraftClear(): Promise<boolean>;
   capturePreparedDraft?(path: string): Promise<void>;

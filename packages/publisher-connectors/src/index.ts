@@ -1,5 +1,6 @@
 export * from "./media";
 export * from "./whatsapp-web-page-adapter";
+export * from "./whatsapp-web-delivery-confirmation";
 export * from "./whatsapp-web-layout";
 export * from "./whatsapp-web-publisher";
 export * from "./whatsapp-web-selectors";

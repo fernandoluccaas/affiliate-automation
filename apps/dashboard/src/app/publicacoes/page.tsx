@@ -3,7 +3,10 @@ import { AdminShell } from "@/components/admin-shell";
 import { EmptyState } from "@/components/empty-state";
 import { formatCurrency, formatDateTime, formatPercentage } from "@/lib/format";
 import { publicationTitleSnapshot } from "@/lib/publication-snapshot";
-import { reviewWhatsAppWebDeliveryAction } from "@/lib/actions";
+import {
+  authorizeWhatsAppWebRetryAction,
+  reviewWhatsAppWebDeliveryAction,
+} from "@/lib/actions";
 import { Button } from "@/components/ui/button";
 
 export const dynamic = "force-dynamic";
@@ -65,6 +68,9 @@ export default async function PublicationsPage() {
                     ? (publication.metadata as Record<string, unknown>)
                     : {};
                 const deliveryUncertain = metadata.deliveryUncertain === true;
+                const manualNotDelivered =
+                  metadata.manualDeliveryResolution ===
+                  "MANUALLY_CONFIRMED_NOT_DELIVERED";
 
                 return (
                   <tr key={publication.id} className="border-b last:border-0">
@@ -146,33 +152,93 @@ export default async function PublicationsPage() {
                             E possivel que a mensagem tenha sido enviada.
                             Verifique o grupo antes de tomar qualquer acao.
                           </p>
-                          <div className="flex flex-wrap gap-2">
-                            {[
-                              ["DELIVERED", "Marcar como entregue"],
-                              ["NOT_DELIVERED", "Marcar como nao entregue"],
-                              ["CANCEL_RETRY", "Cancelar nova tentativa"],
-                              ["AUTHORIZE_RETRY", "Autorizar nova tentativa"],
-                            ].map(([decision, label]) => (
-                              <form
-                                action={reviewWhatsAppWebDeliveryAction}
-                                key={decision}
+                          <form
+                            action={reviewWhatsAppWebDeliveryAction}
+                            className="grid gap-2"
+                          >
+                            <input
+                              type="hidden"
+                              name="publicationId"
+                              value={publication.id}
+                            />
+                            <input
+                              name="reason"
+                              maxLength={500}
+                              placeholder="Motivo opcional para auditoria"
+                              className="rounded border px-2 py-1"
+                            />
+                            <label className="flex items-start gap-2">
+                              <input
+                                type="checkbox"
+                                name="confirmed"
+                                value="true"
+                                required
+                              />
+                              <span>
+                                Revisei visualmente o grupo correto e confirmo
+                                esta decisao.
+                              </span>
+                            </label>
+                            <div className="flex flex-wrap gap-2">
+                              <Button
+                                name="decision"
+                                value="DELIVERED"
+                                type="submit"
+                                variant="outline"
                               >
-                                <input
-                                  type="hidden"
-                                  name="publicationId"
-                                  value={publication.id}
-                                />
-                                <input
-                                  type="hidden"
-                                  name="decision"
-                                  value={decision}
-                                />
-                                <Button type="submit" variant="outline">
-                                  {label}
-                                </Button>
-                              </form>
-                            ))}
-                          </div>
+                                Confirmar como entregue
+                              </Button>
+                              <Button
+                                name="decision"
+                                value="NOT_DELIVERED"
+                                type="submit"
+                                variant="outline"
+                              >
+                                Confirmar como nao entregue
+                              </Button>
+                              <Button
+                                name="decision"
+                                value="KEEP_UNCERTAIN"
+                                type="submit"
+                                variant="outline"
+                              >
+                                Manter inconclusiva
+                              </Button>
+                            </div>
+                          </form>
+                        </div>
+                      ) : manualNotDelivered &&
+                        metadata.retryAuthorized !== true ? (
+                        <div className="grid gap-2 rounded border border-red-200 bg-red-50 p-3">
+                          <p>
+                            A entrega foi marcada como nao realizada. Retry
+                            continua bloqueado.
+                          </p>
+                          <form
+                            action={authorizeWhatsAppWebRetryAction}
+                            className="grid gap-2"
+                          >
+                            <input
+                              type="hidden"
+                              name="publicationId"
+                              value={publication.id}
+                            />
+                            <label className="flex items-start gap-2">
+                              <input
+                                type="checkbox"
+                                name="confirmation"
+                                value="AUTHORIZE_ONE_WHATSAPP_WEB_RETRY"
+                                required
+                              />
+                              <span>
+                                Autorizo explicitamente uma unica nova
+                                tentativa.
+                              </span>
+                            </label>
+                            <Button type="submit" variant="outline">
+                              Autorizar retry separado
+                            </Button>
+                          </form>
                         </div>
                       ) : (
                         "-"
