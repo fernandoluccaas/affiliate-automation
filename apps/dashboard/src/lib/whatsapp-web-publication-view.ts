@@ -19,6 +19,12 @@ export type WhatsAppWebPublicationView = {
   authorizationStatus: string | null;
   authorizationExpiresAt: string | null;
   authorizationFingerprint: string | null;
+  authorizationClaimId: string | null;
+  authorizationClaimedAt: string | null;
+  authorizationConsumedAt: string | null;
+  sendClickStartedAt: string | null;
+  sendWasClicked: boolean;
+  sendClickedAt: string | null;
   realSendAuthorized: boolean;
   realSendEligible: boolean;
   dispatchBlockedReason: string | null;
@@ -29,6 +35,7 @@ export type WhatsAppWebPublicationView = {
   retryAuthorized: boolean;
   stage: string | null;
   rootCause: string | null;
+  nextHumanAction: string;
   transitionHistory: Array<{
     from: string;
     to: string;
@@ -93,16 +100,22 @@ export function whatsappWebPublicationView(
   const authorizationValid =
     active &&
     storedState === "AUTHORIZED_FOR_SEND" &&
-    authorizationStatus === "ACTIVE";
+    authorizationStatus === "ACTIVE" &&
+    metadata.preflightCompleted === true &&
+    metadata.preflightFingerprint === queueItem?.fingerprint &&
+    metadata.sendAuthorizationFingerprint === queueItem?.fingerprint &&
+    metadata.sendAuthorizationPublicationId === input.id &&
+    metadata.sendAuthorizationChannelId === queueItem?.channelId;
   const commands = active
     ? [
+        `npm run whatsapp:web:dispatch-status -- --publication-id ${input.id}`,
         `npm run whatsapp:web:inspect-draft -- --publication-id ${input.id} --hold-ms 30000`,
         `npm run whatsapp:web:preflight -- --publication-id ${input.id}`,
         `npm run whatsapp:web:authorize-send -- --publication-id ${input.id} --expires-in-minutes 15`,
         `npm run whatsapp:web:config-check -- --publication-id ${input.id}`,
         ...(authorizationValid
           ? [
-              `npm run whatsapp:web:publish -- --publication-id ${input.id} --confirm-send`,
+              `npm run whatsapp:web:dispatch-authorized -- --publication-id ${input.id} --confirm-send`,
             ]
           : []),
       ]
@@ -132,8 +145,14 @@ export function whatsappWebPublicationView(
     authorizationStatus,
     authorizationExpiresAt: optionalText(metadata.sendAuthorizationExpiresAt),
     authorizationFingerprint: optionalText(metadata.sendAuthorizationFingerprint),
+    authorizationClaimId: optionalText(metadata.sendAuthorizationClaimId)?.slice(0, 12) ?? null,
+    authorizationClaimedAt: optionalText(metadata.sendAuthorizationClaimedAt),
+    authorizationConsumedAt: optionalText(metadata.sendAuthorizationConsumedAt),
+    sendClickStartedAt: optionalText(metadata.sendClickStartedAt),
+    sendWasClicked: metadata.sendWasClicked === true,
+    sendClickedAt: optionalText(metadata.sendClickedAt),
     realSendAuthorized: authorizationValid,
-    realSendEligible: metadata.realSendEligible === true,
+    realSendEligible: authorizationValid,
     dispatchBlockedReason:
       queueItem?.blockingPublicationId
         ? `ACTIVE_PUBLICATION:${queueItem.blockingPublicationId}`
@@ -148,6 +167,14 @@ export function whatsappWebPublicationView(
     retryAuthorized: metadata.retryAuthorized === true,
     stage: optionalText(metadata.stage),
     rootCause: optionalText(metadata.rootCause),
+    nextHumanAction:
+      storedState === "DELIVERY_UNCERTAIN"
+        ? "Revisar a entrega; nenhum retry automatico."
+        : storedState === "SEND_IN_PROGRESS" && !optionalText(metadata.sendClickStartedAt)
+          ? "Inspecionar o claim abandonado; liberar somente sem marcador de clique."
+          : authorizationValid
+            ? "Copiar e executar o comando de dispatch explicitamente no terminal."
+            : "Concluir inspecao, preflight e autorizacao conforme o estado.",
     transitionHistory,
     commands,
   };

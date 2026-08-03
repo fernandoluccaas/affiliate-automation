@@ -170,10 +170,18 @@ Status: implemented.
 ## Phase 5D - Operational queue and unitary authorization
 
 - Added one deterministic active Publication per WhatsApp Web channel and backlog visibility without deleting historical rows.
+
 - Added Redis plus transactional PostgreSQL channel locking so the worker records `ACTIVE_PUBLICATION_EXISTS` instead of accumulating Web Publications.
 - Added controlled inspection/preflight transitions, expiring unitary authorization, atomic claim, revocation, safe cancellation and terminal archive in shared database code.
 - Added queue metrics, sanitized CLI commands and authenticated dashboard controls that never open Chromium.
 - Kept `WHATSAPP_WEB_DRY_RUN=true`; no real send was executed.
+
+## Phase 5E - Controlled authorized WhatsApp dispatch
+
+- Added a single manual dispatch service shared by `dispatch-authorized` and the compatibility `publish` alias.
+- Added pre-side-effect gates, Redis operational serialization, atomic authorization claims with Channel/Publication row locks, click-boundary persistence and fail-safe/uncertain finalization.
+- Added sanitized read-only dispatch status and safe pre-click abandoned-claim release; claims after a click marker remain blocked for manual delivery review.
+- Kept the continuous worker and dashboard free of browser dispatch and kept standard tests on fake publishers only.
 
 ## Phase 5 - Tracking and Attribution
 

@@ -6,6 +6,7 @@ import {
   claimWhatsAppWebSendAuthorization,
   recordWhatsAppWebPreflight,
   recordWhatsAppWebVisualInspection,
+  releaseWhatsAppWebDispatchClaim,
   revokeWhatsAppWebSendAuthorization,
   whatsappWebPublicationFingerprint,
   whatsappWebStoredState,
@@ -300,7 +301,11 @@ describe("WhatsApp Web controlled operations", () => {
         actorId: "publisher",
         now,
       }),
-    ).resolves.toMatchObject({ publicationId: "first" });
+    ).resolves.toMatchObject({
+      publicationId: "first",
+      channelId: "channel-web",
+      claimId: expect.any(String),
+    });
     await expect(
       claimWhatsAppWebSendAuthorization(database.client, {
         publicationId: "first",
@@ -308,6 +313,59 @@ describe("WhatsApp Web controlled operations", () => {
         now,
       }),
     ).rejects.toThrow("WHATSAPP_WEB_SEND_AUTHORIZATION_ALREADY_CONSUMED");
+  });
+
+  it("releases an abandoned claim only before the send marker", async () => {
+    const database = operationalDatabase();
+    await recordWhatsAppWebVisualInspection(database.client, {
+      publicationId: "first",
+      confirmed: true,
+      actorId: "owner",
+      result: { visualDraftInspectionFingerprint: "publisher-fingerprint" },
+      now,
+    });
+    await recordWhatsAppWebPreflight(database.client, {
+      publicationId: "first",
+      ready: true,
+      actorId: "owner",
+      result: { status: "READY_TO_COMMIT_SEND" },
+      now,
+    });
+    await authorizeWhatsAppWebSend(database.client, {
+      publicationId: "first",
+      actorId: "owner",
+      expiresInMinutes: 15,
+      now,
+    });
+    await claimWhatsAppWebSendAuthorization(database.client, {
+      publicationId: "first",
+      actorId: "dispatcher",
+      now,
+    });
+    await expect(
+      releaseWhatsAppWebDispatchClaim(database.client, {
+        publicationId: "first",
+        actorId: "owner",
+        reason: "process ended before browser",
+        now,
+      }),
+    ).resolves.toMatchObject({
+      state: "REAUTHORIZE_REQUIRED",
+      browserOpened: false,
+      sendCalled: false,
+    });
+
+    const metadata = database.publications[0]?.metadata as Record<string, unknown>;
+    metadata.sendAuthorizationStatus = "CLAIMED";
+    metadata.sendClickStartedAt = now.toISOString();
+    await expect(
+      releaseWhatsAppWebDispatchClaim(database.client, {
+        publicationId: "first",
+        actorId: "owner",
+        reason: "unsafe release",
+        now,
+      }),
+    ).rejects.toThrow("WHATSAPP_WEB_DISPATCH_CLAIM_RELEASE_FORBIDDEN_AFTER_CLICK");
   });
 
   it("cancels a waiting Publication idempotently and preserves its snapshot", async () => {

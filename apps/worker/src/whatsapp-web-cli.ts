@@ -4,12 +4,13 @@ import {
   assertWhatsAppWebPreflightEligible,
   authorizeWhatsAppWebSend,
   cancelWhatsAppWebPublication,
-  claimWhatsAppWebSendAuthorization,
+  getWhatsAppWebDispatchStatus,
   getWhatsAppWebQueueStatus,
   prisma,
   Prisma,
   recordWhatsAppWebPreflight,
   recordWhatsAppWebVisualInspection,
+  releaseWhatsAppWebDispatchClaim,
   resolveWhatsAppWebDelivery,
   revokeWhatsAppWebSendAuthorization,
 } from "@affiliate/database";
@@ -26,6 +27,7 @@ import {
   type WhatsAppWebPublicationInput,
   type WhatsAppWebSendStateUpdate,
 } from "@affiliate/publisher-connectors";
+import { dispatchAuthorizedWhatsAppPublication } from "./whatsapp-authorized-dispatch";
 
 function option(name: string) {
   const index = process.argv.indexOf(name);
@@ -326,6 +328,46 @@ async function main() {
     return;
   }
 
+  if (command === "dispatch-status") {
+    const publicationId = option("--publication-id");
+    if (!publicationId) throw new Error("PUBLICATION_ID_REQUIRED");
+    process.stdout.write(
+      `${JSON.stringify(await getWhatsAppWebDispatchStatus(prisma, publicationId))}\n`,
+    );
+    return;
+  }
+
+  if (command === "release-dispatch-claim") {
+    const publicationId = option("--publication-id");
+    const reason = option("--reason")?.trim();
+    if (!publicationId) throw new Error("PUBLICATION_ID_REQUIRED");
+    if (!reason) throw new Error("DISPATCH_CLAIM_RELEASE_REASON_REQUIRED");
+    if (!process.argv.includes("--confirm-release")) {
+      throw new Error("DISPATCH_CLAIM_RELEASE_CONFIRMATION_REQUIRED");
+    }
+    process.stdout.write(
+      `${JSON.stringify(
+        await releaseWhatsAppWebDispatchClaim(prisma, {
+          publicationId,
+          actorId: "LOCAL_REPOSITORY_OWNER_CLI",
+          reason,
+        }),
+      )}\n`,
+    );
+    return;
+  }
+
+  if (command === "dispatch-authorized" || command === "publish") {
+    const publicationId = option("--publication-id");
+    if (!publicationId) throw new Error("PUBLICATION_ID_REQUIRED");
+    const result = await dispatchAuthorizedWhatsAppPublication({
+      publicationId,
+      confirmSend: process.argv.includes("--confirm-send"),
+    });
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    return;
+  }
+
   const localDiagnosticCommand = command === "diagnose" || command === "locate";
   const localDiagnosticKeepOpenOnErrorMs =
     localDiagnosticCommand && runtimeConfig.keepOpenOnError
@@ -618,125 +660,8 @@ async function main() {
     return;
   }
 
-  if (command === "publish") {
-    const publicationId = option("--publication-id");
-    if (!publicationId) throw new Error("PUBLICATION_ID_REQUIRED");
-    const { publication, input } = await publicationInput(publicationId);
-    const confirmSend = process.argv.includes("--confirm-send");
-    const eligibility = validateRealSendEligibility({
-      config: runtimeConfig,
-      channel: input.channel,
-      publication: {
-        status: publication.status,
-        metadata: publication.metadata,
-        messageSnapshot: input.message,
-        imageSnapshot: input.imageUrl,
-      },
-      confirmSend,
-    });
-    if (!eligibility.realSendEligible) {
-      process.stdout.write(
-        `${JSON.stringify({
-          status: "FAILED",
-          errorCode: eligibility.blockingReason,
-          browserOpened: false,
-          mediaPrepared: false,
-          draftCreated: false,
-          sendCalled: false,
-        })}\n`,
-      );
-      return;
-    }
-    await claimWhatsAppWebSendAuthorization(prisma, {
-      publicationId: publication.id,
-      actorId: "LOCAL_REPOSITORY_OWNER_CLI",
-    });
-    const result = await publisher.publish({
-      ...input,
-      confirmSend,
-    });
-    const uncertain = result.status === "DELIVERY_UNCERTAIN";
-    const attemptNumber = await prisma.publicationAttempt.count({
-      where: { publicationId: publication.id },
-    });
-    await prisma.publicationAttempt.create({
-      data: {
-        publicationId: publication.id,
-        attemptNumber: attemptNumber + 1,
-        status: result.status === "PUBLISHED" ? "SUCCESS" : "FAILED",
-        requestPayload: {
-          publicationId: publication.id,
-          channelId: publication.channelId,
-          publicationMode: "WEB_EXPERIMENTAL",
-        },
-        responsePayload: {
-          status: result.status,
-          errorCode: result.errorCode ?? null,
-          stage: result.stage,
-          sendWasClicked: result.sendWasClicked,
-          sendClickStartedAt: result.sendClickStartedAt ?? null,
-          sendClickedAt: result.sendClickedAt ?? null,
-          deliveryUncertain: result.deliveryUncertain,
-        },
-        errorMessage: result.errorCode ?? null,
-      },
-    });
-    const current = await prisma.publication.findUnique({
-      where: { id: publication.id },
-      select: { metadata: true },
-    });
-    const currentMetadata = record(current?.metadata);
-    const deliveryUncertain = Boolean(
-      result.status !== "PUBLISHED" &&
-      (uncertain ||
-        (currentMetadata.deliveryUncertain === true &&
-          typeof currentMetadata.deliveryConfirmedAt !== "string")),
-    );
-    await prisma.publication.update({
-      where: { id: publication.id },
-      data: {
-        status:
-          result.status === "PUBLISHED" ? "PUBLISHED" : "PUBLICATION_FAILED",
-        publishedAt: result.status === "PUBLISHED" ? new Date() : null,
-        errorMessage: deliveryUncertain
-          ? "WHATSAPP_WEB_DELIVERY_UNCERTAIN"
-          : (result.errorCode ?? null),
-        metadata: {
-          ...currentMetadata,
-          ...result.metadata,
-          whatsappWebState:
-            result.status === "PUBLISHED"
-              ? "PUBLISHED"
-              : deliveryUncertain
-                ? "DELIVERY_UNCERTAIN"
-                : "PREFLIGHT_REQUIRED",
-          sendAuthorizationStatus: "CONSUMED",
-          sendAuthorizationConsumedAt: new Date().toISOString(),
-          rootCause: result.rootCause,
-          stage: result.stage,
-          retryAuthorized: false,
-          deliveryUncertain,
-        } as Prisma.InputJsonValue,
-      },
-    });
-    if (
-      result.status === "PUBLISHED" &&
-      getWhatsAppWebRuntimeConfig().autoPauseAfterFirstSuccess
-    ) {
-      await updateChannelOperationalState(publication.channelId, {
-        webAutomationPaused: true,
-        webAutomationPauseReason: "WHATSAPP_WEB_FIRST_SUCCESS_REVIEW_REQUIRED",
-        webLastSuccessAt: new Date().toISOString(),
-      });
-    }
-    process.stdout.write(
-      `${JSON.stringify({ status: result.status, errorCode: result.errorCode })}\n`,
-    );
-    return;
-  }
-
   throw new Error(
-    "USAGE: login|health|diagnose|locate|dry-run|preflight|inspect-layout|inspect-draft|inspect-delivery|resolve-delivery|config-check|queue-status|authorize-send|revoke-send-authorization|cancel-publication|archive-publication|publish",
+    "USAGE: login|health|diagnose|locate|dry-run|preflight|inspect-layout|inspect-draft|inspect-delivery|resolve-delivery|config-check|queue-status|authorize-send|revoke-send-authorization|cancel-publication|archive-publication|dispatch-status|release-dispatch-claim|dispatch-authorized|publish",
   );
 }
 

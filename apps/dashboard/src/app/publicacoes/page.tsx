@@ -108,8 +108,8 @@ export default async function PublicationsPage() {
                 <th className="px-4 py-3">Tentativas</th>
                 <th className="px-4 py-3">Erro</th>
                 <th className="px-4 py-3">ID externo</th>
-                <th className="px-4 py-3">Controle Web</th>
-                <th className="px-4 py-3">Revisao</th>
+                <th className="sticky right-[300px] z-20 bg-[var(--muted)] px-4 py-3">Controle Web</th>
+                <th className="sticky right-0 z-20 bg-[var(--muted)] px-4 py-3">Revisao</th>
               </tr>
             </thead>
             <tbody>
@@ -240,7 +240,7 @@ export default async function PublicationsPage() {
                     <td className="px-4 py-3">
                       {publication.externalId ?? "-"}
                     </td>
-                    <td className="min-w-[360px] px-4 py-3">
+                    <td className="sticky right-[300px] z-10 min-w-[360px] border-l bg-white px-4 py-3 align-top">
                       {webView ? (
                         <details className="rounded border border-amber-200 bg-amber-50/50 p-3">
                           <summary className="cursor-pointer font-medium">
@@ -312,6 +312,21 @@ export default async function PublicationsPage() {
                               {formatDateTime(webView.authorizationExpiresAt)} / fp{" "}
                               {webView.authorizationFingerprint?.slice(0, 12) ?? "-"}
                             </dd>
+                            <dt>Claim</dt>
+                            <dd>
+                              {webView.authorizationClaimId ?? "-"} /{" "}
+                              {formatDateTime(webView.authorizationClaimedAt)}
+                            </dd>
+                            <dt>Autorizacao consumida</dt>
+                            <dd>
+                              {formatDateTime(webView.authorizationConsumedAt)}
+                            </dd>
+                            <dt>Marcador de clique</dt>
+                            <dd>
+                              inicio {formatDateTime(webView.sendClickStartedAt)} /{" "}
+                              clicado {String(webView.sendWasClicked)} /{" "}
+                              {formatDateTime(webView.sendClickedAt)}
+                            </dd>
                             <dt>Envio real</dt>
                             <dd>
                               autorizado: {String(webView.realSendAuthorized)}
@@ -320,6 +335,8 @@ export default async function PublicationsPage() {
                             </dd>
                             <dt>Bloqueio</dt>
                             <dd>{webView.dispatchBlockedReason ?? "-"}</dd>
+                            <dt>Proxima acao humana</dt>
+                            <dd>{webView.nextHumanAction}</dd>
                             <dt>Entrega incerta</dt>
                             <dd>{String(webView.deliveryUncertain)}</dd>
                             <dt>Entrega confirmada</dt>
@@ -518,7 +535,7 @@ export default async function PublicationsPage() {
                         "-"
                       )}
                     </td>
-                    <td className="min-w-[300px] px-4 py-3">
+                    <td className="sticky right-0 z-10 min-w-[300px] border-l bg-white px-4 py-3 align-top">
                       {deliveryUncertain ? (
                         <div className="grid gap-2 rounded border border-amber-300 bg-amber-50 p-3">
                           <p>
