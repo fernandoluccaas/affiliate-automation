@@ -32,9 +32,9 @@ function bool(value: unknown, fallback = false) {
   return typeof value === "boolean" ? value : fallback;
 }
 
-function inspectDraftHoldMs() {
+function inspectionHoldMs(defaultMs: number) {
   const raw = option("--hold-ms");
-  const value = raw === undefined ? 20_000 : Number(raw);
+  const value = raw === undefined ? defaultMs : Number(raw);
   if (!Number.isInteger(value) || value < 5_000 || value > 60_000) {
     throw new Error("WHATSAPP_WEB_INSPECT_DRAFT_HOLD_INVALID");
   }
@@ -57,7 +57,7 @@ async function askVisualDraftConfirmation(timeoutMs: number) {
     };
     const timer = setTimeout(() => finish(false), timeoutMs);
     readline.question(
-      "A imagem e a legenda completa estao visiveis no grupo correto? [s/N] ",
+      "A imagem e toda a legenda estao visiveis no editor de midia do grupo correto? [s/N] ",
       (answer) => finish(/^s(im)?$/i.test(answer.trim())),
     );
   });
@@ -386,11 +386,15 @@ async function main() {
   if (command === "inspect-draft") {
     const publicationId = option("--publication-id");
     if (!publicationId) throw new Error("PUBLICATION_ID_REQUIRED");
-    const holdMs = inspectDraftHoldMs();
+    const holdMs = inspectionHoldMs(20_000);
+    const devtools =
+      process.argv.includes("--devtools") ||
+      process.env.WHATSAPP_WEB_DEVTOOLS === "true";
     const { publication, input } = await publicationInput(publicationId);
     const result = await publisher.inspectDraft(input, {
       holdMs,
       confirmVisualDraft: () => askVisualDraftConfirmation(holdMs),
+      ...(devtools ? { devtools: true } : {}),
     });
     const current = await prisma.publication.findUnique({
       where: { id: publication.id },
@@ -420,6 +424,36 @@ async function main() {
             sendCalled: false,
             draftCleared: result.draftCleared,
           },
+        } as Prisma.InputJsonValue,
+      },
+    });
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    return;
+  }
+
+  if (command === "inspect-layout") {
+    const publicationId = option("--publication-id");
+    if (!publicationId) throw new Error("PUBLICATION_ID_REQUIRED");
+    const holdMs = inspectionHoldMs(30_000);
+    const devtools =
+      process.argv.includes("--devtools") ||
+      process.env.WHATSAPP_WEB_DEVTOOLS === "true";
+    const { publication, input } = await publicationInput(publicationId);
+    const result = await publisher.inspectLayout(input, {
+      holdMs,
+      ...(devtools ? { devtools: true } : {}),
+    });
+    const current = await prisma.publication.findUnique({
+      where: { id: publication.id },
+      select: { metadata: true },
+    });
+    await prisma.publication.update({
+      where: { id: publication.id },
+      data: {
+        metadata: {
+          ...record(current?.metadata),
+          lastMediaLayoutInspectionAt: new Date().toISOString(),
+          lastMediaLayoutInspection: result,
         } as Prisma.InputJsonValue,
       },
     });
@@ -554,7 +588,7 @@ async function main() {
   }
 
   throw new Error(
-    "USAGE: login|health|diagnose|locate|dry-run|preflight|inspect-draft|config-check|publish",
+    "USAGE: login|health|diagnose|locate|dry-run|preflight|inspect-layout|inspect-draft|config-check|publish",
   );
 }
 

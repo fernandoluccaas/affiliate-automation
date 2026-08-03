@@ -80,12 +80,14 @@ export class PlaywrightWhatsAppWebBrowserLauncher implements WhatsAppWebBrowserL
     navigationTimeoutMs: number;
     confirmationTimeoutMs: number;
     slowMoMs?: number;
+    devtools?: boolean;
   }): Promise<BrowserSession> {
     let context: BrowserContext | null = null;
     try {
       const { chromium } = await import("playwright");
       context = await chromium.launchPersistentContext(input.userDataDir, {
-        headless: input.headless,
+        headless: input.devtools ? false : input.headless,
+        ...(input.devtools ? { args: ["--auto-open-devtools-for-tabs"] } : {}),
         slowMo: input.slowMoMs ?? 0,
         viewport: { width: 1280, height: 900 },
       });
@@ -194,6 +196,7 @@ export class WhatsAppWebSessionManager {
     localDiagnostic?: {
       keepOpenOnErrorMs: number;
       isFailure(result: T): boolean;
+      devtools?: boolean;
     },
   ): Promise<T> {
     const safeKey = sanitizeWhatsAppWebProfileKey(profileKey);
@@ -228,6 +231,7 @@ export class WhatsAppWebSessionManager {
         navigationTimeoutMs: this.config.navigationTimeoutMs,
         confirmationTimeoutMs: this.config.confirmationTimeoutMs,
         slowMoMs: this.config.slowMoMs,
+        ...(localDiagnostic?.devtools ? { devtools: true } : {}),
       });
       await session.adapter.navigate();
       if ((await session.adapter.detectAuthenticationState()) !== "CONNECTED") {

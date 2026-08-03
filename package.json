@@ -21,6 +21,7 @@
     "whatsapp:web:dry-run": "npm run whatsapp:web -w apps/worker -- dry-run",
     "whatsapp:web:preflight": "npm run whatsapp:web -w apps/worker -- preflight",
     "whatsapp:web:inspect-draft": "npm run whatsapp:web -w apps/worker -- inspect-draft",
+    "whatsapp:web:inspect-layout": "npm run whatsapp:web -w apps/worker -- inspect-layout",
     "whatsapp:web:config-check": "npm run whatsapp:web -w apps/worker -- config-check",
     "whatsapp:web:publish": "npm run whatsapp:web -w apps/worker -- publish",
     "build": "npm run build --workspaces --if-present",

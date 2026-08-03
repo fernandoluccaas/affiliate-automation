@@ -98,6 +98,10 @@ export type WhatsAppWebDiagnosticStage =
   | "CAPTION_VISIBLE_TEXT_MISSING"
   | "CAPTION_VISIBLE_TEXT_MISMATCH"
   | "CAPTION_HIDDEN_FALSE_POSITIVE"
+  | "CAPTION_TARGET_NOT_RESOLVED"
+  | "CAPTION_TARGET_AMBIGUOUS"
+  | "LAYOUT_INSPECTION_READY"
+  | "VISUAL_DRAFT_REJECTED"
   | "DRAFT_VALIDATION_FAILED"
   | "DRAFT_CLEANUP_FAILED"
   | "PUBLISH_PERMISSION_UNDETERMINED"
@@ -233,6 +237,89 @@ export type WhatsAppWebDraftCleanupResult = {
   discardTriggerFound: boolean;
 };
 
+export type WhatsAppWebLayoutCandidateReason =
+  | "ACTIVE_MEDIA_CAPTION_CANDIDATE"
+  | "NORMAL_CHAT_COMPOSER_BEHIND_OVERLAY"
+  | "EXISTED_BEFORE_MEDIA_EDITOR"
+  | "NOT_SEMANTIC_CAPTION"
+  | "NOT_VISIBLE_OR_EDITABLE"
+  | "OUTSIDE_VIEWPORT"
+  | "NOT_TOPMOST"
+  | "DIFFERENT_STACKING_CONTEXT"
+  | "NOT_ASSOCIATED_WITH_MEDIA_CONTROLS"
+  | "CAPTION_TARGET_AMBIGUOUS";
+
+export type WhatsAppWebLayoutElementDiagnostic = {
+  candidateIndex: number;
+  tagName: string;
+  role: string | null;
+  contentEditable: string | null;
+  ariaHidden: boolean;
+  disabled: boolean;
+  attached: boolean;
+  visible: boolean;
+  editable: boolean;
+  boundingBox: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  } | null;
+  computedStyle: {
+    display: string;
+    visibility: string;
+    opacity: string;
+    position: string;
+    zIndex: string;
+    pointerEvents: string;
+  };
+  relationships: {
+    containsPreview: boolean;
+    containsSendTrigger: boolean;
+    containsCloseTrigger: boolean;
+    containsCaptionCandidate: boolean;
+    commonAncestorDepthWithPreview: number | null;
+    commonAncestorDepthWithSend: number | null;
+    sameTopLevelSurfaceAsPreview: boolean;
+    sameStackingContextAsPreview: boolean;
+    sameStackingContextAsSend: boolean;
+    overlapsPreview: boolean;
+    verticallyAdjacentToPreview: boolean;
+    horizontallyAlignedWithPreview: boolean;
+    insideViewport: boolean;
+    topmostAtCenter: boolean;
+    activeElementOrContainsActiveElement: boolean;
+  };
+  classNameHash: string;
+  dataAttributeNames: string[];
+  captionCandidateExistedBeforePreview: boolean;
+  captionCandidateCreatedAfterPreview: boolean;
+  captionCandidateChangedSurfaceAfterPreview: boolean;
+};
+
+export type WhatsAppWebLayoutCandidateDecision = {
+  index: number;
+  accepted: boolean;
+  reason: WhatsAppWebLayoutCandidateReason;
+};
+
+export type WhatsAppWebMediaLayoutInspection = {
+  status:
+    | "LAYOUT_INSPECTION_READY"
+    | "CAPTION_TARGET_NOT_RESOLVED"
+    | "CAPTION_TARGET_AMBIGUOUS";
+  previewFound: boolean;
+  sendTriggerFound: boolean;
+  sendTriggerCandidateCount: number;
+  closeTriggerFound: boolean;
+  surfaceCandidateCount: number;
+  captionCandidateCount: number;
+  selectedCaptionCandidateIndex: number | null;
+  candidateDecisions: WhatsAppWebLayoutCandidateDecision[];
+  captionCandidates: WhatsAppWebLayoutElementDiagnostic[];
+  sendCalled: false;
+};
+
 export type WhatsAppWebControlResult = {
   found: boolean;
   stage: WhatsAppWebDiagnosticStage;
@@ -336,7 +423,9 @@ export interface WhatsAppWebPageAdapter {
   openGroup(name: string): Promise<void>;
   verifyOpenedGroup(name: string): Promise<boolean>;
   verifyPublishPermission(): Promise<boolean>;
+  captureMediaEditorBaseline(): Promise<void>;
   attachImage(path: string): Promise<WhatsAppWebMediaAttachmentResult>;
+  inspectMediaLayout(): Promise<WhatsAppWebMediaLayoutInspection>;
   fillCaption(input: {
     text: string;
     affiliateUrl: string;
@@ -380,6 +469,7 @@ export interface WhatsAppWebBrowserLauncher {
     navigationTimeoutMs: number;
     confirmationTimeoutMs: number;
     slowMoMs?: number;
+    devtools?: boolean;
   }): Promise<BrowserSession>;
 }
 

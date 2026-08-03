@@ -114,11 +114,31 @@ function adapter(
     openGroup: vi.fn().mockResolvedValue(undefined),
     verifyOpenedGroup: vi.fn().mockResolvedValue(true),
     verifyPublishPermission: vi.fn().mockResolvedValue(true),
+    captureMediaEditorBaseline: vi.fn().mockResolvedValue(undefined),
     attachImage: vi.fn().mockResolvedValue({
       attachStrategyUsed: "SET_INPUT_FILES",
       usedFileChooser: false,
       usedSetInputFiles: true,
       previewDetected: true,
+    }),
+    inspectMediaLayout: vi.fn().mockResolvedValue({
+      status: "LAYOUT_INSPECTION_READY",
+      previewFound: true,
+      sendTriggerFound: true,
+      sendTriggerCandidateCount: 1,
+      closeTriggerFound: true,
+      surfaceCandidateCount: 1,
+      captionCandidateCount: 1,
+      selectedCaptionCandidateIndex: 0,
+      candidateDecisions: [
+        {
+          index: 0,
+          accepted: true,
+          reason: "ACTIVE_MEDIA_CAPTION_CANDIDATE",
+        },
+      ],
+      captionCandidates: [],
+      sendCalled: false,
     }),
     fillCaption: vi.fn().mockResolvedValue({
       captionDetected: true,
@@ -1124,6 +1144,135 @@ describe("WhatsAppGroupsWebPublisher protected send", () => {
     expect(page.holdDraftOpen).toHaveBeenCalledWith(5_000);
     expect(page.clickSendTrigger).not.toHaveBeenCalled();
     expect(page.clearDraft).toHaveBeenCalledOnce();
+  });
+
+  it("inspects layout without filling or sending and always cleans up", async () => {
+    const page = adapter();
+    const result = await new WhatsAppGroupsWebPublisher({
+      config: config(),
+      launcher: launcher(page),
+      profileLock: lock(),
+      prepareImage: vi.fn().mockResolvedValue({
+        bytes: new Uint8Array([1]),
+        contentType: "image/jpeg",
+        filename: "offer.jpg",
+      }),
+    }).inspectLayout(imageInput(), { holdMs: 5_000 });
+
+    expect(result).toMatchObject({
+      status: "LAYOUT_INSPECTION_READY",
+      previewFound: true,
+      browserHeldOpen: true,
+      holdMs: 5_000,
+      sendCalled: false,
+      draftCleared: true,
+    });
+    expect(page.captureMediaEditorBaseline).toHaveBeenCalledOnce();
+    expect(page.fillCaption).not.toHaveBeenCalled();
+    expect(page.holdDraftOpen).toHaveBeenCalledWith(5_000);
+    expect(page.clickSendTrigger).not.toHaveBeenCalled();
+    expect(page.clearDraft).toHaveBeenCalledOnce();
+  });
+
+  it("holds an unresolved layout before cleanup", async () => {
+    const page = adapter({
+      inspectMediaLayout: vi.fn().mockRejectedValue(new Error("layout changed")),
+    });
+    const result = await new WhatsAppGroupsWebPublisher({
+      config: config(),
+      launcher: launcher(page),
+      profileLock: lock(),
+      prepareImage: vi.fn().mockResolvedValue({
+        bytes: new Uint8Array([1]),
+        contentType: "image/jpeg",
+        filename: "offer.jpg",
+      }),
+    }).inspectLayout(imageInput(), { holdMs: 5_000 });
+
+    expect(result).toMatchObject({
+      status: "CAPTION_TARGET_NOT_RESOLVED",
+      previewFound: true,
+      browserHeldOpen: true,
+      sendCalled: false,
+      draftCleared: true,
+    });
+    expect(page.holdDraftOpen).toHaveBeenCalledWith(5_000);
+    expect(page.clearDraft).toHaveBeenCalledOnce();
+  });
+
+  it("enables DevTools only for an explicitly requested inspection", async () => {
+    const page = adapter();
+    const browser = launcher(page);
+    await new WhatsAppGroupsWebPublisher({
+      config: config(),
+      launcher: browser,
+      profileLock: lock(),
+      prepareImage: vi.fn().mockResolvedValue({
+        bytes: new Uint8Array([1]),
+        contentType: "image/jpeg",
+        filename: "offer.jpg",
+      }),
+    }).inspectLayout(imageInput(), { holdMs: 5_000, devtools: true });
+
+    expect(browser.launchPersistent).toHaveBeenCalledWith(
+      expect.objectContaining({ devtools: true }),
+    );
+    expect(page.clickSendTrigger).not.toHaveBeenCalled();
+  });
+
+  it("holds inspect-draft when the caption target is not resolved", async () => {
+    const page = adapter({
+      fillCaption: vi.fn().mockRejectedValue(
+        new WhatsAppWebStageError("CAPTION_TARGET_NOT_RESOLVED", {
+          currentOrigin: "https://web.whatsapp.com",
+        }),
+      ),
+    });
+    const confirmVisualDraft = vi.fn();
+    const result = await new WhatsAppGroupsWebPublisher({
+      config: config(),
+      launcher: launcher(page),
+      profileLock: lock(),
+      prepareImage: vi.fn().mockResolvedValue({
+        bytes: new Uint8Array([1]),
+        contentType: "image/jpeg",
+        filename: "offer.jpg",
+      }),
+    }).inspectDraft(imageInput(), { holdMs: 5_000, confirmVisualDraft });
+
+    expect(result).toMatchObject({
+      status: "VISUAL_LAYOUT_INSPECTION_REQUIRED",
+      stage: "CAPTION_TARGET_NOT_RESOLVED",
+      sendCalled: false,
+      draftCleared: true,
+    });
+    expect(page.holdDraftOpen).toHaveBeenCalledWith(5_000);
+    expect(confirmVisualDraft).not.toHaveBeenCalled();
+    expect(page.clickSendTrigger).not.toHaveBeenCalled();
+  });
+
+  it("does not persist a positive visual result after human rejection", async () => {
+    const page = adapter();
+    const result = await new WhatsAppGroupsWebPublisher({
+      config: config(),
+      launcher: launcher(page),
+      profileLock: lock(),
+      prepareImage: vi.fn().mockResolvedValue({
+        bytes: new Uint8Array([1]),
+        contentType: "image/jpeg",
+        filename: "offer.jpg",
+      }),
+    }).inspectDraft(imageInput(), {
+      holdMs: 5_000,
+      confirmVisualDraft: vi.fn().mockResolvedValue(false),
+    });
+
+    expect(result).toMatchObject({
+      status: "VISUAL_DRAFT_REJECTED",
+      visualDraftInspectionConfirmed: false,
+      sendCalled: false,
+      draftCleared: true,
+    });
   });
 
   it("blocks publish without a current visual draft inspection before browser", async () => {

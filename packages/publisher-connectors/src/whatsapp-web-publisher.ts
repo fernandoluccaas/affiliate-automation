@@ -24,6 +24,7 @@ import type {
   WhatsAppWebDiagnosticStage,
   WhatsAppWebSendTriggerInspection,
   WhatsAppWebStructureDiagnosticResult,
+  WhatsAppWebMediaLayoutInspection,
 } from "./whatsapp-web-types";
 import { WhatsAppWebStageError } from "./whatsapp-web-types";
 
@@ -119,7 +120,11 @@ export type WhatsAppWebPreflightResult = {
 };
 
 export type WhatsAppWebInspectDraftResult = {
-  status: "AWAITING_VISUAL_INSPECTION_COMPLETED" | "FAILED";
+  status:
+    | "AWAITING_VISUAL_INSPECTION_COMPLETED"
+    | "VISUAL_LAYOUT_INSPECTION_REQUIRED"
+    | "VISUAL_DRAFT_REJECTED"
+    | "FAILED";
   captionVisibleTextConfirmed: boolean;
   captionOverlayScoped: boolean;
   captionTopmostConfirmed: boolean;
@@ -135,6 +140,15 @@ export type WhatsAppWebInspectDraftResult = {
   errorCode?: string;
   diagnostics: WhatsAppWebSafeDiagnostics;
 };
+
+export type WhatsAppWebInspectLayoutResult =
+  WhatsAppWebMediaLayoutInspection & {
+    holdMs: number;
+    browserHeldOpen: boolean;
+    draftCleared: boolean;
+    stage: WhatsAppWebDiagnosticStage;
+    errorCode?: string;
+  };
 
 export type WhatsAppWebSendStateUpdate = {
   publicationId: string;
@@ -277,8 +291,13 @@ export interface WhatsAppGroupsWebPublisherContract {
     options: {
       holdMs: number;
       confirmVisualDraft: () => Promise<boolean>;
+      devtools?: boolean;
     },
   ): Promise<WhatsAppWebInspectDraftResult>;
+  inspectLayout(
+    input: WhatsAppWebPublicationInput,
+    options: { holdMs: number; devtools?: boolean },
+  ): Promise<WhatsAppWebInspectLayoutResult>;
   publish(
     input: WhatsAppWebPublicationInput,
   ): Promise<WhatsAppWebPublishResult>;
@@ -893,11 +912,93 @@ export class WhatsAppGroupsWebPublisher implements WhatsAppGroupsWebPublisherCon
     }
   }
 
+  async inspectLayout(
+    input: WhatsAppWebPublicationInput,
+    options: { holdMs: number; devtools?: boolean },
+  ): Promise<WhatsAppWebInspectLayoutResult> {
+    this.assertChannelEnabled(input.channel);
+    if (!this.config.dryRun) throw new Error("WHATSAPP_WEB_DISABLED");
+    if (options.holdMs < 5_000 || options.holdMs > 60_000) {
+      throw new Error("WHATSAPP_WEB_UNEXPECTED_STATE");
+    }
+    validateWhatsAppWebPublication(input);
+    return this.withConnectedSession(
+      input.channel.webProfileKey,
+      async (adapter) => {
+        const location = await this.openExactGroup(
+          adapter,
+          input.channel.groupDisplayName,
+        );
+        if (location.status !== "GROUP_FOUND") {
+          throw new Error(location.errorCode);
+        }
+        const media = await this.prepareMedia(input);
+        if (!media.path) {
+          throw new Error("WHATSAPP_WEB_MEDIA_PREPARATION_FAILED");
+        }
+        let layout: WhatsAppWebMediaLayoutInspection | null = null;
+        let draftCleared = false;
+        let inspectionError: unknown;
+        try {
+          await adapter.captureMediaEditorBaseline();
+          await adapter.attachImage(media.path);
+          try {
+            layout = await adapter.inspectMediaLayout();
+          } catch (error) {
+            inspectionError = error;
+          }
+          await adapter.holdDraftOpen(options.holdMs);
+        } finally {
+          await adapter.clearDraft().catch(() => undefined);
+          draftCleared = await adapter.isDraftClear().catch(() => false);
+          await media.cleanup().catch(() => undefined);
+        }
+        if (inspectionError || !layout) {
+          return {
+            status: "CAPTION_TARGET_NOT_RESOLVED" as const,
+            previewFound: true,
+            sendTriggerFound: false,
+            sendTriggerCandidateCount: 0,
+            closeTriggerFound: false,
+            surfaceCandidateCount: 0,
+            captionCandidateCount: 0,
+            selectedCaptionCandidateIndex: null,
+            candidateDecisions: [],
+            captionCandidates: [],
+            sendCalled: false as const,
+            holdMs: options.holdMs,
+            browserHeldOpen: true,
+            draftCleared,
+            stage: "CAPTION_TARGET_NOT_RESOLVED" as const,
+            errorCode: inspectionError
+              ? errorCode(inspectionError)
+              : "WHATSAPP_WEB_SELECTOR_MISMATCH",
+          };
+        }
+        return {
+          ...layout,
+          holdMs: options.holdMs,
+          browserHeldOpen: true,
+          draftCleared,
+          stage:
+            layout.status === "LAYOUT_INSPECTION_READY"
+              ? "LAYOUT_INSPECTION_READY"
+              : layout.status,
+        };
+      },
+      {
+        isFailure: () => false,
+        ...(options.devtools ? { devtools: true } : {}),
+      },
+    );
+  }
+
   async inspectDraft(
     input: WhatsAppWebPublicationInput,
     options: {
       holdMs: number;
       confirmVisualDraft: () => Promise<boolean>;
+      devtools?: boolean;
     },
   ): Promise<WhatsAppWebInspectDraftResult> {
     const startedAt = Date.now();
@@ -945,18 +1046,22 @@ export class WhatsAppGroupsWebPublisher implements WhatsAppGroupsWebPublisherCon
           const media = await this.prepareMedia(input, diagnostics);
           let operationError: unknown;
           let cleanupError: unknown;
+          let previewOpened = false;
           try {
             try {
-              const prepared = await this.prepareDraft(
-                adapter,
-                input,
-                media.path,
-              );
-              if (prepared.attachment) {
-                Object.assign(diagnostics, prepared.attachment);
-              }
-              if (prepared.caption) {
-                Object.assign(diagnostics, prepared.caption);
+              if (media.path) {
+                await adapter.captureMediaEditorBaseline();
+                const attachment = await adapter.attachImage(media.path);
+                previewOpened = attachment.previewDetected;
+                Object.assign(diagnostics, attachment);
+                const caption = await adapter.fillCaption({
+                  text: input.message,
+                  affiliateUrl: input.affiliateUrl,
+                  textSnippet: uniqueSnippet(input.title),
+                });
+                Object.assign(diagnostics, caption);
+              } else {
+                await adapter.fillText(input.message);
               }
               const trigger = await this.validatePreSend(
                 adapter,
@@ -985,6 +1090,13 @@ export class WhatsAppGroupsWebPublisher implements WhatsAppGroupsWebPublisherCon
               progress.visualDraftInspectionConfirmed = humanConfirmed;
             } catch (error) {
               operationError = error;
+              if (previewOpened) {
+                stage =
+                  error instanceof WhatsAppWebStageError
+                    ? error.stage
+                    : "CAPTION_TARGET_NOT_RESOLVED";
+                await adapter.holdDraftOpen(options.holdMs);
+              }
             }
             try {
               Object.assign(diagnostics, await adapter.clearDraft());
@@ -1004,16 +1116,40 @@ export class WhatsAppGroupsWebPublisher implements WhatsAppGroupsWebPublisherCon
             await media.cleanup().catch(() => undefined);
           }
           if (cleanupError) throw cleanupError;
-          if (operationError) throw operationError;
+          if (operationError) {
+            if (!previewOpened) throw operationError;
+            return {
+              ...progress,
+              status: "VISUAL_LAYOUT_INSPECTION_REQUIRED" as const,
+              stage:
+                stage === "CAPTION_NOT_INSIDE_MEDIA_OVERLAY"
+                  ? ("CAPTION_TARGET_NOT_RESOLVED" as const)
+                  : stage,
+              errorCode: errorCode(operationError),
+              diagnostics: {
+                ...diagnostics,
+                ...(operationError instanceof WhatsAppWebStageError
+                  ? operationError.diagnostics
+                  : {}),
+                durationMs: Date.now() - startedAt,
+              },
+            };
+          }
           return {
             ...progress,
-            status: "AWAITING_VISUAL_INSPECTION_COMPLETED" as const,
+            status: progress.visualDraftInspectionConfirmed
+              ? ("AWAITING_VISUAL_INSPECTION_COMPLETED" as const)
+              : ("VISUAL_DRAFT_REJECTED" as const),
             stage,
             diagnostics: {
               ...diagnostics,
               durationMs: Date.now() - startedAt,
             },
           };
+        },
+        {
+          isFailure: () => false,
+          ...(options.devtools ? { devtools: true } : {}),
         },
       );
     } catch (error) {
@@ -1254,6 +1390,7 @@ export class WhatsAppGroupsWebPublisher implements WhatsAppGroupsWebPublisherCon
     operation: (adapter: WhatsAppWebPageAdapter) => Promise<T>,
     localDiagnostic?: {
       isFailure(result: T): boolean;
+      devtools?: boolean;
     },
   ): Promise<T> {
     return new WhatsAppWebSessionManager(
@@ -1268,6 +1405,7 @@ export class WhatsAppGroupsWebPublisher implements WhatsAppGroupsWebPublisherCon
             keepOpenOnErrorMs:
               this.dependencies.localDiagnosticKeepOpenOnErrorMs ?? 0,
             isFailure: localDiagnostic.isFailure,
+            ...(localDiagnostic.devtools ? { devtools: true } : {}),
           }
         : undefined,
     );
@@ -1506,6 +1644,7 @@ export class WhatsAppGroupsWebPublisher implements WhatsAppGroupsWebPublisherCon
     mediaPath: string | null,
   ) {
     if (mediaPath) {
+      await adapter.captureMediaEditorBaseline();
       const attachment = await adapter.attachImage(mediaPath);
       const caption = await adapter.fillCaption({
         text: input.message,

@@ -16,11 +16,13 @@ import {
   type WhatsAppWebDraftCleanupResult,
   type WhatsAppWebErrorCode,
   type WhatsAppWebMediaAttachmentResult,
+  type WhatsAppWebMediaLayoutInspection,
   type WhatsAppWebPageAdapter,
   type WhatsAppWebSafeDiagnostics,
   type WhatsAppWebSendTriggerInspection,
   type WhatsAppWebStructureDiagnosticResult,
 } from "./whatsapp-web-types";
+import { selectWhatsAppMediaCaptionCandidate } from "./whatsapp-web-layout";
 
 function normalizedText(value: string) {
   return value.replace(/\s+/g, " ").trim();
@@ -84,6 +86,13 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
   private lastLocationDiagnostics: WhatsAppWebSafeDiagnostics | null = null;
   private validatedSendTrigger: Locator | null = null;
   private validatedSendMediaExpected = false;
+  private activeMediaSendTrigger: Locator | null = null;
+  private mediaEditorBaseline: Array<{
+    identity: string;
+    surfaceFingerprint: string;
+  }> = [];
+  private mediaPreviewBaseline: string[] = [];
+  private mediaEditorBaselineCaptured = false;
 
   constructor(
     private readonly page: Page,
@@ -409,6 +418,528 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
       await this.page.waitForTimeout(150);
     } while (Date.now() < deadline);
     throw await this.stageError("COMPOSER_NOT_FOUND");
+  }
+
+  async captureMediaEditorBaseline() {
+    const baseline = await this.page.evaluate(() => {
+      globalThis.eval("globalThis.__name=(target)=>target");
+      const hash = (value: string) => {
+        let result = 5381;
+        for (let index = 0; index < value.length; index += 1) {
+          result = (result * 33) ^ value.charCodeAt(index);
+        }
+        return (result >>> 0).toString(16).padStart(8, "0");
+      };
+      const stackingSurface = (element: Element) => {
+        let current: Element | null = element;
+        while (current && current !== document.documentElement) {
+          const style = getComputedStyle(current);
+          if (
+            current.getAttribute("role") === "dialog" ||
+            current.getAttribute("aria-modal") === "true" ||
+            style.position === "fixed" ||
+            (style.position !== "static" && style.zIndex !== "auto") ||
+            style.transform !== "none"
+          ) {
+            return current;
+          }
+          current = current.parentElement;
+        }
+        return document.body;
+      };
+      const structural = (element: Element) => {
+        const dataNames = Array.from(element.attributes)
+          .map((attribute) => attribute.name)
+          .filter((name) => name.startsWith("data-"))
+          .sort();
+        const label =
+          element.getAttribute("aria-label") ??
+          element.getAttribute("aria-placeholder") ??
+          "";
+        const surface = stackingSurface(element);
+        const identity = [
+          element.tagName.toLowerCase(),
+          element.getAttribute("role") ?? "",
+          element.getAttribute("contenteditable") ?? "",
+          hash(String(element.getAttribute("class") ?? "")),
+          hash(label),
+          dataNames.join(","),
+        ].join("|");
+        return {
+          identity,
+          surfaceFingerprint: [
+            surface.tagName.toLowerCase(),
+            surface.getAttribute("role") ?? "",
+            hash(String(surface.getAttribute("class") ?? "")),
+          ].join("|"),
+        };
+      };
+      const editables = Array.from(
+        document.querySelectorAll("[contenteditable='true']"),
+      )
+        .filter((element) => {
+          const box = element.getBoundingClientRect();
+          const style = getComputedStyle(element);
+          return (
+            box.width > 0 &&
+            box.height > 0 &&
+            style.display !== "none" &&
+            style.visibility !== "hidden"
+          );
+        })
+        .map(structural);
+      const previewFingerprint = (element: Element) => {
+        const box = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return [
+          element.tagName.toLowerCase(),
+          hash(String(element.getAttribute("class") ?? "")),
+          hash(style.backgroundImage),
+          Math.round(box.x / 10),
+          Math.round(box.y / 10),
+          Math.round(box.width / 10),
+          Math.round(box.height / 10),
+        ].join("|");
+      };
+      const previewElements = Array.from(
+        document.querySelectorAll("img, canvas, video, [role='img'], div"),
+      ).filter((element) => {
+        const box = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        const mediaElement =
+          /^(img|canvas|video)$/i.test(element.tagName) ||
+          element.getAttribute("role") === "img" ||
+          style.backgroundImage !== "none";
+        return (
+          mediaElement &&
+          box.width * box.height >= 10_000 &&
+          style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          Number(style.opacity || "1") > 0
+        );
+      });
+      return {
+        editables,
+        previewFingerprints: previewElements.map(previewFingerprint),
+      };
+    });
+    this.mediaEditorBaseline = baseline.editables;
+    this.mediaPreviewBaseline = baseline.previewFingerprints;
+    this.mediaEditorBaselineCaptured = true;
+  }
+
+  async inspectMediaLayout(): Promise<WhatsAppWebMediaLayoutInspection> {
+    const raw = await this.page.evaluate(
+      ({ previewSelectors, baseline, previewBaseline }) => {
+        globalThis.eval("globalThis.__name=(target)=>target");
+        const hash = (value: string) => {
+          let result = 5381;
+          for (let index = 0; index < value.length; index += 1) {
+            result = (result * 33) ^ value.charCodeAt(index);
+          }
+          return (result >>> 0).toString(16).padStart(8, "0");
+        };
+        const visible = (element: Element) => {
+          const box = element.getBoundingClientRect();
+          const style = getComputedStyle(element);
+          return (
+            element.isConnected &&
+            box.width > 0 &&
+            box.height > 0 &&
+            style.display !== "none" &&
+            style.visibility !== "hidden" &&
+            Number(style.opacity || "1") > 0
+          );
+        };
+        const unique = <T extends Element>(elements: T[]) =>
+          Array.from(new Set(elements));
+        const queryAll = (selectors: readonly string[]) =>
+          unique(
+            selectors.flatMap((selector) => {
+              try {
+                return Array.from(document.querySelectorAll(selector));
+              } catch {
+                return [];
+              }
+            }),
+          );
+        const buttonLabel = (element: Element) =>
+          [
+            element.getAttribute("aria-label"),
+            element.getAttribute("title"),
+            element.getAttribute("data-testid"),
+            element.querySelector("[data-icon]")?.getAttribute("data-icon"),
+            element.querySelector("[data-testid]")?.getAttribute("data-testid"),
+          ]
+            .filter(Boolean)
+            .join(" ")
+            .toLocaleLowerCase();
+        const buttonElements = Array.from(
+          document.querySelectorAll("button, [role='button']"),
+        );
+        const buttons = buttonElements.filter(visible);
+        const previewFingerprint = (element: Element) => {
+          const box = element.getBoundingClientRect();
+          const style = getComputedStyle(element);
+          return [
+            element.tagName.toLowerCase(),
+            hash(String(element.getAttribute("class") ?? "")),
+            hash(style.backgroundImage),
+            Math.round(box.x / 10),
+            Math.round(box.y / 10),
+            Math.round(box.width / 10),
+            Math.round(box.height / 10),
+          ].join("|");
+        };
+        const createdVisualMedia = Array.from(
+          document.querySelectorAll("img, canvas, video, [role='img'], div"),
+        ).filter((element) => {
+          const box = element.getBoundingClientRect();
+          const style = getComputedStyle(element);
+          const mediaElement =
+            /^(img|canvas|video)$/i.test(element.tagName) ||
+            element.getAttribute("role") === "img" ||
+            style.backgroundImage !== "none";
+          return (
+            mediaElement &&
+            visible(element) &&
+            box.width * box.height >= 10_000 &&
+            !previewBaseline.includes(previewFingerprint(element))
+          );
+        });
+        const previews = unique([
+          ...queryAll(previewSelectors).filter(visible),
+          ...createdVisualMedia,
+        ]);
+        const preview = previews.sort((left, right) => {
+          const a = left.getBoundingClientRect();
+          const b = right.getBoundingClientRect();
+          return b.width * b.height - a.width * a.height;
+        })[0];
+        const sends = buttons.filter((element) =>
+          /(^|\s)(send|enviar)(\s|$)/i.test(buttonLabel(element)),
+        );
+        const closes = buttons.filter((element) =>
+          /(^|\s)(close|fechar|cerrar|back|voltar|cancel|cancelar|x-viewer)(\s|$)/i.test(
+            buttonLabel(element),
+          ),
+        );
+        const distance = (element: Element, anchor?: Element) => {
+          if (!anchor) return Number.MAX_SAFE_INTEGER;
+          const left = element.getBoundingClientRect();
+          const right = anchor.getBoundingClientRect();
+          return Math.hypot(
+            left.left + left.width / 2 - (right.left + right.width / 2),
+            left.top + left.height / 2 - (right.top + right.height / 2),
+          );
+        };
+        const stackingSurface = (element?: Element) => {
+          let current: Element | null = element ?? null;
+          while (current && current !== document.documentElement) {
+            const style = getComputedStyle(current);
+            if (
+              current.getAttribute("role") === "dialog" ||
+              current.getAttribute("aria-modal") === "true" ||
+              style.position === "fixed" ||
+              (style.position !== "static" && style.zIndex !== "auto") ||
+              style.transform !== "none"
+            ) {
+              return current;
+            }
+            current = current.parentElement;
+          }
+          return document.body;
+        };
+        const topLevelSurface = (element?: Element) => {
+          let current: Element | null = element ?? null;
+          let result: Element = document.body;
+          while (current && current !== document.documentElement) {
+            const style = getComputedStyle(current);
+            if (
+              current.getAttribute("role") === "dialog" ||
+              current.getAttribute("aria-modal") === "true" ||
+              style.position === "fixed"
+            ) {
+              result = current;
+            }
+            current = current.parentElement;
+          }
+          return result;
+        };
+        const topmost = (element: Element) => {
+          const box = element.getBoundingClientRect();
+          const x = box.left + box.width / 2;
+          const y = box.top + box.height / 2;
+          const stack = document.elementsFromPoint(x, y);
+          const hit = stack[0];
+          return Boolean(hit && (hit === element || element.contains(hit)));
+        };
+        const relatedToPreview = (element: Element) =>
+          Boolean(
+            preview &&
+            topmost(element) &&
+            (topLevelSurface(element) === topLevelSurface(preview) ||
+              stackingSurface(element) === stackingSurface(preview)),
+          );
+        const relatedSends = sends.filter(relatedToPreview);
+        const relatedCloses = closes.filter(relatedToPreview);
+        const send =
+          relatedSends.length === 1
+            ? relatedSends.sort(
+                (left, right) =>
+                  distance(left, preview) - distance(right, preview),
+              )[0]
+            : undefined;
+        const close =
+          relatedCloses.length === 1
+            ? relatedCloses.sort(
+                (left, right) =>
+                  distance(left, preview) - distance(right, preview),
+              )[0]
+            : undefined;
+        const ancestorDepth = (left?: Element, right?: Element) => {
+          if (!left || !right) return null;
+          const ancestors = new Map<Element, number>();
+          let current: Element | null = left;
+          let depth = 0;
+          while (current) {
+            ancestors.set(current, depth++);
+            current = current.parentElement;
+          }
+          current = right;
+          depth = 0;
+          while (current) {
+            const leftDepth = ancestors.get(current);
+            if (leftDepth !== undefined) return leftDepth + depth;
+            current = current.parentElement;
+            depth += 1;
+          }
+          return null;
+        };
+        const structural = (element: Element) => {
+          const dataNames = Array.from(element.attributes)
+            .map((attribute) => attribute.name)
+            .filter((name) => name.startsWith("data-"))
+            .sort();
+          const label =
+            element.getAttribute("aria-label") ??
+            element.getAttribute("aria-placeholder") ??
+            "";
+          const surface = stackingSurface(element);
+          return {
+            identity: [
+              element.tagName.toLowerCase(),
+              element.getAttribute("role") ?? "",
+              element.getAttribute("contenteditable") ?? "",
+              hash(String(element.getAttribute("class") ?? "")),
+              hash(label),
+              dataNames.join(","),
+            ].join("|"),
+            surfaceFingerprint: [
+              surface.tagName.toLowerCase(),
+              surface.getAttribute("role") ?? "",
+              hash(String(surface.getAttribute("class") ?? "")),
+            ].join("|"),
+            classNameHash: hash(String(element.getAttribute("class") ?? "")),
+            dataNames,
+            label,
+          };
+        };
+        const editables = Array.from(
+          document.querySelectorAll("[contenteditable='true']"),
+        );
+        const surfaceSet = new Set<Element>();
+        [preview, send, close].filter(Boolean).forEach((anchor) => {
+          surfaceSet.add(stackingSurface(anchor));
+          surfaceSet.add(topLevelSurface(anchor));
+        });
+        const candidates = editables.map((element, candidateIndex) => {
+          const box = element.getBoundingClientRect();
+          const style = getComputedStyle(element);
+          const structure = structural(element);
+          const existedBefore = baseline.some(
+            (entry) => entry.identity === structure.identity,
+          );
+          const changedSurface =
+            existedBefore &&
+            !baseline.some(
+              (entry) =>
+                entry.identity === structure.identity &&
+                entry.surfaceFingerprint === structure.surfaceFingerprint,
+            );
+          const centerX = box.left + box.width / 2;
+          const centerY = box.top + box.height / 2;
+          const insideViewport =
+            centerX >= 0 &&
+            centerY >= 0 &&
+            centerX < window.innerWidth &&
+            centerY < window.innerHeight;
+          const hit = insideViewport
+            ? document.elementsFromPoint(centerX, centerY)[0]
+            : null;
+          const topmost = Boolean(
+            hit && (hit === element || element.contains(hit)),
+          );
+          const previewBox = preview?.getBoundingClientRect();
+          const overlapsPreview = Boolean(
+            previewBox &&
+            box.left < previewBox.right &&
+            box.right > previewBox.left &&
+            box.top < previewBox.bottom &&
+            box.bottom > previewBox.top,
+          );
+          const horizontallyAligned = Boolean(
+            previewBox &&
+            box.left < previewBox.right &&
+            box.right > previewBox.left,
+          );
+          const verticalGap = previewBox
+            ? Math.min(
+                Math.abs(box.top - previewBox.bottom),
+                Math.abs(previewBox.top - box.bottom),
+              )
+            : Number.MAX_SAFE_INTEGER;
+          const semantic = Boolean(
+            /caption|legenda|comentario/i.test(structure.label) ||
+            element.closest("[data-testid='media-caption-input-container']"),
+          );
+          const sameTopLevelPreview = Boolean(
+            preview && topLevelSurface(element) === topLevelSurface(preview),
+          );
+          const sameStackingPreview = Boolean(
+            preview && stackingSurface(element) === stackingSurface(preview),
+          );
+          const sameStackingSend = Boolean(
+            send && stackingSurface(element) === stackingSurface(send),
+          );
+          const sameTopLevelSend = Boolean(
+            send && topLevelSurface(element) === topLevelSurface(send),
+          );
+          const isVisible = visible(element);
+          const editable =
+            element.getAttribute("contenteditable") === "true" &&
+            !element.hasAttribute("disabled");
+          const ariaHidden = Boolean(element.closest("[aria-hidden='true']"));
+          const active = Boolean(
+            document.activeElement === element ||
+            (document.activeElement &&
+              element.contains(document.activeElement)),
+          );
+          return {
+            candidateIndex,
+            evidence: {
+              index: candidateIndex,
+              existedBeforePreview: existedBefore,
+              changedSurfaceAfterPreview: changedSurface,
+              semanticCaption: semantic,
+              visible: isVisible,
+              editable,
+              attached: element.isConnected,
+              ariaHidden,
+              insideViewport,
+              topmostAtCenter: topmost,
+              sameTopLevelSurfaceAsPreview: sameTopLevelPreview,
+              sameStackingContextAsPreview: sameStackingPreview,
+              sameStackingContextAsSend: sameStackingSend,
+              sameTopLevelSurfaceAsSend: sameTopLevelSend,
+              overlapsPreview,
+              verticallyAdjacentToPreview: verticalGap <= 240,
+              horizontallyAlignedWithPreview: horizontallyAligned,
+            },
+            diagnostic: {
+              candidateIndex,
+              tagName: element.tagName.toLowerCase(),
+              role: element.getAttribute("role"),
+              contentEditable: element.getAttribute("contenteditable"),
+              ariaHidden,
+              disabled: element.hasAttribute("disabled"),
+              attached: element.isConnected,
+              visible: isVisible,
+              editable,
+              boundingBox:
+                box.width > 0 && box.height > 0
+                  ? {
+                      x: box.x,
+                      y: box.y,
+                      width: box.width,
+                      height: box.height,
+                    }
+                  : null,
+              computedStyle: {
+                display: style.display,
+                visibility: style.visibility,
+                opacity: style.opacity,
+                position: style.position,
+                zIndex: style.zIndex,
+                pointerEvents: style.pointerEvents,
+              },
+              relationships: {
+                containsPreview: Boolean(preview && element.contains(preview)),
+                containsSendTrigger: Boolean(send && element.contains(send)),
+                containsCloseTrigger: Boolean(close && element.contains(close)),
+                containsCaptionCandidate: true,
+                commonAncestorDepthWithPreview: ancestorDepth(element, preview),
+                commonAncestorDepthWithSend: ancestorDepth(element, send),
+                sameTopLevelSurfaceAsPreview: sameTopLevelPreview,
+                sameStackingContextAsPreview: sameStackingPreview,
+                sameStackingContextAsSend: sameStackingSend,
+                overlapsPreview,
+                verticallyAdjacentToPreview: verticalGap <= 240,
+                horizontallyAlignedWithPreview: horizontallyAligned,
+                insideViewport,
+                topmostAtCenter: topmost,
+                activeElementOrContainsActiveElement: active,
+              },
+              classNameHash: structure.classNameHash,
+              dataAttributeNames: structure.dataNames,
+              captionCandidateExistedBeforePreview: existedBefore,
+              captionCandidateCreatedAfterPreview: !existedBefore,
+              captionCandidateChangedSurfaceAfterPreview: changedSurface,
+            },
+          };
+        });
+        return {
+          previewFound: Boolean(preview),
+          sendTriggerFound: Boolean(send),
+          sendTriggerCandidateCount: relatedSends.length,
+          sendTriggerDomIndex: send ? buttonElements.indexOf(send) : null,
+          closeTriggerFound: Boolean(close),
+          surfaceCandidateCount: surfaceSet.size,
+          candidates,
+        };
+      },
+      {
+        previewSelectors: whatsappWebStableSelectors.mediaPreview.filter(
+          (selector) => !selector.includes("media-caption-input-container"),
+        ),
+        baseline: this.mediaEditorBaseline,
+        previewBaseline: this.mediaPreviewBaseline,
+      },
+    );
+    const selection = selectWhatsAppMediaCaptionCandidate(
+      raw.candidates.map((candidate) => candidate.evidence),
+    );
+    this.activeMediaSendTrigger =
+      raw.sendTriggerDomIndex === null
+        ? null
+        : this.page
+            .locator("button, [role='button']")
+            .nth(raw.sendTriggerDomIndex);
+    return {
+      status: selection.status,
+      previewFound: raw.previewFound,
+      sendTriggerFound: raw.sendTriggerFound,
+      sendTriggerCandidateCount: raw.sendTriggerCandidateCount,
+      closeTriggerFound: raw.closeTriggerFound,
+      surfaceCandidateCount: raw.surfaceCandidateCount,
+      captionCandidateCount: raw.candidates.length,
+      selectedCaptionCandidateIndex: selection.selectedIndex,
+      candidateDecisions: selection.decisions,
+      captionCandidates: raw.candidates.map(
+        (candidate) => candidate.diagnostic,
+      ),
+      sendCalled: false,
+    };
   }
 
   async attachImage(path: string): Promise<WhatsAppWebMediaAttachmentResult> {
@@ -767,8 +1298,34 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
       .locator(whatsappWebStableSelectors.outgoingMessage)
       .count()
       .catch(() => 0);
+    let mediaLayout: WhatsAppWebMediaLayoutInspection | null = null;
+    if (input.mediaExpected && this.mediaEditorBaselineCaptured) {
+      mediaLayout = await this.inspectMediaLayout();
+      if (
+        mediaLayout.sendTriggerCandidateCount !== 1 ||
+        !this.activeMediaSendTrigger
+      ) {
+        return {
+          found: mediaLayout.sendTriggerCandidateCount > 0,
+          visible: false,
+          enabled: false,
+          candidateCount: mediaLayout.sendTriggerCandidateCount,
+          strategiesTried: 1,
+          outgoingCount,
+          boundingBoxPresent: false,
+          topmostConfirmed: false,
+          trialClickSucceeded: false,
+          stage:
+            mediaLayout.sendTriggerCandidateCount > 1
+              ? "SEND_TRIGGER_AMBIGUOUS"
+              : "SEND_TRIGGER_NOT_FOUND",
+        };
+      }
+    }
     const scope = input.mediaExpected
-      ? await this.findActiveMediaOverlay()
+      ? mediaLayout
+        ? this.page.locator("body")
+        : await this.findActiveMediaOverlay()
       : await this.firstVisible([
           this.page.locator("#main footer"),
           this.page.locator("main footer"),
@@ -788,14 +1345,16 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
       };
     }
     let strategiesTried = 0;
-    const strategies = [
-      ...whatsappWebAccessibleAliases.send.map((name) =>
-        scope.getByRole("button", { name, exact: true }),
-      ),
-      ...whatsappWebStableSelectors.mediaSendTrigger.map((selector) =>
-        scope.locator(selector),
-      ),
-    ];
+    const strategies = this.activeMediaSendTrigger
+      ? [this.activeMediaSendTrigger]
+      : [
+          ...whatsappWebAccessibleAliases.send.map((name) =>
+            scope.getByRole("button", { name, exact: true }),
+          ),
+          ...whatsappWebStableSelectors.mediaSendTrigger.map((selector) =>
+            scope.locator(selector),
+          ),
+        ];
     for (const strategy of strategies) {
       strategiesTried += 1;
       const count = await strategy.count().catch(() => 0);
@@ -1468,6 +2027,9 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
     requireActive?: boolean;
     expectedText?: string;
   }): Promise<VisualCaptionTarget> {
+    if (this.mediaEditorBaselineCaptured) {
+      return this.resolveLayoutCaptionTarget(input);
+    }
     const overlay = await this.findActiveMediaOverlay();
     if (!overlay) {
       throw await this.stageError(
@@ -1541,6 +2103,99 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
       }
     }
     throw await this.stageError(lastStage, {}, lastDiagnostics);
+  }
+
+  private async resolveLayoutCaptionTarget(input?: {
+    requireActive?: boolean;
+    expectedText?: string;
+  }): Promise<VisualCaptionTarget> {
+    const layout = await this.inspectMediaLayout();
+    if (layout.status === "CAPTION_TARGET_AMBIGUOUS") {
+      throw await this.stageError(
+        "CAPTION_TARGET_AMBIGUOUS",
+        {},
+        {
+          captionCandidateCount: layout.captionCandidateCount,
+          captionOverlayScoped: false,
+        },
+      );
+    }
+    if (layout.selectedCaptionCandidateIndex === null) {
+      throw await this.stageError(
+        "CAPTION_TARGET_NOT_RESOLVED",
+        {},
+        {
+          captionCandidateCount: layout.captionCandidateCount,
+          previewDetected: layout.previewFound,
+          captionOverlayScoped: false,
+        },
+      );
+    }
+    const candidateDiagnostic = layout.captionCandidates.find(
+      (candidate) =>
+        candidate.candidateIndex === layout.selectedCaptionCandidateIndex,
+    );
+    if (!candidateDiagnostic) {
+      throw await this.stageError("CAPTION_TARGET_NOT_RESOLVED");
+    }
+    const candidate = this.page
+      .locator("[contenteditable='true']")
+      .nth(layout.selectedCaptionCandidateIndex);
+    const active = await this.isActiveEditable(candidate);
+    if (input?.requireActive && !active) {
+      throw await this.stageError(
+        "CAPTION_FOCUS_NOT_CONFIRMED",
+        {},
+        {
+          captionCandidateCount: layout.captionCandidateCount,
+          captionCandidateIndex: candidateDiagnostic.candidateIndex,
+          captionOverlayScoped: true,
+          captionTopmostConfirmed:
+            candidateDiagnostic.relationships.topmostAtCenter,
+          captionActiveElementConfirmed: false,
+        },
+      );
+    }
+    if (input?.expectedText) {
+      const visibleText = await this.readEditableText(candidate);
+      if (
+        visibleText === input.expectedText &&
+        !candidateDiagnostic.relationships.topmostAtCenter
+      ) {
+        throw await this.stageError("CAPTION_HIDDEN_FALSE_POSITIVE");
+      }
+    }
+    return {
+      locator: candidate,
+      overlay: this.page.locator("body"),
+      diagnostics: {
+        currentOrigin: "https://web.whatsapp.com",
+        captionCandidateCount: layout.captionCandidateCount,
+        captionCandidateIndex: candidateDiagnostic.candidateIndex,
+        captionTag: candidateDiagnostic.tagName,
+        captionRole: candidateDiagnostic.role,
+        captionContentEditable: candidateDiagnostic.contentEditable,
+        captionBoundingBoxPresent: Boolean(candidateDiagnostic.boundingBox),
+        ...(candidateDiagnostic.boundingBox
+          ? {
+              captionBoundingBoxWidth: candidateDiagnostic.boundingBox.width,
+              captionBoundingBoxHeight: candidateDiagnostic.boundingBox.height,
+            }
+          : {}),
+        captionInsideMediaOverlay: true,
+        captionTopmostAtCenter:
+          candidateDiagnostic.relationships.topmostAtCenter,
+        captionActiveElementConfirmed: active,
+        captionAttachedBeforeFill: candidateDiagnostic.attached,
+        captionAccessibleTextLength: 0,
+        captionInputFound: true,
+        captionInputVisible: candidateDiagnostic.visible,
+        captionInputEditable: candidateDiagnostic.editable,
+        captionOverlayScoped: true,
+        captionTopmostConfirmed:
+          candidateDiagnostic.relationships.topmostAtCenter,
+      },
+    };
   }
 
   private async inspectCaptionCandidate(
