@@ -167,6 +167,14 @@ Status: implemented.
 - Added `/publicacoes` inspection gates, audit fields and copy-only no-send commands.
 - Preserved Telegram, assisted groups, uncertain-delivery review and explicit CLI confirmation as independent paths.
 
+## Phase 5D - Operational queue and unitary authorization
+
+- Added one deterministic active Publication per WhatsApp Web channel and backlog visibility without deleting historical rows.
+- Added Redis plus transactional PostgreSQL channel locking so the worker records `ACTIVE_PUBLICATION_EXISTS` instead of accumulating Web Publications.
+- Added controlled inspection/preflight transitions, expiring unitary authorization, atomic claim, revocation, safe cancellation and terminal archive in shared database code.
+- Added queue metrics, sanitized CLI commands and authenticated dashboard controls that never open Chromium.
+- Kept `WHATSAPP_WEB_DRY_RUN=true`; no real send was executed.
+
 ## Phase 5 - Tracking and Attribution
 
 - Implement `/go/[slug]` redirects with click tracking and rate limiting.

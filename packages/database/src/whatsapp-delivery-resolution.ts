@@ -176,6 +176,10 @@ export async function authorizeWhatsAppWebRetry(
         scheduledAt: now,
         metadata: {
           ...metadata,
+          whatsappWebState: "PREFLIGHT_REQUIRED",
+          preflightCompleted: false,
+          preflightFingerprint: null,
+          realSendAuthorized: false,
           retryAuthorized: true,
           retryAuthorizedAt: now.toISOString(),
           retryAuthorizedBy: input.actorId,

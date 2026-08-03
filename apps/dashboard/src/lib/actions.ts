@@ -1,10 +1,14 @@
 "use server";
 
 import {
+  archiveWhatsAppWebPublication,
   Prisma,
   authorizeWhatsAppWebRetry,
+  authorizeWhatsAppWebSend,
+  cancelWhatsAppWebPublication,
   prisma,
   resolveWhatsAppWebDelivery,
+  revokeWhatsAppWebSendAuthorization,
 } from "@affiliate/database";
 import {
   MessageGenerationService,
@@ -497,6 +501,71 @@ export async function authorizeWhatsAppWebRetryAction(formData: FormData) {
   await authorizeWhatsAppWebRetry(prisma, {
     publicationId,
     actorId: user.id,
+  });
+  revalidatePath("/publicacoes");
+}
+
+export async function authorizeWhatsAppWebSendAction(formData: FormData) {
+  const user = await requireSession();
+  const publicationId = formData.get("publicationId")?.toString();
+  const confirmed =
+    formData.get("confirmation") === "AUTHORIZE_ONE_WHATSAPP_WEB_SEND";
+  const expiresInMinutes = Number(formData.get("expiresInMinutes") ?? 15);
+  if (!publicationId || !confirmed) throw new Error("Confirmacao invalida.");
+  await authorizeWhatsAppWebSend(prisma, {
+    publicationId,
+    actorId: user.id,
+    expiresInMinutes,
+  });
+  revalidatePath("/publicacoes");
+}
+
+export async function revokeWhatsAppWebSendAuthorizationAction(
+  formData: FormData,
+) {
+  const user = await requireSession();
+  const publicationId = formData.get("publicationId")?.toString();
+  const reason = formData.get("reason")?.toString().trim();
+  const confirmed = formData.get("confirmed") === "true";
+  if (!publicationId || !reason || !confirmed) {
+    throw new Error("Revogacao invalida.");
+  }
+  await revokeWhatsAppWebSendAuthorization(prisma, {
+    publicationId,
+    actorId: user.id,
+    reason,
+  });
+  revalidatePath("/publicacoes");
+}
+
+export async function cancelWhatsAppWebPublicationAction(formData: FormData) {
+  const user = await requireSession();
+  const publicationId = formData.get("publicationId")?.toString();
+  const reason = formData.get("reason")?.toString().trim();
+  const confirmed = formData.get("confirmed") === "true";
+  if (!publicationId || !reason || !confirmed) {
+    throw new Error("Cancelamento invalido.");
+  }
+  await cancelWhatsAppWebPublication(prisma, {
+    publicationId,
+    actorId: user.id,
+    reason,
+  });
+  revalidatePath("/publicacoes");
+}
+
+export async function archiveWhatsAppWebPublicationAction(formData: FormData) {
+  const user = await requireSession();
+  const publicationId = formData.get("publicationId")?.toString();
+  const reason = formData.get("reason")?.toString().trim();
+  const confirmed = formData.get("confirmed") === "true";
+  if (!publicationId || !reason || !confirmed) {
+    throw new Error("Arquivamento invalido.");
+  }
+  await archiveWhatsAppWebPublication(prisma, {
+    publicationId,
+    actorId: user.id,
+    reason,
   });
   revalidatePath("/publicacoes");
 }

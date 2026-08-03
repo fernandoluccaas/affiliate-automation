@@ -58,6 +58,11 @@ npm run whatsapp:web:inspect-draft -- --publication-id <PUBLICATION_ID> --hold-m
 npm run whatsapp:web:inspect-delivery -- --publication-id <PUBLICATION_ID> --hold-ms 20000
 npm run whatsapp:web:resolve-delivery -- --publication-id <PUBLICATION_ID> --delivered --confirm-delivered --reason "Confirmada visualmente"
 npm run whatsapp:web:config-check -- --publication-id <PUBLICATION_ID>
+npm run whatsapp:web:queue-status -- --channel-id <CHANNEL_ID>
+npm run whatsapp:web:authorize-send -- --publication-id <PUBLICATION_ID> --expires-in-minutes 15
+npm run whatsapp:web:revoke-send-authorization -- --publication-id <PUBLICATION_ID> --reason "motivo"
+npm run whatsapp:web:cancel-publication -- --publication-id <PUBLICATION_ID> --reason "motivo"
+npm run whatsapp:web:archive-publication -- --publication-id <PUBLICATION_ID> --reason "motivo"
 npm run whatsapp:web:publish -- --publication-id <PUBLICATION_ID> --confirm-send
 ```
 
@@ -74,6 +79,10 @@ Preflight is the final safe check while `WHATSAPP_WEB_DRY_RUN=true`. It resolves
 `inspect-draft` performs the same safe preparation and validation, keeps the browser and Redis lock for 5–60 seconds (20 seconds by default), and asks whether the complete image and caption are visibly correct. If preview opens but no caption target is confirmed, it does not fill any candidate and still holds for local inspection, returning `VISUAL_LAYOUT_INSPECTION_REQUIRED`. It never clicks Send. A negative human answer returns `VISUAL_DRAFT_REJECTED`; a positive answer stores only a timestamp and fingerprint over channel configuration plus hashed message/image snapshot identities. Any changed channel, message or image invalidates it. During this experimental phase, a current human-confirmed visual fingerprint is an additional real-send prerequisite; absence returns `WHATSAPP_WEB_VISUAL_DRAFT_INSPECTION_REQUIRED` before media, lock or browser.
 
 `config-check` is a read-only, sanitized eligibility check. It does not acquire media, the profile lock or open Chromium, and reports the effective global dry-run flags, channel authorization state, dry-run fingerprint validity, Publication eligibility and one specific blocking reason. It never returns the group name, profile path, message, URL or session data. The publish command performs the same check before every side effect; for example, `WHATSAPP_WEB_DRY_RUN=true` returns `WHATSAPP_WEB_REAL_SEND_DISABLED_BY_DRY_RUN` with `browserOpened=false`.
+
+The Phase 5D operational queue allows exactly one active non-terminal Publication per Web channel. Existing later rows are shown as `BLOCKED_BY_ACTIVE_PUBLICATION`; they are neither modified nor failed. Ordering is deterministic (`plannedAt`, `createdAt`, ID), and unresolved `DELIVERY_UNCERTAIN` blocks the channel. Planning is protected by Redis and a database row lock, so concurrent workers cannot create two active rows. Queue/control command output contains IDs, counts and states only.
+
+Positive `inspect-draft` and `preflight` results advance only the active item and persist fingerprints without content or session secrets. `authorize-send` creates one expiring, revocable authorization bound to the exact Publication/channel/fingerprint; repeated authorization is idempotent. The future publish path refuses missing, expired, revoked, consumed or mismatched authorization before browser launch and atomically moves a valid authorization to `CLAIMED`. Dashboard control actions perform database transitions only and never instantiate Playwright.
 
 For a confirmed real execution, metadata records `sendClickStartedAt` before invoking the click and `sendWasClicked`/`sendClickedAt` immediately after it returns. A failure or crash after initiation is never treated as a safe retry: the Publication is blocked as `DELIVERY_UNCERTAIN` until explicit review and authorization. The pre-click baseline now contains only structural hashes, order, media type and delivery state for visible outgoing messages. Confirmation recognizes both a new element and an optimistic element whose fingerprint/state changed, reconstructs only the candidate's own rendered text and links, and requires the affiliate URL, unique title snippet, expected media, coherent order/timestamp and no pending/error state. Full message content and URLs are not persisted in diagnostics.
 

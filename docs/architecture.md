@@ -14,6 +14,8 @@ Phase 2B adds the publication and tracking loop. The worker selects active compa
 
 Phase 5C separates Web planning from browser execution. The shared scheduler persists a `WEB_EXPERIMENTAL` Publication independently for each channel and Offer version, including immutable snapshots and explicit inspection/preflight gates. The normal worker dispatch stage always defers those rows and cannot instantiate the Playwright publisher. Only the explicit local WhatsApp CLI owns browser execution. Planning decisions and aggregate created/existing/executed/deferred/failed counters are stored in sanitized `AutomationRun.metrics`.
 
+Phase 5D adds a channel-scoped operational queue over existing Publication metadata. Queue order is `plannedAt`, `createdAt`, then ID; terminal items are preserved but excluded. An unresolved `DELIVERY_UNCERTAIN` takes precedence and blocks promotion. Worker planning uses `whatsapp:web:planning:{channelId}` plus a transactional PostgreSQL row lock on `Channel`, then repeats the non-terminal check before insert. Visual inspection, preflight, authorization, revocation, claim, cancellation and archive share the same database service. A send authorization belongs to one Publication/channel/fingerprint, expires, is single-use and is claimed atomically before the browser can open.
+
 Phase 4 runs that flow continuously with independent discovery, publication,
 retry and maintenance clocks. The publication scheduler chooses at most one
 Offer per Channel in a cadence, while the same Offer version may create one
