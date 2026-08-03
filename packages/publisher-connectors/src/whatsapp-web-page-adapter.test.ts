@@ -14,6 +14,16 @@ type FakeNode = {
   text?: string;
   title?: string;
   attached?: boolean;
+  tag?: string;
+  role?: string | null;
+  contentEditable?: string | null;
+  ariaHidden?: boolean;
+  insideOverlay?: boolean;
+  topmost?: boolean;
+  boundingBox?: { x: number; y: number; width: number; height: number } | null;
+  accessibleText?: string;
+  trialError?: string;
+  focusable?: boolean;
   onClick?: () => void;
   onFill?: (value: string) => void;
   onSetInputFiles?: (path: string) => void;
@@ -55,11 +65,20 @@ class FakeLocator {
   async isEditable() {
     return this.node()?.editable ?? false;
   }
-  async click() {
+  async click(options?: { trial?: boolean }) {
+    if (options?.trial && this.node()?.trialError) {
+      throw new Error(this.node()?.trialError);
+    }
+    if (options?.trial) return;
     this.page.clicks.push(this.key);
+    if (this.node()?.editable && this.node()?.focusable !== false)
+      this.page.activeNode = this.node() ?? null;
     this.node()?.onClick?.();
   }
-  async focus() {}
+  async focus() {
+    if (this.node()?.focusable !== false)
+      this.page.activeNode = this.node() ?? null;
+  }
   async fill(value: string) {
     this.page.fills.push({ key: this.key, value });
     this.node()?.onFill?.(value);
@@ -67,6 +86,11 @@ class FakeLocator {
   async getAttribute(name: string) {
     if (name === "title") return this.node()?.title ?? null;
     if (name === "lang") return this.node()?.text ?? null;
+    if (name === "role") return this.node()?.role ?? null;
+    if (name === "contenteditable") return this.node()?.contentEditable ?? null;
+    if (name === "aria-hidden") return this.node()?.ariaHidden ? "true" : null;
+    if (name === "aria-label" || name === "aria-placeholder")
+      return this.node()?.accessibleText ?? null;
     return null;
   }
   async innerText() {
@@ -88,15 +112,53 @@ class FakeLocator {
     );
   }
   locator(selector: string) {
+    if (selector.startsWith("xpath=ancestor")) {
+      return new FakeLocator(this.page, "css:[data-testid='media-editor']");
+    }
     return new FakeLocator(this.page, `${this.key}>>css:${selector}`);
   }
   async waitFor() {}
   async screenshot() {}
+  async boundingBox() {
+    if (this.node()?.boundingBox === null) return null;
+    return (
+      this.node()?.boundingBox ??
+      (this.node()?.visible ? { x: 10, y: 10, width: 200, height: 40 } : null)
+    );
+  }
+  async evaluate(_fn: unknown, argument?: { _node?: FakeNode }) {
+    const source = String(_fn);
+    const node = this.node();
+    if (source.includes("root.contains")) {
+      return argument?._node?.insideOverlay !== false;
+    }
+    if (source.includes("document.activeElement")) {
+      return this.page.activeNode === node;
+    }
+    if (source.includes("elementFromPoint")) return node?.topmost !== false;
+    return undefined;
+  }
   async elementHandle() {
     const node = this.node();
     if (!node) return null;
     return {
-      evaluate: async () => node.attached !== false,
+      _node: node,
+      evaluate: async (fn: unknown) => {
+        const source = String(fn);
+        if (source.includes("tagName")) {
+          return {
+            attached: node.attached !== false,
+            tag: node.tag ?? "div",
+            role: node.role ?? "textbox",
+            contentEditable: node.contentEditable ?? "true",
+            ariaHidden: node.ariaHidden ?? false,
+            active: this.page.activeNode === node,
+            accessibleTextLength: node.accessibleText?.length ?? 0,
+          };
+        }
+        if (source.includes("elementFromPoint")) return node.topmost !== false;
+        return node.attached !== false;
+      },
       dispose: async () => undefined,
     };
   }
@@ -111,10 +173,26 @@ class FakePage {
   readonly clicks: string[] = [];
   readonly fills: Array<{ key: string; value: string }> = [];
   readonly files: Array<{ strategy: "chooser" | "input"; path: string }> = [];
+  readonly insertions: string[] = [];
   readonly fileChoosers: Array<null | {
     setFiles(path: string): Promise<void>;
   }> = [];
   onWait?: () => void;
+  activeNode: FakeNode | null = null;
+  readonly keyboard = {
+    press: async (key: string) => {
+      if (key === "Backspace" && this.activeNode) {
+        this.activeNode.text = "";
+        this.activeNode.onFill?.("");
+      }
+    },
+    insertText: async (value: string) => {
+      if (!this.activeNode) return;
+      this.insertions.push(value);
+      this.activeNode.text = value;
+      this.activeNode.onFill?.(value);
+    },
+  };
 
   add(key: string, ...nodes: FakeNode[]) {
     this.nodes.set(key, nodes);
@@ -493,7 +571,7 @@ describe("PlaywrightWhatsAppWebPageAdapter media draft", () => {
     });
   });
 
-  it("preserves CAPTION_INPUT_NOT_FOUND", async () => {
+  it("preserves CAPTION_NOT_INSIDE_MEDIA_OVERLAY", async () => {
     await expect(
       adapter(pageWithShell(), 10).fillCaption({
         text: "draft https://meli.la/abc",
@@ -501,7 +579,7 @@ describe("PlaywrightWhatsAppWebPageAdapter media draft", () => {
         textSnippet: "draft",
       }),
     ).rejects.toMatchObject({
-      stage: "CAPTION_INPUT_NOT_FOUND",
+      stage: "CAPTION_NOT_INSIDE_MEDIA_OVERLAY",
       errorCode: "WHATSAPP_WEB_DRAFT_VALIDATION_FAILED",
     });
   });
@@ -509,9 +587,18 @@ describe("PlaywrightWhatsAppWebPageAdapter media draft", () => {
 
 describe("PlaywrightWhatsAppWebPageAdapter media send trigger", () => {
   function mediaEditorPage() {
-    return pageWithShell().add("css:[data-testid='media-editor']", {
-      visible: true,
-    });
+    return pageWithShell()
+      .add("css:[data-testid='media-editor']", {
+        visible: true,
+      })
+      .add("css:[data-testid='media-preview']", { visible: true })
+      .add(
+        "css:[data-testid='media-editor']>>css:[data-testid='media-preview']",
+        { visible: true },
+      )
+      .add("css:[data-testid='media-editor']>>role:button:Close:true", {
+        visible: true,
+      });
   }
 
   it.each(["Enviar", "Send"])(
@@ -549,6 +636,34 @@ describe("PlaywrightWhatsAppWebPageAdapter media send trigger", () => {
     await expect(
       adapter(page).inspectSendTrigger({ mediaExpected: true }),
     ).resolves.toMatchObject({ found: true, strategiesTried: 3 });
+  });
+
+  it("reports a send trigger intercepted during trial click", async () => {
+    const page = mediaEditorPage().add(
+      "css:[data-testid='media-editor']>>role:button:Enviar:true",
+      {
+        visible: true,
+        enabled: true,
+        trialError: "another element intercepts pointer events",
+      },
+    );
+    await expect(
+      adapter(page).inspectSendTrigger({ mediaExpected: true }),
+    ).resolves.toMatchObject({
+      stage: "SEND_TRIGGER_INTERCEPTED",
+      trialClickSucceeded: false,
+    });
+    expect(page.clicks).toEqual([]);
+  });
+
+  it("rejects a send trigger that is not topmost", async () => {
+    const page = mediaEditorPage().add(
+      "css:[data-testid='media-editor']>>role:button:Enviar:true",
+      { visible: true, enabled: true, topmost: false },
+    );
+    await expect(
+      adapter(page).inspectSendTrigger({ mediaExpected: true }),
+    ).resolves.toMatchObject({ stage: "SEND_TRIGGER_NOT_TOPMOST" });
   });
 
   it.each([
@@ -590,21 +705,15 @@ describe("PlaywrightWhatsAppWebPageAdapter media send trigger", () => {
     ]);
   });
 
-  it("accepts a named page candidate only with a current media-editor ancestor", async () => {
-    const page = mediaEditorPage()
-      .add("role:button:Enviar:true", { visible: true, enabled: true })
-      .add(
-        "role:button:Enviar:true>>css:xpath=ancestor::*[.//*[@contenteditable='true'] and (.//*[@data-testid='media-caption-input-container'] or .//*[@data-testid='media-preview'] or @role='dialog' or @aria-modal='true')][1]",
-        { visible: true },
-      );
+  it("rejects a named page candidate outside the current media overlay", async () => {
+    const page = mediaEditorPage().add("role:button:Enviar:true", {
+      visible: true,
+      enabled: true,
+    });
 
     await expect(
       adapter(page).inspectSendTrigger({ mediaExpected: true }),
-    ).resolves.toMatchObject({
-      found: true,
-      candidateCount: 1,
-      stage: "READY_TO_COMMIT_SEND",
-    });
+    ).resolves.toMatchObject({ stage: "SEND_TRIGGER_NOT_FOUND" });
   });
 });
 
@@ -625,6 +734,16 @@ describe("PlaywrightWhatsAppWebPageAdapter stable media caption", () => {
     return pageWithShell()
       .add("css:[data-testid='media-editor']", { visible: true })
       .add("css:[data-testid='media-preview']", { visible: true })
+      .add(
+        "css:[data-testid='media-editor']>>css:[data-testid='media-preview']",
+        { visible: true },
+      )
+      .add("css:[data-testid='media-editor']>>role:button:Send:true", {
+        visible: true,
+      })
+      .add("css:[data-testid='media-editor']>>role:button:Close:true", {
+        visible: true,
+      })
       .add(captionKey, node);
   }
 
@@ -643,7 +762,7 @@ describe("PlaywrightWhatsAppWebPageAdapter stable media caption", () => {
     });
   });
 
-  it("uses a semantic caption sibling when the preview is not its ancestor", async () => {
+  it("rejects a semantic caption outside the active media overlay", async () => {
     const node: FakeNode = {
       visible: true,
       enabled: true,
@@ -654,16 +773,13 @@ describe("PlaywrightWhatsAppWebPageAdapter stable media caption", () => {
       node.text = value;
     };
     const page = pageWithShell()
+      .add("css:[data-testid='media-editor']", { visible: true })
       .add("css:[data-testid='media-preview']", { visible: true })
       .add("role:textbox:Adicionar uma legenda:false", node);
 
     await expect(
       adapter(page, 200).fillCaption(captionInput),
-    ).resolves.toMatchObject({
-      captionFillAttempts: 1,
-      captionStable: true,
-      affiliateUrlOccurrenceCount: 1,
-    });
+    ).rejects.toMatchObject({ stage: "CAPTION_VISUAL_TARGET_NOT_CONFIRMED" });
   });
 
   it("refills once when WhatsApp recreates the caption input", async () => {
@@ -712,7 +828,7 @@ describe("PlaywrightWhatsAppWebPageAdapter stable media caption", () => {
 
     await expect(
       adapter(page, 500).fillCaption(captionInput),
-    ).rejects.toMatchObject({ stage: "CAPTION_CONTENT_LOST" });
+    ).rejects.toMatchObject({ stage: "CAPTION_VISIBLE_TEXT_MISSING" });
   });
 
   it("reports CAPTION_CONTENT_MISMATCH for a persistent partial caption", async () => {
@@ -722,7 +838,7 @@ describe("PlaywrightWhatsAppWebPageAdapter stable media caption", () => {
     };
     await expect(
       adapter(stableCaptionPage(node), 500).fillCaption(captionInput),
-    ).rejects.toMatchObject({ stage: "CAPTION_CONTENT_MISMATCH" });
+    ).rejects.toMatchObject({ stage: "CAPTION_VISIBLE_TEXT_MISMATCH" });
   });
 
   it("reports CAPTION_CONTENT_MISMATCH when the URL is duplicated", async () => {
@@ -732,12 +848,113 @@ describe("PlaywrightWhatsAppWebPageAdapter stable media caption", () => {
     };
     await expect(
       adapter(stableCaptionPage(node), 500).fillCaption(captionInput),
-    ).rejects.toMatchObject({ stage: "CAPTION_CONTENT_MISMATCH" });
+    ).rejects.toMatchObject({ stage: "CAPTION_VISIBLE_TEXT_MISMATCH" });
+  });
+
+  it("rejects a caption candidate with a zero-area bounding box", async () => {
+    const node: FakeNode = { boundingBox: null };
+    await expect(
+      adapter(stableCaptionPage(node), 200).fillCaption(captionInput),
+    ).rejects.toMatchObject({
+      stage: "CAPTION_VISUAL_TARGET_NOT_CONFIRMED",
+    });
+  });
+
+  it("rejects a caption candidate covered at its center", async () => {
+    const node: FakeNode = { topmost: false };
+    await expect(
+      adapter(stableCaptionPage(node), 200).fillCaption(captionInput),
+    ).rejects.toMatchObject({ stage: "CAPTION_NOT_TOPMOST" });
+  });
+
+  it("rejects a caption whose active element cannot be confirmed", async () => {
+    const node: FakeNode = { focusable: false };
+    await expect(
+      adapter(stableCaptionPage(node), 200).fillCaption(captionInput),
+    ).rejects.toMatchObject({ stage: "CAPTION_FOCUS_NOT_CONFIRMED" });
+  });
+
+  it("inserts the exact contenteditable snapshot with keyboard.insertText", async () => {
+    const node: FakeNode = {};
+    const page = stableCaptionPage(node);
+    const exact = {
+      ...captionInput,
+      text: "*Oferta*\nAção com emoji 🔥\nhttps://meli.la/abc",
+      textSnippet: "Ação com emoji",
+    };
+    node.onFill = (value) => {
+      node.text = value;
+    };
+    await adapter(page, 200).fillCaption(exact);
+    expect(page.insertions).toEqual([exact.text]);
+  });
+
+  it("rejects hidden snapshot text when the visible caption is empty", async () => {
+    const hidden: FakeNode = {
+      visible: false,
+      editable: true,
+      text: captionInput.text,
+      topmost: false,
+    };
+    const visible: FakeNode = {
+      visible: true,
+      editable: true,
+      text: "",
+    };
+    const page = stableCaptionPage(visible).add(captionKey, hidden, visible);
+    page.activeNode = visible;
+    await expect(
+      adapter(page).inspectPreparedDraft({
+        affiliateUrl: captionInput.affiliateUrl,
+        textSnippet: captionInput.textSnippet,
+        expectedText: captionInput.text,
+        mediaExpected: true,
+      }),
+    ).rejects.toMatchObject({ stage: "CAPTION_HIDDEN_FALSE_POSITIVE" });
+  });
+
+  it("does not accept snapshot text from the normal composer behind the overlay", async () => {
+    const visible: FakeNode = {
+      visible: true,
+      editable: true,
+      text: "",
+    };
+    const page = stableCaptionPage(visible).add(
+      "css:#main footer [contenteditable='true']",
+      { visible: true, editable: true, text: captionInput.text },
+    );
+    page.activeNode = visible;
+    await expect(
+      adapter(page).inspectPreparedDraft({
+        affiliateUrl: captionInput.affiliateUrl,
+        textSnippet: captionInput.textSnippet,
+        expectedText: captionInput.text,
+        mediaExpected: true,
+      }),
+    ).rejects.toMatchObject({ stage: "CAPTION_VISIBLE_TEXT_MISSING" });
+  });
+
+  it("rejects equal visible length with different content", async () => {
+    const visible: FakeNode = {
+      visible: true,
+      editable: true,
+      text: captionInput.text.replace("Produto", "Produtx"),
+    };
+    const page = stableCaptionPage(visible);
+    page.activeNode = visible;
+    await expect(
+      adapter(page).inspectPreparedDraft({
+        affiliateUrl: captionInput.affiliateUrl,
+        textSnippet: captionInput.textSnippet,
+        expectedText: captionInput.text,
+        mediaExpected: true,
+      }),
+    ).rejects.toMatchObject({ stage: "CAPTION_VISIBLE_TEXT_MISMATCH" });
   });
 });
 
-describe("PlaywrightWhatsAppWebPageAdapter logical draft text", () => {
-  it("uses the editable lexical text instead of duplicated container text", async () => {
+describe("PlaywrightWhatsAppWebPageAdapter visible draft text", () => {
+  it("rejects hidden lexical text when the visible editable text differs", async () => {
     const page = pageWithShell()
       .add("css:[data-testid='media-editor']", { visible: true })
       .add(
@@ -754,6 +971,10 @@ describe("PlaywrightWhatsAppWebPageAdapter logical draft text", () => {
       )
       .add("css:[data-testid='media-preview']", { visible: true });
 
+    page.activeNode =
+      page.nodes.get(
+        "css:[data-testid='media-editor']>>role:textbox:Add a caption:false",
+      )?.[0] ?? null;
     await expect(
       adapter(page).inspectPreparedDraft({
         affiliateUrl: "https://meli.la/abc",
@@ -761,9 +982,6 @@ describe("PlaywrightWhatsAppWebPageAdapter logical draft text", () => {
         expectedText: "Oferta https://meli.la/abc",
         mediaExpected: true,
       }),
-    ).resolves.toMatchObject({
-      affiliateUrlFound: true,
-      affiliateUrlOccurrences: 1,
-    });
+    ).rejects.toMatchObject({ stage: "CAPTION_VISIBLE_TEXT_MISMATCH" });
   });
 });

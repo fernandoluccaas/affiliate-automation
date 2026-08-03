@@ -1,4 +1,4 @@
-import type { Locator, Page } from "playwright";
+import type { ElementHandle, Locator, Page } from "playwright";
 import {
   WHATSAPP_WEB_URL,
   whatsappWebAccessibleAliases,
@@ -24,6 +24,10 @@ import {
 
 function normalizedText(value: string) {
   return value.replace(/\s+/g, " ").trim();
+}
+
+function normalizedEditableText(value: string) {
+  return value.replace(/\r\n?/g, "\n").replace(/\u00a0/g, " ");
 }
 
 function errorCodeForDiagnosticStage(
@@ -57,14 +61,7 @@ function errorCodeForDiagnosticStage(
   if (stage.startsWith("SEND_TRIGGER_") || stage === "SEND_CLICK_FAILED") {
     return "WHATSAPP_WEB_SEND_TRIGGER_FAILED";
   }
-  if (
-    stage === "CAPTION_INPUT_NOT_FOUND" ||
-    stage === "CAPTION_NOT_EDITABLE" ||
-    stage === "CAPTION_INPUT_RECREATED" ||
-    stage === "CAPTION_CONTENT_LOST" ||
-    stage === "CAPTION_CONTENT_MISMATCH" ||
-    stage === "DRAFT_VALIDATION_FAILED"
-  ) {
+  if (stage.startsWith("CAPTION_") || stage === "DRAFT_VALIDATION_FAILED") {
     return "WHATSAPP_WEB_DRAFT_VALIDATION_FAILED";
   }
   return "WHATSAPP_WEB_SELECTOR_MISMATCH";
@@ -75,11 +72,18 @@ type LocatedControl = WhatsAppWebControlResult & {
   matched?: boolean;
 };
 
+type VisualCaptionTarget = {
+  locator: Locator;
+  overlay: Locator;
+  diagnostics: WhatsAppWebSafeDiagnostics;
+};
+
 export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter {
   private globalSearchInput: Locator | null = null;
   private exactGroupResult: Locator | null = null;
   private lastLocationDiagnostics: WhatsAppWebSafeDiagnostics | null = null;
   private validatedSendTrigger: Locator | null = null;
+  private validatedSendMediaExpected = false;
 
   constructor(
     private readonly page: Page,
@@ -503,140 +507,131 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
     textSnippet: string;
   }) {
     await this.waitForStableMediaEditor();
-    const expected = normalizedText(input.text);
-    let lastStage: WhatsAppWebDiagnosticStage = "CAPTION_INPUT_NOT_FOUND";
-    let observedLength = 0;
+    const expected = normalizedEditableText(input.text);
+    let lastError: WhatsAppWebStageError | null = null;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
-      const caption = await this.findCaptionInput();
-      if (!caption) {
-        lastStage = "CAPTION_INPUT_NOT_FOUND";
-        await this.page.waitForTimeout(200);
-        continue;
-      }
-      const visible = await caption.isVisible().catch(() => false);
-      const editable = await caption.isEditable().catch(() => false);
-      if (!visible || !editable) {
-        lastStage = "CAPTION_NOT_EDITABLE";
-        if (attempt < 2) {
-          await this.page.waitForTimeout(200);
-          continue;
-        }
-        throw await this.stageError(
-          lastStage,
-          {},
-          {
-            captionDetected: true,
-            captionInputFound: true,
-            captionInputVisible: visible,
-            captionInputEditable: editable,
-            captionFillAttempts: attempt,
-            captionStable: false,
-            captionLengthExpected: expected.length,
-            captionLengthObserved: 0,
-          },
-        );
-      }
+      let originalElement: ElementHandle<HTMLElement | SVGElement> | null =
+        null;
       try {
-        const originalElement = await caption.elementHandle();
-        await caption.focus();
-        await caption.fill("");
-        await caption.fill(input.text);
-        await this.page.waitForTimeout(250);
-        const stillAttached = originalElement
+        const target = await this.resolveVisibleCaptionTarget();
+        originalElement = await target.locator.elementHandle();
+        const attachedBeforeFill = originalElement
           ? await originalElement
               .evaluate((element) => element.isConnected)
               .catch(() => false)
           : false;
-        await originalElement?.dispose().catch(() => undefined);
-        const currentCaption = await this.findCaptionInput();
-        const observed = currentCaption
-          ? await this.readEditableText(currentCaption)
-          : "";
-        observedLength = observed.length;
-        const affiliateUrlOccurrenceCount =
-          observed.split(input.affiliateUrl).length - 1;
-        const titleSnippetConfirmed = observed.includes(
-          normalizedText(input.textSnippet),
-        );
-
-        if (!stillAttached) {
-          lastStage = "CAPTION_INPUT_RECREATED";
-        } else if (!observed) {
-          lastStage = "CAPTION_CONTENT_LOST";
-        } else if (
-          observed !== expected ||
-          affiliateUrlOccurrenceCount !== 1 ||
-          !titleSnippetConfirmed
-        ) {
-          lastStage = "CAPTION_CONTENT_MISMATCH";
-        } else {
-          await this.page.waitForTimeout(250);
-          const stableCaption = await this.findCaptionInput();
-          const stableText = stableCaption
-            ? await this.readEditableText(stableCaption)
-            : "";
-          const stableAffiliateUrlOccurrenceCount =
-            stableText.split(input.affiliateUrl).length - 1;
-          if (
-            stableText === expected &&
-            stableAffiliateUrlOccurrenceCount === 1 &&
-            stableText.includes(normalizedText(input.textSnippet))
-          ) {
-            return {
-              captionDetected: true as const,
-              captionInputFound: true as const,
-              captionInputVisible: true as const,
-              captionInputEditable: true as const,
+        await target.locator.click();
+        await target.locator.focus();
+        const focused = await this.isActiveEditable(target.locator);
+        if (!focused) {
+          throw await this.stageError(
+            "CAPTION_FOCUS_NOT_CONFIRMED",
+            {},
+            {
+              ...target.diagnostics,
               captionFillAttempts: attempt,
-              captionStable: true as const,
-              captionLengthExpected: expected.length,
-              captionLengthObserved: expected.length,
-              affiliateUrlOccurrenceCount: stableAffiliateUrlOccurrenceCount,
-              titleSnippetConfirmed: true as const,
-            };
-          }
-          lastStage = stableText
-            ? "CAPTION_CONTENT_MISMATCH"
-            : "CAPTION_CONTENT_LOST";
-          observedLength = stableText.length;
+              captionAttachedBeforeFill: attachedBeforeFill,
+              captionActiveElementConfirmed: false,
+            },
+          );
         }
-      } catch {
-        lastStage = "CAPTION_NOT_EDITABLE";
-        if (attempt < 2) continue;
-        throw await this.stageError(
-          lastStage,
-          {},
-          {
-            captionDetected: true,
-            captionInputFound: true,
-            captionInputVisible: true,
-            captionInputEditable: true,
-            captionFillAttempts: attempt,
-            captionStable: false,
-            captionLengthExpected: expected.length,
-            captionLengthObserved: 0,
-          },
-        );
+        await this.page.keyboard.press("Control+A");
+        await this.page.keyboard.press("Backspace");
+        await this.page.keyboard.insertText(input.text);
+        await this.page.waitForTimeout(250);
+        const attachedAfterFill = originalElement
+          ? await originalElement
+              .evaluate((element) => element.isConnected)
+              .catch(() => false)
+          : false;
+        if (!attachedAfterFill) {
+          throw await this.stageError(
+            "CAPTION_INPUT_RECREATED",
+            {},
+            {
+              ...target.diagnostics,
+              captionFillAttempts: attempt,
+              captionAttachedBeforeFill: attachedBeforeFill,
+              captionAttachedAfterFill: false,
+              captionReResolvedAfterFill: true,
+            },
+          );
+        }
+        const observationOne = await this.observeVisibleCaption({
+          expected,
+          affiliateUrl: input.affiliateUrl,
+          textSnippet: input.textSnippet,
+          requireActive: true,
+        });
+        await this.page.waitForTimeout(300);
+        const observationTwo = await this.observeVisibleCaption({
+          expected,
+          affiliateUrl: input.affiliateUrl,
+          textSnippet: input.textSnippet,
+          requireActive: true,
+        });
+        if (
+          !observationOne.exact ||
+          !observationTwo.exact ||
+          observationOne.textLength !== observationTwo.textLength ||
+          observationTwo.affiliateUrlOccurrenceCount !== 1 ||
+          !observationTwo.titleSnippetConfirmed
+        ) {
+          const stage: WhatsAppWebDiagnosticStage =
+            observationTwo.textLength === 0
+              ? "CAPTION_VISIBLE_TEXT_MISSING"
+              : "CAPTION_VISIBLE_TEXT_MISMATCH";
+          throw await this.stageError(
+            stage,
+            {},
+            {
+              ...observationTwo.target.diagnostics,
+              captionFillAttempts: attempt,
+              captionAttachedBeforeFill: attachedBeforeFill,
+              captionAttachedAfterFill: attachedAfterFill,
+              captionReResolvedAfterFill: true,
+              captionStable: false,
+              captionLengthExpected: expected.length,
+              captionLengthObserved: observationTwo.textLength,
+            },
+          );
+        }
+        return {
+          ...observationTwo.target.diagnostics,
+          captionDetected: true as const,
+          captionInputFound: true as const,
+          captionInputVisible: true as const,
+          captionInputEditable: true as const,
+          captionFillAttempts: attempt,
+          captionStable: true as const,
+          captionLengthExpected: expected.length,
+          captionLengthObserved: observationTwo.textLength,
+          affiliateUrlOccurrenceCount:
+            observationTwo.affiliateUrlOccurrenceCount,
+          titleSnippetConfirmed: true as const,
+          captionVisibleTextConfirmed: true as const,
+          captionOverlayScoped: true as const,
+          captionTopmostConfirmed: true as const,
+          captionActiveElementConfirmed: true as const,
+          captionExactSnapshotConfirmed: true as const,
+          captionAttachedBeforeFill: attachedBeforeFill,
+          captionAttachedAfterFill: attachedAfterFill,
+          captionReResolvedAfterFill: true,
+          captionVisibleTextLength: observationTwo.textLength,
+        };
+      } catch (error) {
+        lastError =
+          error instanceof WhatsAppWebStageError
+            ? error
+            : await this.stageError("CAPTION_VISUAL_TARGET_NOT_CONFIRMED", {});
+        if (attempt < 2) await this.page.waitForTimeout(200);
+      } finally {
+        await originalElement?.dispose().catch(() => undefined);
       }
-
-      if (attempt < 2) await this.page.waitForTimeout(200);
     }
-
-    throw await this.stageError(
-      lastStage,
-      {},
-      {
-        captionDetected: true,
-        captionInputFound: lastStage !== "CAPTION_INPUT_NOT_FOUND",
-        captionInputVisible: lastStage !== "CAPTION_INPUT_NOT_FOUND",
-        captionInputEditable:
-          lastStage !== "CAPTION_INPUT_NOT_FOUND" &&
-          lastStage !== "CAPTION_NOT_EDITABLE",
-        captionFillAttempts: 2,
-        captionStable: false,
-        captionLengthExpected: expected.length,
-        captionLengthObserved: observedLength,
-      },
+    throw (
+      lastError ??
+      (await this.stageError("CAPTION_VISUAL_TARGET_NOT_CONFIRMED", {}))
     );
   }
 
@@ -653,10 +648,63 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
     expectedText: string;
     mediaExpected: boolean;
   }): Promise<PreparedDraftInspection> {
-    const draftControl = input.mediaExpected
-      ? await this.findCaptionInput()
-      : (await this.findWritableComposer()).locator;
-    const text = draftControl ? await this.readEditableText(draftControl) : "";
+    const expectedText = normalizedEditableText(input.expectedText);
+    let text = "";
+    let visualDiagnostics: WhatsAppWebSafeDiagnostics = {
+      currentOrigin: "https://web.whatsapp.com",
+      captionVisibleTextConfirmed: !input.mediaExpected,
+      captionOverlayScoped: !input.mediaExpected,
+      captionTopmostConfirmed: !input.mediaExpected,
+      captionActiveElementConfirmed: !input.mediaExpected,
+      captionExactSnapshotConfirmed: false,
+    };
+    if (input.mediaExpected) {
+      const first = await this.observeVisibleCaption({
+        expected: expectedText,
+        affiliateUrl: input.affiliateUrl,
+        textSnippet: input.textSnippet,
+        requireActive: true,
+      });
+      await this.page.waitForTimeout(300);
+      const second = await this.observeVisibleCaption({
+        expected: expectedText,
+        affiliateUrl: input.affiliateUrl,
+        textSnippet: input.textSnippet,
+        requireActive: true,
+      });
+      if (!first.exact || !second.exact) {
+        const stage: WhatsAppWebDiagnosticStage =
+          second.textLength === 0
+            ? "CAPTION_VISIBLE_TEXT_MISSING"
+            : "CAPTION_VISIBLE_TEXT_MISMATCH";
+        throw await this.stageError(
+          stage,
+          {},
+          {
+            ...second.target.diagnostics,
+            captionVisibleTextLength: second.textLength,
+            captionVisibleTextConfirmed: false,
+            captionExactSnapshotConfirmed: false,
+            captionLengthExpected: expectedText.length,
+            captionLengthObserved: second.textLength,
+          },
+        );
+      }
+      text = second.text;
+      visualDiagnostics = {
+        ...second.target.diagnostics,
+        captionVisibleTextConfirmed: first.exact && second.exact,
+        captionOverlayScoped: true,
+        captionTopmostConfirmed: true,
+        captionActiveElementConfirmed: true,
+        captionExactSnapshotConfirmed: first.exact && second.exact,
+        captionVisibleTextLength: second.textLength,
+      };
+    } else {
+      const composer = (await this.findWritableComposer()).locator;
+      text = composer ? await this.readEditableText(composer) : "";
+      visualDiagnostics.captionExactSnapshotConfirmed = text === expectedText;
+    }
     const mediaFound = Boolean(
       await this.firstVisible(
         whatsappWebStableSelectors.mediaPreview.map((selector) =>
@@ -664,7 +712,6 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
         ),
       ),
     );
-    const expectedText = normalizedText(input.expectedText);
     const expectedSnapshotFound = text === expectedText;
     const affiliateUrlOccurrences = text.split(input.affiliateUrl).length - 1;
     const mediaSurface = await this.visibleMediaSurface();
@@ -699,6 +746,16 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
       captionLengthObserved: expectedSnapshotFound
         ? expectedText.length
         : text.length,
+      captionVisibleTextConfirmed:
+        visualDiagnostics.captionVisibleTextConfirmed === true,
+      captionOverlayScoped: visualDiagnostics.captionOverlayScoped === true,
+      captionTopmostConfirmed:
+        visualDiagnostics.captionTopmostConfirmed === true,
+      captionActiveElementConfirmed:
+        visualDiagnostics.captionActiveElementConfirmed === true,
+      captionExactSnapshotConfirmed:
+        visualDiagnostics.captionExactSnapshotConfirmed === true,
+      diagnostics: visualDiagnostics,
     };
   }
 
@@ -706,19 +763,17 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
     mediaExpected: boolean;
   }): Promise<WhatsAppWebSendTriggerInspection> {
     this.validatedSendTrigger = null;
-    const scopes = input.mediaExpected
-      ? await this.visibleMediaSurfaces()
-      : [
-          await this.firstVisible([
-            this.page.locator("#main footer"),
-            this.page.locator("main footer"),
-          ]),
-        ].filter((value): value is Locator => value !== null);
     const outgoingCount = await this.page
       .locator(whatsappWebStableSelectors.outgoingMessage)
       .count()
       .catch(() => 0);
-    if (scopes.length === 0) {
+    const scope = input.mediaExpected
+      ? await this.findActiveMediaOverlay()
+      : await this.firstVisible([
+          this.page.locator("#main footer"),
+          this.page.locator("main footer"),
+        ]);
+    if (!scope) {
       return {
         found: false,
         visible: false,
@@ -726,120 +781,74 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
         candidateCount: 0,
         strategiesTried: 0,
         outgoingCount,
+        boundingBoxPresent: false,
+        topmostConfirmed: false,
+        trialClickSucceeded: false,
         stage: "SEND_TRIGGER_NOT_FOUND",
       };
     }
-
     let strategiesTried = 0;
-    for (const scope of scopes) {
-      const strategies = [
-        ...whatsappWebAccessibleAliases.send.map((name) =>
-          scope.getByRole("button", { name, exact: true }),
-        ),
-        ...whatsappWebStableSelectors.mediaSendTrigger.map((selector) =>
-          scope.locator(selector),
-        ),
-      ];
-      for (const strategy of strategies) {
-        strategiesTried += 1;
-        const count = await strategy.count().catch(() => 0);
-        if (count === 0) continue;
-        if (count !== 1) {
-          return {
-            found: true,
-            visible: false,
-            enabled: false,
-            candidateCount: count,
-            strategiesTried,
-            outgoingCount,
-            stage: "SEND_TRIGGER_AMBIGUOUS",
-          };
-        }
-        const candidate = strategy.first();
-        const visible = await candidate.isVisible().catch(() => false);
-        const enabled = await candidate.isEnabled().catch(() => false);
-        if (!visible) {
-          return {
-            found: true,
-            visible,
-            enabled,
-            candidateCount: 1,
-            strategiesTried,
-            outgoingCount,
-            stage: "SEND_TRIGGER_NOT_VISIBLE",
-          };
-        }
-        if (!enabled) {
-          return {
-            found: true,
-            visible,
-            enabled,
-            candidateCount: 1,
-            strategiesTried,
-            outgoingCount,
-            stage: "SEND_TRIGGER_DISABLED",
-          };
-        }
-        this.validatedSendTrigger = candidate;
+    const strategies = [
+      ...whatsappWebAccessibleAliases.send.map((name) =>
+        scope.getByRole("button", { name, exact: true }),
+      ),
+      ...whatsappWebStableSelectors.mediaSendTrigger.map((selector) =>
+        scope.locator(selector),
+      ),
+    ];
+    for (const strategy of strategies) {
+      strategiesTried += 1;
+      const count = await strategy.count().catch(() => 0);
+      if (count === 0) continue;
+      if (count !== 1) {
         return {
           found: true,
-          visible: true,
-          enabled: true,
+          visible: false,
+          enabled: false,
+          candidateCount: count,
+          strategiesTried,
+          outgoingCount,
+          boundingBoxPresent: false,
+          topmostConfirmed: false,
+          trialClickSucceeded: false,
+          stage: "SEND_TRIGGER_AMBIGUOUS",
+        };
+      }
+      const candidate = strategy.first();
+      const visual = await this.inspectActionableElement(candidate, scope);
+      if (!visual.attached) {
+        return {
+          found: true,
+          visible: visual.visible,
+          enabled: visual.enabled,
           candidateCount: 1,
           strategiesTried,
           outgoingCount,
-          stage: "READY_TO_COMMIT_SEND",
+          boundingBoxPresent: visual.boundingBoxPresent,
+          topmostConfirmed: visual.topmost,
+          trialClickSucceeded: false,
+          stage: "SEND_TRIGGER_STALE",
         };
       }
-    }
-    if (input.mediaExpected) {
-      const editorBoundStrategies = [
-        ...whatsappWebAccessibleAliases.send.map((name) =>
-          this.page.getByRole("button", { name, exact: true }),
-        ),
-        ...whatsappWebStableSelectors.mediaSendTrigger.map((selector) =>
-          this.page.locator(selector),
-        ),
-      ];
-      for (const strategy of editorBoundStrategies) {
-        strategiesTried += 1;
-        const count = await strategy.count().catch(() => 0);
-        const candidates: Locator[] = [];
-        for (let index = 0; index < count; index += 1) {
-          const candidate = strategy.nth(index);
-          if (await this.isInsideCurrentMediaEditor(candidate)) {
-            candidates.push(candidate);
-          }
-        }
-        if (candidates.length === 0) continue;
-        if (candidates.length !== 1) {
-          return {
-            found: true,
-            visible: false,
-            enabled: false,
-            candidateCount: candidates.length,
-            strategiesTried,
-            outgoingCount,
-            stage: "SEND_TRIGGER_AMBIGUOUS",
-          };
-        }
-        const candidate = candidates[0]!;
-        const visible = await candidate.isVisible().catch(() => false);
-        const enabled = await candidate.isEnabled().catch(() => false);
-        if (!visible || !enabled) {
-          return {
-            found: true,
-            visible,
-            enabled,
-            candidateCount: 1,
-            strategiesTried,
-            outgoingCount,
-            stage: visible
+      if (!visual.visible || !visual.enabled || !visual.boundingBoxPresent) {
+        return {
+          found: true,
+          visible: visual.visible,
+          enabled: visual.enabled,
+          candidateCount: 1,
+          strategiesTried,
+          outgoingCount,
+          boundingBoxPresent: visual.boundingBoxPresent,
+          topmostConfirmed: visual.topmost,
+          trialClickSucceeded: false,
+          stage: !visual.visible
+            ? "SEND_TRIGGER_NOT_VISIBLE"
+            : !visual.enabled
               ? "SEND_TRIGGER_DISABLED"
-              : "SEND_TRIGGER_NOT_VISIBLE",
-          };
-        }
-        this.validatedSendTrigger = candidate;
+              : "SEND_TRIGGER_NOT_INTERACTABLE",
+        };
+      }
+      if (!visual.topmost) {
         return {
           found: true,
           visible: true,
@@ -847,9 +856,47 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
           candidateCount: 1,
           strategiesTried,
           outgoingCount,
-          stage: "READY_TO_COMMIT_SEND",
+          boundingBoxPresent: true,
+          topmostConfirmed: false,
+          trialClickSucceeded: false,
+          stage: "SEND_TRIGGER_NOT_TOPMOST",
         };
       }
+      try {
+        await candidate.click({ trial: true });
+      } catch (error) {
+        const intercepted = /intercept|receives pointer events/i.test(
+          error instanceof Error ? error.message : "",
+        );
+        return {
+          found: true,
+          visible: true,
+          enabled: true,
+          candidateCount: 1,
+          strategiesTried,
+          outgoingCount,
+          boundingBoxPresent: true,
+          topmostConfirmed: true,
+          trialClickSucceeded: false,
+          stage: intercepted
+            ? "SEND_TRIGGER_INTERCEPTED"
+            : "SEND_TRIGGER_TRIAL_FAILED",
+        };
+      }
+      this.validatedSendTrigger = candidate;
+      this.validatedSendMediaExpected = input.mediaExpected;
+      return {
+        found: true,
+        visible: true,
+        enabled: true,
+        candidateCount: 1,
+        strategiesTried,
+        outgoingCount,
+        boundingBoxPresent: true,
+        topmostConfirmed: true,
+        trialClickSucceeded: true,
+        stage: "READY_TO_COMMIT_SEND",
+      };
     }
     return {
       found: false,
@@ -858,22 +905,37 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
       candidateCount: 0,
       strategiesTried,
       outgoingCount,
+      boundingBoxPresent: false,
+      topmostConfirmed: false,
+      trialClickSucceeded: false,
       stage: "SEND_TRIGGER_NOT_FOUND",
     };
   }
 
   async clickSendTrigger() {
-    const button = this.validatedSendTrigger;
-    if (!button) {
+    if (!this.validatedSendTrigger) {
       throw await this.stageError("SEND_TRIGGER_NOT_INTERACTABLE", {});
     }
-    const visible = await button.isVisible().catch(() => false);
-    const enabled = await button.isEnabled().catch(() => false);
-    if (!visible || !enabled) {
+    const refreshed = await this.inspectSendTrigger({
+      mediaExpected: this.validatedSendMediaExpected,
+    });
+    const button = this.validatedSendTrigger;
+    if (
+      !button ||
+      !refreshed.trialClickSucceeded ||
+      !refreshed.topmostConfirmed
+    ) {
       throw await this.stageError(
-        visible ? "SEND_TRIGGER_DISABLED" : "SEND_TRIGGER_NOT_VISIBLE",
+        refreshed.stage,
         {},
-        { candidateCount: 1, visible, enabled },
+        {
+          candidateCount: refreshed.candidateCount,
+          visible: refreshed.visible,
+          enabled: refreshed.enabled,
+          sendTriggerBoundingBoxPresent: refreshed.boundingBoxPresent,
+          sendTriggerTopmostConfirmed: refreshed.topmostConfirmed,
+          sendTriggerTrialSucceeded: refreshed.trialClickSucceeded,
+        },
       );
     }
     try {
@@ -889,6 +951,10 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
         },
       );
     }
+  }
+
+  async holdDraftOpen(ms: number) {
+    await this.page.waitForTimeout(ms);
   }
 
   async confirmOutgoingMessage(input: {
@@ -987,10 +1053,7 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
         await this.page.waitForTimeout(250);
       }
     }
-    const composer = await this.findWritableComposer();
-    if (composer.found && composer.locator) {
-      await composer.locator.fill("").catch(() => undefined);
-    }
+    await this.clearNormalComposer();
     return { closeTriggerFound, escapeUsed, discardTriggerFound };
   }
 
@@ -1004,11 +1067,13 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
       await this.findCaptionInputInMediaSurface(),
     );
     const discardTriggerVisible = Boolean(await this.findDiscardTrigger());
-    const composer = await this.findWritableComposer();
+    const composer = await this.findNormalComposer();
     const normalComposerEmpty =
       !composer.found ||
       !composer.locator ||
-      normalizedText(await composer.locator.innerText().catch(() => "")) === "";
+      normalizedEditableText(
+        await composer.locator.innerText().catch(() => ""),
+      ).trim() === "";
     throw await this.stageError(
       "DRAFT_CLEANUP_FAILED",
       {},
@@ -1025,11 +1090,39 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
       return false;
     }
     if (await this.findDiscardTrigger()) return false;
-    const composer = await this.findWritableComposer();
+    const composer = await this.findNormalComposer();
     if (!composer.found || !composer.locator) return true;
     return (
-      normalizedText(await composer.locator.innerText().catch(() => "")) === ""
+      normalizedEditableText(
+        await composer.locator.innerText().catch(() => ""),
+      ).trim() === ""
     );
+  }
+
+  private async clearNormalComposer() {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const composer = await this.findNormalComposer();
+      if (!composer.found || !composer.locator) return;
+      const current = normalizedEditableText(
+        await composer.locator.innerText().catch(() => ""),
+      ).trim();
+      if (current === "") return;
+      await composer.locator.fill("").catch(() => undefined);
+      const afterFill = normalizedEditableText(
+        await composer.locator.innerText().catch(() => ""),
+      ).trim();
+      if (afterFill === "") return;
+      const actionable = await this.inspectActionableElement(
+        composer.locator,
+        this.page.locator("#main, main"),
+      );
+      if (actionable.topmost) {
+        await composer.locator.click().catch(() => undefined);
+        await this.page.keyboard.press("Control+A").catch(() => undefined);
+        await this.page.keyboard.press("Backspace").catch(() => undefined);
+      }
+      await this.page.waitForTimeout(150);
+    }
   }
 
   async capturePreparedDraft(path: string) {
@@ -1129,6 +1222,16 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
           this.page.locator(selector),
         ),
       ],
+      "COMPOSER_NOT_FOUND",
+      true,
+    );
+  }
+
+  private async findNormalComposer(): Promise<LocatedControl> {
+    return this.findControl(
+      whatsappWebStableSelectors.composeBox.map((selector) =>
+        this.page.locator(selector),
+      ),
       "COMPOSER_NOT_FOUND",
       true,
     );
@@ -1242,61 +1345,413 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
   }
 
   private async findCaptionInput() {
-    const scoped = await this.findCaptionInputInMediaSurface();
-    if (scoped) return scoped;
-    const preview = await this.firstVisible(
-      whatsappWebStableSelectors.mediaPreview.map((selector) =>
-        this.page.locator(selector),
-      ),
-    );
-    if (!preview) return null;
-    const candidate = await this.firstVisible([
-      ...whatsappWebAccessibleAliases.caption.map((name) =>
-        this.page.getByRole("textbox", { name, exact: false }),
-      ),
-      ...whatsappWebStableSelectors.captionInput.map((selector) =>
-        this.page.locator(selector),
-      ),
-    ]);
-    if (!candidate) return null;
-    const outsideConversationList =
-      (await candidate
-        .locator("xpath=ancestor::*[@id='side' or @id='pane-side']")
-        .count()
-        .catch(() => 0)) === 0;
-    return outsideConversationList ? candidate : null;
+    return this.resolveVisibleCaptionTarget()
+      .then((target) => target.locator)
+      .catch(() => null);
   }
 
   private async findCaptionInputInMediaSurface() {
+    return this.findCaptionInput();
+  }
+
+  private async readEditableText(control: Locator) {
+    return normalizedEditableText(await control.innerText().catch(() => ""));
+  }
+
+  private async findActiveMediaOverlay() {
+    const controls =
+      "(.//*[@data-icon='send'] or .//*[@data-testid='send'] or .//*[@aria-label='Send'] or .//*[@aria-label='Enviar'] or .//*[@title='Send'] or .//*[@title='Enviar']) and (.//*[@data-icon='x'] or .//*[@data-icon='back'] or .//*[@aria-label='Close'] or .//*[@aria-label='Fechar'] or .//*[@aria-label='Cerrar'])";
+    const captionSemantics =
+      ".//*[@data-testid='media-caption-input-container'] or .//*[@contenteditable='true'][@role='textbox'][contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'caption') or contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'legenda') or contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'comentario') or contains(translate(@aria-placeholder, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'caption') or contains(translate(@aria-placeholder, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'legenda') or contains(translate(@aria-placeholder, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'comentario')]";
+    const semanticOverlayAncestor = `xpath=ancestor::*[${controls} and (${captionSemantics}) and not(@id='main')][1]`;
+    const explicitOverlayAncestor = `xpath=ancestor-or-self::*[(@role='dialog' or @aria-modal='true' or @data-testid='media-editor') and ${controls} and (${captionSemantics})][1]`;
     for (const selector of whatsappWebStableSelectors.mediaSurface) {
       const surfaces = this.page.locator(selector);
       const count = await surfaces.count().catch(() => 0);
       for (let index = 0; index < count; index += 1) {
         const surface = surfaces.nth(index);
-        if (!(await surface.isVisible().catch(() => false))) continue;
-        const candidate = await this.firstVisible([
-          ...whatsappWebAccessibleAliases.caption.map((name) =>
-            surface.getByRole("textbox", { name, exact: false }),
-          ),
-          surface.locator("[contenteditable='true'][role='textbox']"),
-          surface.locator("[contenteditable='true']"),
-        ]);
-        if (candidate) return candidate;
+        if (
+          (await surface.isVisible().catch(() => false)) &&
+          (await this.hasPositiveBoundingBox(surface)) &&
+          (await this.overlayContainsMediaControls(surface)) &&
+          (await this.overlayContainsVisiblePreview(surface)) &&
+          (await this.overlayContainsCaptionCandidate(surface))
+        ) {
+          return surface;
+        }
+      }
+    }
+    for (const selector of whatsappWebStableSelectors.mediaPreview) {
+      const previews = this.page.locator(selector);
+      const count = await previews.count().catch(() => 0);
+      for (let index = 0; index < count; index += 1) {
+        const preview = previews.nth(index);
+        if (!(await preview.isVisible().catch(() => false))) continue;
+        for (const ancestor of [
+          explicitOverlayAncestor,
+          semanticOverlayAncestor,
+        ]) {
+          const overlay = preview.locator(ancestor).first();
+          if (
+            (await overlay.count().catch(() => 0)) === 1 &&
+            (await overlay.isVisible().catch(() => false)) &&
+            (await this.hasPositiveBoundingBox(overlay))
+          ) {
+            return overlay;
+          }
+        }
       }
     }
     return null;
   }
 
-  private async readEditableText(control: Locator) {
-    const lexicalText = await control
-      .locator("[data-lexical-text='true']")
-      .allInnerTexts()
-      .catch(() => []);
-    return normalizedText(
-      lexicalText.length > 0
-        ? lexicalText.join("")
-        : await control.innerText().catch(() => ""),
+  private async overlayContainsMediaControls(overlay: Locator) {
+    const send = await this.firstVisible([
+      ...whatsappWebAccessibleAliases.send.map((name) =>
+        overlay.getByRole("button", { name, exact: true }),
+      ),
+      ...whatsappWebStableSelectors.mediaSendTrigger.map((selector) =>
+        overlay.locator(selector),
+      ),
+    ]);
+    if (!send) return false;
+    return Boolean(
+      await this.firstVisible([
+        ...whatsappWebAccessibleAliases.close.map((name) =>
+          overlay.getByRole("button", { name, exact: true }),
+        ),
+        ...whatsappWebAccessibleAliases.back.map((name) =>
+          overlay.getByRole("button", { name, exact: true }),
+        ),
+        ...whatsappWebStableSelectors.mediaClose.map((selector) =>
+          overlay.locator(selector),
+        ),
+      ]),
     );
+  }
+
+  private async overlayContainsVisiblePreview(overlay: Locator) {
+    return Boolean(
+      await this.firstVisible(
+        whatsappWebStableSelectors.mediaPreview.map((selector) =>
+          overlay.locator(selector),
+        ),
+      ),
+    );
+  }
+
+  private async overlayContainsCaptionCandidate(overlay: Locator) {
+    return Boolean(await this.firstVisible(this.captionStrategies(overlay)));
+  }
+
+  private captionStrategies(overlay: Locator) {
+    return [
+      ...whatsappWebAccessibleAliases.caption.map((name) =>
+        overlay.getByRole("textbox", { name, exact: false }),
+      ),
+      overlay.locator(
+        "[data-testid='media-caption-input-container'] [contenteditable='true']",
+      ),
+      overlay.locator(
+        "[contenteditable='true'][role='textbox'][aria-placeholder*='caption' i], [contenteditable='true'][role='textbox'][aria-placeholder*='legenda' i], [contenteditable='true'][role='textbox'][aria-placeholder*='comentario' i]",
+      ),
+      overlay.locator(
+        "[contenteditable='true'][role='textbox'][aria-label*='caption' i], [contenteditable='true'][role='textbox'][aria-label*='legenda' i], [contenteditable='true'][role='textbox'][aria-label*='comentario' i]",
+      ),
+      overlay.locator("[contenteditable='true'][data-tab='10']"),
+      overlay.locator("[contenteditable='true'][role='textbox']"),
+      overlay.locator("[contenteditable='true']"),
+    ];
+  }
+
+  private async resolveVisibleCaptionTarget(input?: {
+    requireActive?: boolean;
+    expectedText?: string;
+  }): Promise<VisualCaptionTarget> {
+    const overlay = await this.findActiveMediaOverlay();
+    if (!overlay) {
+      throw await this.stageError(
+        "CAPTION_NOT_INSIDE_MEDIA_OVERLAY",
+        {},
+        {
+          captionInsideMediaOverlay: false,
+          captionOverlayScoped: false,
+        },
+      );
+    }
+    let lastStage: WhatsAppWebDiagnosticStage =
+      "CAPTION_VISUAL_TARGET_NOT_CONFIRMED";
+    let lastDiagnostics: WhatsAppWebSafeDiagnostics = {
+      currentOrigin: "https://web.whatsapp.com",
+      captionOverlayScoped: true,
+    };
+    let candidateOrdinal = 0;
+    for (const strategy of this.captionStrategies(overlay)) {
+      const count = await strategy.count().catch(() => 0);
+      for (let index = 0; index < count; index += 1) {
+        const candidate = strategy.nth(index);
+        const inspected = await this.inspectCaptionCandidate(
+          candidate,
+          overlay,
+          candidateOrdinal,
+          count,
+        );
+        candidateOrdinal += 1;
+        lastStage = inspected.stage;
+        lastDiagnostics = inspected.diagnostics;
+        if (!inspected.accepted) {
+          if (input?.expectedText) {
+            const hiddenText = await this.readEditableText(candidate);
+            if (hiddenText === input.expectedText) {
+              throw await this.stageError(
+                "CAPTION_HIDDEN_FALSE_POSITIVE",
+                {},
+                {
+                  ...inspected.diagnostics,
+                  captionVisibleTextLength: hiddenText.length,
+                  captionVisibleTextConfirmed: false,
+                  captionExactSnapshotConfirmed: false,
+                },
+              );
+            }
+          }
+          continue;
+        }
+        if (input?.requireActive && !(await this.isActiveEditable(candidate))) {
+          lastStage = "CAPTION_FOCUS_NOT_CONFIRMED";
+          lastDiagnostics = {
+            ...inspected.diagnostics,
+            captionActiveElementConfirmed: false,
+          };
+          continue;
+        }
+        return {
+          locator: candidate,
+          overlay,
+          diagnostics: {
+            ...inspected.diagnostics,
+            captionCandidateCount: candidateOrdinal,
+            captionOverlayScoped: true,
+            captionTopmostConfirmed: true,
+            captionActiveElementConfirmed: input?.requireActive
+              ? true
+              : (inspected.diagnostics.captionActiveElementConfirmed ?? false),
+          },
+        };
+      }
+    }
+    throw await this.stageError(lastStage, {}, lastDiagnostics);
+  }
+
+  private async inspectCaptionCandidate(
+    candidate: Locator,
+    overlay: Locator,
+    index: number,
+    candidateCount: number,
+  ) {
+    const visible = await candidate.isVisible().catch(() => false);
+    const editable = await candidate.isEditable().catch(() => false);
+    const box = await candidate.boundingBox().catch(() => null);
+    const handle = await candidate.elementHandle().catch(() => null);
+    const elementState = handle
+      ? await handle
+          .evaluate((element) => {
+            const active = document.activeElement;
+            const ariaHidden = Boolean(element.closest("[aria-hidden='true']"));
+            return {
+              attached: element.isConnected,
+              tag: element.tagName.toLowerCase(),
+              role: element.getAttribute("role"),
+              contentEditable: element.getAttribute("contenteditable"),
+              ariaHidden,
+              active:
+                active === element ||
+                (active instanceof Node && element.contains(active)),
+              accessibleTextLength: (
+                element.getAttribute("aria-label") ??
+                element.getAttribute("aria-placeholder") ??
+                ""
+              ).length,
+            };
+          })
+          .catch(() => null)
+      : null;
+    const insideOverlay =
+      handle && elementState?.attached
+        ? await overlay
+            .evaluate(
+              (root, element) => root === element || root.contains(element),
+              handle,
+            )
+            .catch(() => false)
+        : false;
+    const topmost =
+      handle && box && box.width > 0 && box.height > 0
+        ? await handle
+            .evaluate((element) => {
+              const rect = element.getBoundingClientRect();
+              const x = rect.left + rect.width / 2;
+              const y = rect.top + rect.height / 2;
+              if (
+                x < 0 ||
+                y < 0 ||
+                x >= window.innerWidth ||
+                y >= window.innerHeight
+              ) {
+                return false;
+              }
+              const hit = document.elementFromPoint(x, y);
+              return Boolean(hit && (hit === element || element.contains(hit)));
+            })
+            .catch(() => false)
+        : false;
+    await handle?.dispose().catch(() => undefined);
+    const diagnostics: WhatsAppWebSafeDiagnostics = {
+      currentOrigin: "https://web.whatsapp.com",
+      captionCandidateCount: candidateCount,
+      captionCandidateIndex: index,
+      captionTag: elementState?.tag ?? null,
+      captionRole: elementState?.role ?? null,
+      captionContentEditable: elementState?.contentEditable ?? null,
+      captionBoundingBoxPresent: Boolean(
+        box && box.width > 0 && box.height > 0,
+      ),
+      captionBoundingBoxWidth: box?.width ?? 0,
+      captionBoundingBoxHeight: box?.height ?? 0,
+      captionInsideMediaOverlay: insideOverlay,
+      captionTopmostAtCenter: topmost,
+      captionActiveElementConfirmed: elementState?.active ?? false,
+      captionAttachedBeforeFill: elementState?.attached ?? false,
+      captionAccessibleTextLength: elementState?.accessibleTextLength ?? 0,
+      captionInputFound: true,
+      captionInputVisible: visible,
+      captionInputEditable: editable,
+      captionOverlayScoped: insideOverlay,
+      captionTopmostConfirmed: topmost,
+    };
+    if (!insideOverlay) {
+      return {
+        accepted: false,
+        stage: "CAPTION_NOT_INSIDE_MEDIA_OVERLAY" as const,
+        diagnostics,
+      };
+    }
+    if (
+      !visible ||
+      !editable ||
+      !elementState?.attached ||
+      elementState.ariaHidden ||
+      !box ||
+      box.width <= 0 ||
+      box.height <= 0
+    ) {
+      return {
+        accepted: false,
+        stage: "CAPTION_VISUAL_TARGET_NOT_CONFIRMED" as const,
+        diagnostics,
+      };
+    }
+    if (!topmost) {
+      return {
+        accepted: false,
+        stage: "CAPTION_NOT_TOPMOST" as const,
+        diagnostics,
+      };
+    }
+    return {
+      accepted: true,
+      stage: "DRY_RUN_READY" as const,
+      diagnostics,
+    };
+  }
+
+  private async isActiveEditable(candidate: Locator) {
+    return candidate
+      .evaluate((element) => {
+        const active = document.activeElement;
+        return (
+          active === element ||
+          (active instanceof Node && element.contains(active))
+        );
+      })
+      .catch(() => false);
+  }
+
+  private async observeVisibleCaption(input: {
+    expected: string;
+    affiliateUrl: string;
+    textSnippet: string;
+    requireActive: boolean;
+  }) {
+    const target = await this.resolveVisibleCaptionTarget({
+      requireActive: input.requireActive,
+      expectedText: input.expected,
+    });
+    const text = await this.readEditableText(target.locator);
+    const affiliateUrlOccurrenceCount =
+      text.split(input.affiliateUrl).length - 1;
+    return {
+      target,
+      text,
+      textLength: text.length,
+      exact: text === input.expected,
+      affiliateUrlOccurrenceCount,
+      titleSnippetConfirmed: text.includes(normalizedText(input.textSnippet)),
+    };
+  }
+
+  private async hasPositiveBoundingBox(locator: Locator) {
+    const box = await locator.boundingBox().catch(() => null);
+    return Boolean(box && box.width > 0 && box.height > 0);
+  }
+
+  private async inspectActionableElement(candidate: Locator, scope: Locator) {
+    const visible = await candidate.isVisible().catch(() => false);
+    const enabled = await candidate.isEnabled().catch(() => false);
+    const box = await candidate.boundingBox().catch(() => null);
+    const handle = await candidate.elementHandle().catch(() => null);
+    const attached = handle
+      ? await handle
+          .evaluate((element) => element.isConnected)
+          .catch(() => false)
+      : false;
+    const insideScope =
+      handle && attached
+        ? await scope
+            .evaluate(
+              (root, element) => root === element || root.contains(element),
+              handle,
+            )
+            .catch(() => false)
+        : false;
+    const topmost =
+      handle && box && box.width > 0 && box.height > 0 && insideScope
+        ? await handle
+            .evaluate((element) => {
+              const rect = element.getBoundingClientRect();
+              const x = rect.left + rect.width / 2;
+              const y = rect.top + rect.height / 2;
+              if (
+                x < 0 ||
+                y < 0 ||
+                x >= window.innerWidth ||
+                y >= window.innerHeight
+              ) {
+                return false;
+              }
+              const hit = document.elementFromPoint(x, y);
+              return Boolean(hit && (hit === element || element.contains(hit)));
+            })
+            .catch(() => false)
+        : false;
+    await handle?.dispose().catch(() => undefined);
+    return {
+      visible,
+      enabled,
+      attached,
+      boundingBoxPresent: Boolean(box && box.width > 0 && box.height > 0),
+      topmost,
+    };
   }
 
   private async hasMediaUploadInProgress() {
@@ -1314,6 +1769,7 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
   private async waitForStableMediaEditor() {
     const deadline = Date.now() + this.actionTimeoutMs;
     let stableObservations = 0;
+    let lastCaptionError: WhatsAppWebStageError | null = null;
     do {
       const preview = await this.firstVisible(
         whatsappWebStableSelectors.mediaPreview.map((selector) =>
@@ -1321,14 +1777,15 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
         ),
       );
       const loading = await this.hasMediaUploadInProgress();
-      const caption = await this.findCaptionInput();
-      if (
-        preview &&
-        caption &&
-        (await caption.isVisible().catch(() => false)) &&
-        (await caption.isEditable().catch(() => false)) &&
-        !loading
-      ) {
+      const caption = await this.resolveVisibleCaptionTarget().catch(
+        (error) => {
+          if (error instanceof WhatsAppWebStageError) {
+            lastCaptionError = error;
+          }
+          return null;
+        },
+      );
+      if (preview && caption && !loading) {
         stableObservations += 1;
         if (stableObservations >= 2) return;
       } else {
@@ -1336,6 +1793,7 @@ export class PlaywrightWhatsAppWebPageAdapter implements WhatsAppWebPageAdapter 
       }
       await this.page.waitForTimeout(150);
     } while (Date.now() < deadline);
+    if (lastCaptionError) throw lastCaptionError;
     throw await this.stageError(
       "CAPTION_INPUT_NOT_FOUND",
       {},

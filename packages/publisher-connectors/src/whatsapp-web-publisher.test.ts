@@ -8,6 +8,7 @@ import {
   WhatsAppGroupsWebPublisher,
   WhatsAppWebStageError,
   whatsappWebConfigurationFingerprint,
+  whatsappWebVisualDraftInspectionFingerprint,
   type WhatsAppWebBrowserLauncher,
   type WhatsAppWebPageAdapter,
   type WhatsAppWebProfileLock,
@@ -130,6 +131,11 @@ function adapter(
       captionLengthObserved: 56,
       affiliateUrlOccurrenceCount: 1,
       titleSnippetConfirmed: true,
+      captionVisibleTextConfirmed: true,
+      captionOverlayScoped: true,
+      captionTopmostConfirmed: true,
+      captionActiveElementConfirmed: true,
+      captionExactSnapshotConfirmed: true,
     }),
     fillText: vi.fn().mockResolvedValue(undefined),
     inspectPreparedDraft: vi.fn().mockResolvedValue({
@@ -142,6 +148,19 @@ function adapter(
       captionStable: true,
       captionLengthExpected: 56,
       captionLengthObserved: 56,
+      captionVisibleTextConfirmed: true,
+      captionOverlayScoped: true,
+      captionTopmostConfirmed: true,
+      captionActiveElementConfirmed: true,
+      captionExactSnapshotConfirmed: true,
+      diagnostics: {
+        currentOrigin: "https://web.whatsapp.com",
+        captionVisibleTextConfirmed: true,
+        captionOverlayScoped: true,
+        captionTopmostConfirmed: true,
+        captionActiveElementConfirmed: true,
+        captionExactSnapshotConfirmed: true,
+      },
     }),
     inspectSendTrigger: vi.fn().mockResolvedValue({
       found: true,
@@ -150,8 +169,12 @@ function adapter(
       candidateCount: 1,
       strategiesTried: 1,
       outgoingCount: 0,
+      boundingBoxPresent: true,
+      topmostConfirmed: true,
+      trialClickSucceeded: true,
       stage: "READY_TO_COMMIT_SEND",
     }),
+    holdDraftOpen: vi.fn().mockResolvedValue(undefined),
     clickSendTrigger: vi.fn().mockResolvedValue(undefined),
     confirmOutgoingMessage: vi.fn().mockResolvedValue({
       confirmed: true,
@@ -221,7 +244,7 @@ function input(): WhatsAppWebPublicationInput {
   };
   channel.lastSuccessfulDryRunConfigurationFingerprint =
     whatsappWebConfigurationFingerprint(channel);
-  return {
+  const publication: WhatsAppWebPublicationInput = {
     publicationId: "publication-1",
     offerId: "offer-1",
     destinationType: "GROUP" as const,
@@ -229,8 +252,38 @@ function input(): WhatsAppWebPublicationInput {
     affiliateUrl: "https://meli.la/abc",
     title: "Produto unico",
     imageUrl: null,
+    publicationStatus: "SCHEDULED",
+    publicationMetadata: {},
     channel,
   };
+  publication.publicationMetadata = {
+    visualDraftInspectionConfirmed: true,
+    lastVisualDraftInspectionFingerprint:
+      whatsappWebVisualDraftInspectionFingerprint({
+        channel,
+        messageSnapshot: publication.message,
+        imageSnapshot: publication.imageUrl,
+      }),
+  };
+  return publication;
+}
+
+function imageInput() {
+  const value = input();
+  value.channel.sendImage = true;
+  value.imageUrl = "https://cdn.example/offer.jpg";
+  value.channel.lastSuccessfulDryRunConfigurationFingerprint =
+    whatsappWebConfigurationFingerprint(value.channel);
+  value.publicationMetadata = {
+    visualDraftInspectionConfirmed: true,
+    lastVisualDraftInspectionFingerprint:
+      whatsappWebVisualDraftInspectionFingerprint({
+        channel: value.channel,
+        messageSnapshot: value.message,
+        imageSnapshot: value.imageUrl,
+      }),
+  };
+  return value;
 }
 
 describe("WhatsApp Web profile safety and defaults", () => {
@@ -1003,6 +1056,142 @@ describe("WhatsAppGroupsWebPublisher protected send", () => {
     });
     expect(page.clickSendTrigger).not.toHaveBeenCalled();
     expect(page.clearDraft).toHaveBeenCalledOnce();
+  });
+
+  it("preflights a visually confirmed media caption and trial click", async () => {
+    const page = adapter();
+    const result = await new WhatsAppGroupsWebPublisher({
+      config: config(),
+      launcher: launcher(page),
+      profileLock: lock(),
+      prepareImage: vi.fn().mockResolvedValue({
+        bytes: new Uint8Array([1]),
+        contentType: "image/jpeg",
+        filename: "offer.jpg",
+      }),
+    }).preflight(imageInput());
+
+    expect(result).toMatchObject({
+      status: "READY_TO_COMMIT_SEND",
+      captionVisibleTextConfirmed: true,
+      captionOverlayScoped: true,
+      captionTopmostConfirmed: true,
+      captionActiveElementConfirmed: true,
+      captionExactSnapshotConfirmed: true,
+      affiliateUrlOccurrenceCount: 1,
+      sendTriggerTrialSucceeded: true,
+      sendCalled: false,
+      draftCleared: true,
+    });
+    expect(page.clickSendTrigger).not.toHaveBeenCalled();
+  });
+
+  it("inspects a draft for a bounded hold and never sends", async () => {
+    const page = adapter();
+    const confirmVisualDraft = vi.fn().mockResolvedValue(true);
+    const value = imageInput();
+    const result = await new WhatsAppGroupsWebPublisher({
+      config: config(),
+      launcher: launcher(page),
+      profileLock: lock(),
+      prepareImage: vi.fn().mockResolvedValue({
+        bytes: new Uint8Array([1]),
+        contentType: "image/jpeg",
+        filename: "offer.jpg",
+      }),
+    }).inspectDraft(value, { holdMs: 5_000, confirmVisualDraft });
+
+    expect(result).toMatchObject({
+      status: "AWAITING_VISUAL_INSPECTION_COMPLETED",
+      captionVisibleTextConfirmed: true,
+      captionOverlayScoped: true,
+      captionTopmostConfirmed: true,
+      captionActiveElementConfirmed: true,
+      captionExactSnapshotConfirmed: true,
+      affiliateUrlOccurrenceCount: 1,
+      sendTriggerTrialSucceeded: true,
+      visualDraftInspectionConfirmed: true,
+      sendCalled: false,
+      draftCleared: true,
+    });
+    expect(result.visualDraftInspectionFingerprint).toBe(
+      whatsappWebVisualDraftInspectionFingerprint({
+        channel: value.channel,
+        messageSnapshot: value.message,
+        imageSnapshot: value.imageUrl,
+      }),
+    );
+    expect(page.holdDraftOpen).toHaveBeenCalledWith(5_000);
+    expect(page.clickSendTrigger).not.toHaveBeenCalled();
+    expect(page.clearDraft).toHaveBeenCalledOnce();
+  });
+
+  it("blocks publish without a current visual draft inspection before browser", async () => {
+    const value = imageInput();
+    value.publicationMetadata = {};
+    const browser = launcher();
+    const profileLock = lock();
+    const prepareImage = vi.fn();
+    const result = await new WhatsAppGroupsWebPublisher({
+      config: config({ dryRun: false }),
+      launcher: browser,
+      profileLock,
+      prepareImage,
+      recordSendState: vi.fn(),
+    }).publish(value);
+
+    expect(result.errorCode).toBe(
+      "WHATSAPP_WEB_VISUAL_DRAFT_INSPECTION_REQUIRED",
+    );
+    expect(prepareImage).not.toHaveBeenCalled();
+    expect(profileLock.acquire).not.toHaveBeenCalled();
+    expect(browser.launchPersistent).not.toHaveBeenCalled();
+  });
+
+  it("invalidates visual inspection when the message snapshot changes", () => {
+    const value = imageInput();
+    value.message += " alterada";
+    const result = validateRealSendEligibility({
+      config: config({ dryRun: false }),
+      channel: value.channel,
+      publication: {
+        status: value.publicationStatus ?? "SCHEDULED",
+        metadata: value.publicationMetadata,
+        messageSnapshot: value.message,
+        imageSnapshot: value.imageUrl,
+      },
+      confirmSend: true,
+    });
+    expect(result).toMatchObject({
+      visualDraftInspectionValid: false,
+      realSendEligible: false,
+      blockingReason: "WHATSAPP_WEB_VISUAL_DRAFT_INSPECTION_REQUIRED",
+    });
+  });
+
+  it("keeps delivery uncertain ahead of the visual inspection gate", () => {
+    const value = imageInput();
+    const result = validateRealSendEligibility({
+      config: config({ dryRun: false }),
+      channel: value.channel,
+      publication: {
+        status: "PUBLICATION_FAILED",
+        metadata: {
+          ...(value.publicationMetadata as Record<string, unknown>),
+          deliveryUncertain: true,
+          sendClickStartedAt: "2026-08-02T22:37:19.071Z",
+          retryAuthorized: false,
+        },
+        messageSnapshot: value.message,
+        imageSnapshot: value.imageUrl,
+      },
+      confirmSend: true,
+    });
+    expect(result).toMatchObject({
+      publicationEligible: false,
+      realSendEligible: false,
+      blockingReason: "WHATSAPP_WEB_DELIVERY_UNCERTAIN",
+    });
   });
 
   it("fails preflight safely when the trigger is ambiguous", async () => {

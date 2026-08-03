@@ -15,6 +15,7 @@ export type WhatsAppWebErrorCode =
   | "WHATSAPP_WEB_PUBLICATION_ALREADY_PUBLISHED"
   | "WHATSAPP_WEB_PUBLICATION_INELIGIBLE"
   | "WHATSAPP_WEB_RETRY_NOT_AUTHORIZED"
+  | "WHATSAPP_WEB_VISUAL_DRAFT_INSPECTION_REQUIRED"
   | "WHATSAPP_WEB_BROWSER_UNAVAILABLE"
   | "WHATSAPP_WEB_PROFILE_NOT_INITIALIZED"
   | "WHATSAPP_WEB_LOGIN_REQUIRED"
@@ -90,6 +91,13 @@ export type WhatsAppWebDiagnosticStage =
   | "CAPTION_INPUT_RECREATED"
   | "CAPTION_CONTENT_LOST"
   | "CAPTION_CONTENT_MISMATCH"
+  | "CAPTION_VISUAL_TARGET_NOT_CONFIRMED"
+  | "CAPTION_NOT_INSIDE_MEDIA_OVERLAY"
+  | "CAPTION_NOT_TOPMOST"
+  | "CAPTION_FOCUS_NOT_CONFIRMED"
+  | "CAPTION_VISIBLE_TEXT_MISSING"
+  | "CAPTION_VISIBLE_TEXT_MISMATCH"
+  | "CAPTION_HIDDEN_FALSE_POSITIVE"
   | "DRAFT_VALIDATION_FAILED"
   | "DRAFT_CLEANUP_FAILED"
   | "PUBLISH_PERMISSION_UNDETERMINED"
@@ -108,6 +116,10 @@ export type WhatsAppWebDiagnosticStage =
   | "SEND_TRIGGER_DISABLED"
   | "SEND_TRIGGER_NOT_INTERACTABLE"
   | "SEND_TRIGGER_AMBIGUOUS"
+  | "SEND_TRIGGER_TRIAL_FAILED"
+  | "SEND_TRIGGER_INTERCEPTED"
+  | "SEND_TRIGGER_STALE"
+  | "SEND_TRIGGER_NOT_TOPMOST"
   | "SEND_CLICK_STARTED"
   | "SEND_CLICK_FAILED"
   | "SEND_CLICK_COMPLETED"
@@ -154,6 +166,29 @@ export type WhatsAppWebSafeDiagnostics = {
   captionLengthObserved?: number;
   affiliateUrlOccurrenceCount?: number;
   titleSnippetConfirmed?: boolean;
+  captionCandidateCount?: number;
+  captionCandidateIndex?: number;
+  captionTag?: string | null;
+  captionRole?: string | null;
+  captionContentEditable?: string | null;
+  captionBoundingBoxPresent?: boolean;
+  captionBoundingBoxWidth?: number;
+  captionBoundingBoxHeight?: number;
+  captionInsideMediaOverlay?: boolean;
+  captionTopmostAtCenter?: boolean;
+  captionActiveElementConfirmed?: boolean;
+  captionAttachedBeforeFill?: boolean;
+  captionAttachedAfterFill?: boolean;
+  captionReResolvedAfterFill?: boolean;
+  captionVisibleTextLength?: number;
+  captionAccessibleTextLength?: number;
+  captionVisibleTextConfirmed?: boolean;
+  captionOverlayScoped?: boolean;
+  captionTopmostConfirmed?: boolean;
+  captionExactSnapshotConfirmed?: boolean;
+  sendTriggerBoundingBoxPresent?: boolean;
+  sendTriggerTopmostConfirmed?: boolean;
+  sendTriggerTrialSucceeded?: boolean;
   uploadInProgressVisible?: boolean;
   draftValidated?: boolean;
   draftCleared?: boolean;
@@ -185,6 +220,11 @@ export type WhatsAppWebCaptionResult = {
   captionLengthObserved: number;
   affiliateUrlOccurrenceCount: number;
   titleSnippetConfirmed: true;
+  captionVisibleTextConfirmed: true;
+  captionOverlayScoped: true;
+  captionTopmostConfirmed: true;
+  captionActiveElementConfirmed: true;
+  captionExactSnapshotConfirmed: true;
 };
 
 export type WhatsAppWebDraftCleanupResult = {
@@ -251,6 +291,12 @@ export type PreparedDraftInspection = {
   captionStable: boolean;
   captionLengthExpected: number;
   captionLengthObserved: number;
+  captionVisibleTextConfirmed: boolean;
+  captionOverlayScoped: boolean;
+  captionTopmostConfirmed: boolean;
+  captionActiveElementConfirmed: boolean;
+  captionExactSnapshotConfirmed: boolean;
+  diagnostics: WhatsAppWebSafeDiagnostics;
 };
 
 export type OutgoingMessageConfirmation = {
@@ -270,6 +316,9 @@ export type WhatsAppWebSendTriggerInspection = {
   candidateCount: number;
   strategiesTried: number;
   outgoingCount: number;
+  boundingBoxPresent: boolean;
+  topmostConfirmed: boolean;
+  trialClickSucceeded: boolean;
   stage: WhatsAppWebDiagnosticStage;
 };
 
@@ -303,6 +352,7 @@ export interface WhatsAppWebPageAdapter {
   inspectSendTrigger(input: {
     mediaExpected: boolean;
   }): Promise<WhatsAppWebSendTriggerInspection>;
+  holdDraftOpen(ms: number): Promise<void>;
   clickSendTrigger(): Promise<void>;
   confirmOutgoingMessage(input: {
     affiliateUrl: string;

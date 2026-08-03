@@ -983,7 +983,12 @@ async function recordWhatsAppWebResult(
       ? (currentPublication.metadata as Record<string, unknown>)
       : {};
   const attemptNumber = publication.attempts.length + 1;
-  const deliveryUncertain = result.status === "DELIVERY_UNCERTAIN";
+  const deliveryUncertain = Boolean(
+    result.status !== "PUBLISHED" &&
+    (result.status === "DELIVERY_UNCERTAIN" ||
+      (previousMetadata.deliveryUncertain === true &&
+        typeof previousMetadata.deliveryConfirmedAt !== "string")),
+  );
 
   await prisma.publicationAttempt.create({
     data: {
@@ -1004,7 +1009,9 @@ async function recordWhatsAppWebResult(
         sendClickedAt: result.sendClickedAt ?? null,
         deliveryUncertain: result.deliveryUncertain,
       },
-      errorMessage: result.errorCode ?? null,
+      errorMessage: deliveryUncertain
+        ? "WHATSAPP_WEB_DELIVERY_UNCERTAIN"
+        : (result.errorCode ?? null),
     },
   });
 
@@ -1095,10 +1102,15 @@ async function persistWhatsAppWebSendState(update: WhatsAppWebSendStateUpdate) {
     !Array.isArray(publication.metadata)
       ? (publication.metadata as Record<string, unknown>)
       : {};
+  const deliveryUncertain = Boolean(
+    update.deliveryUncertain ||
+    (metadata.deliveryUncertain === true &&
+      typeof metadata.deliveryConfirmedAt !== "string"),
+  );
   await prisma.publication.update({
     where: { id: update.publicationId },
     data: {
-      ...(update.deliveryUncertain
+      ...(deliveryUncertain
         ? {
             status: "PUBLICATION_FAILED" as const,
             errorMessage: "WHATSAPP_WEB_DELIVERY_UNCERTAIN",
@@ -1115,7 +1127,7 @@ async function persistWhatsAppWebSendState(update: WhatsAppWebSendStateUpdate) {
         ...(update.sendClickedAt
           ? { sendClickedAt: update.sendClickedAt }
           : {}),
-        deliveryUncertain: update.deliveryUncertain,
+        deliveryUncertain,
         retryAuthorized: false,
       } as Prisma.InputJsonValue,
     },

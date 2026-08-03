@@ -1,4 +1,5 @@
 import { prisma, Prisma } from "@affiliate/database";
+import { createInterface } from "node:readline";
 import {
   getWhatsAppWebRuntimeConfig,
   PlaywrightWhatsAppWebBrowserLauncher,
@@ -29,6 +30,37 @@ function text(value: unknown, fallback = "") {
 
 function bool(value: unknown, fallback = false) {
   return typeof value === "boolean" ? value : fallback;
+}
+
+function inspectDraftHoldMs() {
+  const raw = option("--hold-ms");
+  const value = raw === undefined ? 20_000 : Number(raw);
+  if (!Number.isInteger(value) || value < 5_000 || value > 60_000) {
+    throw new Error("WHATSAPP_WEB_INSPECT_DRAFT_HOLD_INVALID");
+  }
+  return value;
+}
+
+async function askVisualDraftConfirmation(timeoutMs: number) {
+  const readline = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const finish = (confirmed: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      readline.close();
+      resolve(confirmed);
+    };
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    readline.question(
+      "A imagem e a legenda completa estao visiveis no grupo correto? [s/N] ",
+      (answer) => finish(/^s(im)?$/i.test(answer.trim())),
+    );
+  });
 }
 
 function channelInput(channel: {
@@ -111,17 +143,23 @@ async function recordPublicationSendState(update: WhatsAppWebSendStateUpdate) {
     select: { metadata: true },
   });
   if (!publication) throw new Error("PUBLICATION_NOT_FOUND");
+  const existingMetadata = record(publication.metadata);
+  const deliveryUncertain = Boolean(
+    update.deliveryUncertain ||
+    (existingMetadata.deliveryUncertain === true &&
+      typeof existingMetadata.deliveryConfirmedAt !== "string"),
+  );
   await prisma.publication.update({
     where: { id: update.publicationId },
     data: {
-      ...(update.deliveryUncertain
+      ...(deliveryUncertain
         ? {
             status: "PUBLICATION_FAILED" as const,
             errorMessage: "WHATSAPP_WEB_DELIVERY_UNCERTAIN",
           }
         : {}),
       metadata: {
-        ...record(publication.metadata),
+        ...existingMetadata,
         stage: update.stage,
         rootCause: update.stage,
         sendWasClicked: update.sendWasClicked,
@@ -131,7 +169,7 @@ async function recordPublicationSendState(update: WhatsAppWebSendStateUpdate) {
         ...(update.sendClickedAt
           ? { sendClickedAt: update.sendClickedAt }
           : {}),
-        deliveryUncertain: update.deliveryUncertain,
+        deliveryUncertain,
         retryAuthorized: false,
       } as Prisma.InputJsonValue,
     },
@@ -345,6 +383,50 @@ async function main() {
     return;
   }
 
+  if (command === "inspect-draft") {
+    const publicationId = option("--publication-id");
+    if (!publicationId) throw new Error("PUBLICATION_ID_REQUIRED");
+    const holdMs = inspectDraftHoldMs();
+    const { publication, input } = await publicationInput(publicationId);
+    const result = await publisher.inspectDraft(input, {
+      holdMs,
+      confirmVisualDraft: () => askVisualDraftConfirmation(holdMs),
+    });
+    const current = await prisma.publication.findUnique({
+      where: { id: publication.id },
+      select: { metadata: true },
+    });
+    await prisma.publication.update({
+      where: { id: publication.id },
+      data: {
+        metadata: {
+          ...record(current?.metadata),
+          lastVisualDraftInspectionAt: new Date().toISOString(),
+          lastVisualDraftInspectionFingerprint:
+            result.visualDraftInspectionFingerprint,
+          visualDraftInspectionConfirmed:
+            result.status === "AWAITING_VISUAL_INSPECTION_COMPLETED" &&
+            result.visualDraftInspectionConfirmed,
+          lastVisualDraftInspection: {
+            status: result.status,
+            stage: result.stage,
+            captionVisibleTextConfirmed: result.captionVisibleTextConfirmed,
+            captionOverlayScoped: result.captionOverlayScoped,
+            captionTopmostConfirmed: result.captionTopmostConfirmed,
+            captionActiveElementConfirmed: result.captionActiveElementConfirmed,
+            captionExactSnapshotConfirmed: result.captionExactSnapshotConfirmed,
+            affiliateUrlOccurrenceCount: result.affiliateUrlOccurrenceCount,
+            sendTriggerTrialSucceeded: result.sendTriggerTrialSucceeded,
+            sendCalled: false,
+            draftCleared: result.draftCleared,
+          },
+        } as Prisma.InputJsonValue,
+      },
+    });
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    return;
+  }
+
   if (command === "config-check") {
     const publicationId = option("--publication-id");
     if (!publicationId) throw new Error("PUBLICATION_ID_REQUIRED");
@@ -355,6 +437,8 @@ async function main() {
       publication: {
         status: input.publicationStatus ?? "SCHEDULED",
         metadata: input.publicationMetadata,
+        messageSnapshot: input.message,
+        imageSnapshot: input.imageUrl,
       },
       confirmSend: true,
     });
@@ -375,6 +459,8 @@ async function main() {
       publication: {
         status: publication.status,
         metadata: publication.metadata,
+        messageSnapshot: input.message,
+        imageSnapshot: input.imageUrl,
       },
       confirmSend,
     });
@@ -425,20 +511,29 @@ async function main() {
       where: { id: publication.id },
       select: { metadata: true },
     });
+    const currentMetadata = record(current?.metadata);
+    const deliveryUncertain = Boolean(
+      result.status !== "PUBLISHED" &&
+      (uncertain ||
+        (currentMetadata.deliveryUncertain === true &&
+          typeof currentMetadata.deliveryConfirmedAt !== "string")),
+    );
     await prisma.publication.update({
       where: { id: publication.id },
       data: {
         status:
           result.status === "PUBLISHED" ? "PUBLISHED" : "PUBLICATION_FAILED",
         publishedAt: result.status === "PUBLISHED" ? new Date() : null,
-        errorMessage: result.errorCode ?? null,
+        errorMessage: deliveryUncertain
+          ? "WHATSAPP_WEB_DELIVERY_UNCERTAIN"
+          : (result.errorCode ?? null),
         metadata: {
-          ...record(current?.metadata),
+          ...currentMetadata,
           ...result.metadata,
           rootCause: result.rootCause,
           stage: result.stage,
           retryAuthorized: false,
-          deliveryUncertain: uncertain,
+          deliveryUncertain,
         } as Prisma.InputJsonValue,
       },
     });
@@ -459,7 +554,7 @@ async function main() {
   }
 
   throw new Error(
-    "USAGE: login|health|diagnose|locate|dry-run|preflight|config-check|publish",
+    "USAGE: login|health|diagnose|locate|dry-run|preflight|inspect-draft|config-check|publish",
   );
 }
 
