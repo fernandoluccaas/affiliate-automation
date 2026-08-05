@@ -10,6 +10,8 @@ The affiliate URL appears exactly once and is never replaced by the product URL.
 
 This is local Playwright UI control, not an official WhatsApp API. It is optional, disabled by default and restricted to groups the repository owner belongs to or administers. It never automates login credentials, SMS, PIN, MFA or CAPTCHA; never captures QR codes; never exports cookies/local storage; and never reads conversation history, members, phone numbers or invitation links.
 
+Phase 5F does not broaden this authorization. Production supervision covers only PostgreSQL, Redis, the localhost dashboard, and the continuous planning/publishing worker. Supervisor startup, health/readiness, state audit, backups, and Windows scheduled tasks cannot open Chromium, consume a WhatsApp authorization, click send, release a dispatch claim, or reconcile delivery. Login, draft inspection, preflight, unit authorization, dispatch, and delivery reconciliation stay manual in an attended graphical session. Keep `WHATSAPP_WEB_DRY_RUN=true` during continuous operation; see [Windows local production operations](windows-production-operations.md).
+
 ### Safe defaults
 
 ```dotenv

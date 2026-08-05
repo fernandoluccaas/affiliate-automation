@@ -1,3 +1,4 @@
+import { createServer } from "node:net";
 import { describe, expect, it } from "vitest";
 import { acquireLock, getRedisHealth } from "./index";
 
@@ -91,5 +92,39 @@ describe("redis abstraction", () => {
       mode: "redis-url",
       failureReason: "REDIS_UNAVAILABLE",
     });
+  });
+
+  it("uses the command reply after AUTH when deciding lock ownership", async () => {
+    const commands: string[] = [];
+    const server = createServer((socket) => {
+      socket.on("data", (chunk: Buffer) => {
+        const command = chunk.toString("utf8");
+        commands.push(command);
+        socket.write(command.includes("AUTH") ? "+OK\r\n" : "$-1\r\n");
+      });
+    });
+    await new Promise<void>((resolvePromise) =>
+      server.listen(0, "127.0.0.1", resolvePromise),
+    );
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("TEST_SERVER_FAILED");
+
+    try {
+      const lock = await acquireLock("authenticated-lock", 1_000, {
+        env: {
+          WORKER_REQUIRE_REDIS: "true",
+          REDIS_URL: `redis://:test-password@127.0.0.1:${address.port}`,
+        },
+      });
+      expect(lock.acquired).toBe(false);
+      expect(lock.failureReason).toBe("LOCK_ALREADY_HELD");
+      expect(commands).toHaveLength(2);
+      expect(commands[0]).toContain("AUTH");
+      expect(commands[1]).toContain("SET");
+    } finally {
+      await new Promise<void>((resolvePromise, reject) =>
+        server.close((error) => (error ? reject(error) : resolvePromise())),
+      );
+    }
   });
 });

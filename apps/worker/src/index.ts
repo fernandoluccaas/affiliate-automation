@@ -44,6 +44,7 @@ import {
   type WorkerCadences,
   type WorkerComponent,
 } from "./runtime";
+import { runWithWorkerLeadership } from "./worker-leadership";
 
 const DEFAULT_MAX_ATTEMPTS = 4;
 const PUBLICATION_RETRY_MINUTES = [1, 5, 15, 30] as const;
@@ -2149,13 +2150,18 @@ export async function startWorker(
   );
 
   try {
-    return await runContinuousWorker({
-      dependencies,
+    return await runWithWorkerLeadership({
       signal: shutdownController.signal,
-      cadences,
-      ...(options.heartbeatIntervalMs
-        ? { heartbeatIntervalMs: options.heartbeatIntervalMs }
-        : {}),
+      run: (leadershipSignal, instanceId) =>
+        runContinuousWorker({
+          dependencies,
+          signal: leadershipSignal,
+          cadences,
+          instanceId,
+          ...(options.heartbeatIntervalMs
+            ? { heartbeatIntervalMs: options.heartbeatIntervalMs }
+            : {}),
+        }),
     });
   } finally {
     process.removeListener("SIGINT", stop);
@@ -2167,15 +2173,35 @@ export async function startWorker(
 if (process.env.NODE_ENV !== "test") {
   const once = process.argv.includes("--once");
 
-  startWorker({ once }).catch(() => {
-    console.error(
-      JSON.stringify({
-        event: "worker_failed",
-        stage: "WORKER_LOOP",
-        status: "FAILED",
-        errorCode: "WORKER_FAILED",
-      }),
-    );
-    process.exit(1);
-  });
+  startWorker({ once })
+    .then((result) => {
+      if (
+        !once &&
+        result &&
+        typeof result === "object" &&
+        "status" in result &&
+        result.status !== "COMPLETED"
+      ) {
+        console.error(
+          JSON.stringify({
+            event: "worker_leadership_unavailable",
+            component: "worker",
+            level: "error",
+            errorCode: result.status,
+          }),
+        );
+        process.exitCode = 2;
+      }
+    })
+    .catch(() => {
+      console.error(
+        JSON.stringify({
+          event: "worker_failed",
+          stage: "WORKER_LOOP",
+          status: "FAILED",
+          errorCode: "WORKER_FAILED",
+        }),
+      );
+      process.exit(1);
+    });
 }

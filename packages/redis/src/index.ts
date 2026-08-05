@@ -59,6 +59,7 @@ async function redisUrlCommand(urlValue: string, args: Array<string | number>) {
     const socket = new Socket();
     let settled = false;
     let buffer = "";
+    let authenticated = !url.password;
 
     const timeout = setTimeout(() => {
       finish(new Error("Redis command timed out."));
@@ -83,6 +84,19 @@ async function redisUrlCommand(urlValue: string, args: Array<string | number>) {
     socket.once("error", (error) => finish(error));
     socket.on("data", (chunk: Buffer) => {
       buffer += chunk.toString("utf8");
+      if (!authenticated) {
+        const replyEnd = buffer.indexOf("\r\n");
+        if (replyEnd < 0) return;
+        const authReply = buffer.slice(0, replyEnd + 2);
+        buffer = buffer.slice(replyEnd + 2);
+        if (!authReply.startsWith("+OK")) {
+          finish(new Error("Redis authentication failed."));
+          return;
+        }
+        authenticated = true;
+        socket.write(encodeCommand(args));
+        return;
+      }
 
       if (buffer.length > 0) {
         finish(undefined, buffer);
@@ -91,9 +105,9 @@ async function redisUrlCommand(urlValue: string, args: Array<string | number>) {
     socket.connect(port, host, () => {
       if (url.password) {
         socket.write(encodeCommand(["AUTH", decodeURIComponent(url.password)]));
+      } else {
+        socket.write(encodeCommand(args));
       }
-
-      socket.write(encodeCommand(args));
     });
   });
 }

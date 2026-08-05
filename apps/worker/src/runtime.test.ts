@@ -149,7 +149,7 @@ describe("runContinuousWorker", () => {
           controller.abort();
         }
       },
-      processId: 123,
+      instanceId: "worker-test-instance",
       logger: vi.fn(),
     });
 
@@ -168,7 +168,7 @@ describe("runContinuousWorker", () => {
         update: {
           value: expect.objectContaining({
             state: "OFFLINE",
-            processId: 123,
+            instanceId: "worker-test-instance",
           }),
         },
       }),

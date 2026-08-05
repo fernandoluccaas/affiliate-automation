@@ -3,29 +3,39 @@ services:
     image: postgres:16-alpine
     container_name: affiliate-automation-postgres
     environment:
-      POSTGRES_USER: affiliate
-      POSTGRES_PASSWORD: affiliate
-      POSTGRES_DB: affiliate_automation
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U affiliate -d affiliate_automation"]
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    stop_grace_period: 30s
 
   redis:
     image: redis:7-alpine
     container_name: affiliate-automation-redis
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-data:/data
+    command: ["redis-server", "--appendonly", "yes"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 5s
+    restart: unless-stopped
+    stop_grace_period: 15s
 
 volumes:
   postgres-data:
+  redis-data:

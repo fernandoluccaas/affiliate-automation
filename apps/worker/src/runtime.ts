@@ -61,10 +61,19 @@ export type WorkerOperationalMetrics = {
 
 export type WorkerOperationalStatus = {
   state: "ONLINE" | "OFFLINE";
+  instanceId: string;
+  leaderStatus: "ACTIVE" | "RELEASING";
   startedAt: string;
   heartbeatAt: string;
+  lastHeartbeatAt: string;
+  lastCycleStartedAt: string | null;
+  lastCycleFinishedAt: string | null;
+  lastCycleStatus: "SUCCESS" | "PARTIAL" | "FAILED" | null;
+  currentPlanningRunId: string | null;
+  version: string;
+  commit: string | null;
+  uptimeSeconds: number;
   stoppedAt?: string;
-  processId: number;
   nextRuns: Record<WorkerComponent, string>;
   lastRuns: Partial<
     Record<
@@ -103,7 +112,9 @@ export type ContinuousWorkerOptions = {
   shutdownTimeoutMs?: number;
   now?: () => Date;
   sleep?: (durationMs: number, signal: AbortSignal) => Promise<void>;
-  processId?: number;
+  instanceId?: string;
+  version?: string;
+  commit?: string | null;
   logger?: (entry: Record<string, unknown>) => void;
 };
 
@@ -348,8 +359,8 @@ export async function runContinuousWorker(options: ContinuousWorkerOptions) {
   const shutdownTimeoutMs =
     options.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
   const startedAt = now();
-  const processId = options.processId ?? process.pid;
-  const runId = `continuous:${startedAt.toISOString()}:${processId}`;
+  const instanceId = options.instanceId ?? `worker-${startedAt.getTime()}`;
+  const runId = `continuous:${startedAt.toISOString()}:${instanceId.slice(0, 12)}`;
   const logger =
     options.logger ??
     ((entry: Record<string, unknown>) => console.log(JSON.stringify(entry)));
@@ -361,16 +372,28 @@ export async function runContinuousWorker(options: ContinuousWorkerOptions) {
   let lockBackend: WorkerOperationalStatus["lockBackend"] = "UNKNOWN";
   const metrics = emptyOperationalMetrics();
   let nextHeartbeatAt = startedAt;
+  let lastCycleStartedAt: Date | null = null;
+  let lastCycleFinishedAt: Date | null = null;
+  let lastCycleStatus: WorkerOperationalStatus["lastCycleStatus"] = null;
 
   const status = (
     state: WorkerOperationalStatus["state"],
     at: Date,
   ): WorkerOperationalStatus => ({
     state,
+    instanceId,
+    leaderStatus: state === "OFFLINE" ? "RELEASING" : "ACTIVE",
     startedAt: startedAt.toISOString(),
     heartbeatAt: at.toISOString(),
+    lastHeartbeatAt: at.toISOString(),
+    lastCycleStartedAt: lastCycleStartedAt?.toISOString() ?? null,
+    lastCycleFinishedAt: lastCycleFinishedAt?.toISOString() ?? null,
+    lastCycleStatus,
+    currentPlanningRunId: null,
+    version: options.version ?? process.env.npm_package_version ?? "0.0.0",
+    commit: (options.commit ?? process.env.AFFILIATE_BUILD_COMMIT)?.slice(0, 12) ?? null,
+    uptimeSeconds: Math.max(0, Math.floor((at.getTime() - startedAt.getTime()) / 1_000)),
     ...(state === "OFFLINE" ? { stoppedAt: at.toISOString() } : {}),
-    processId,
     nextRuns: Object.fromEntries(
       COMPONENTS.map((component) => [
         component,
@@ -387,6 +410,10 @@ export async function runContinuousWorker(options: ContinuousWorkerOptions) {
 
   while (!options.signal.aborted) {
     const tickAt = now();
+    lastCycleStartedAt = tickAt;
+    let cycleFailures = 0;
+    let cycleExecutions = 0;
+    let cyclePartial = false;
     const controls = await readWorkerControls();
 
     for (const component of COMPONENTS) {
@@ -408,6 +435,7 @@ export async function runContinuousWorker(options: ContinuousWorkerOptions) {
           durationMs: 0,
         });
       } else {
+        cycleExecutions += 1;
         const activeHeartbeat = setInterval(() => {
           void persistStatus(status("ONLINE", now())).catch(() => undefined);
         }, heartbeatIntervalMs);
@@ -450,6 +478,7 @@ export async function runContinuousWorker(options: ContinuousWorkerOptions) {
             durationMs: Math.max(0, Date.now() - componentStartedAt),
           };
           if (componentStatus === "FAILED") {
+            cycleFailures += 1;
             lastError = {
               component,
               at: tickAt.toISOString(),
@@ -457,6 +486,9 @@ export async function runContinuousWorker(options: ContinuousWorkerOptions) {
               rootCause:
                 outcome?.rootCause ?? "COMPONENT_EXECUTION_FAILED",
             };
+          }
+          if (componentStatus === "PARTIAL" || componentStatus === "SKIPPED") {
+            cyclePartial = true;
           }
           logger({
             timestamp: tickAt.toISOString(),
@@ -469,6 +501,7 @@ export async function runContinuousWorker(options: ContinuousWorkerOptions) {
               : {}),
           });
         } catch {
+          cycleFailures += 1;
           if (component === "discovery") {
             metrics.discoveryRuns += 1;
             metrics.discoveryFailed += 1;
@@ -503,6 +536,13 @@ export async function runContinuousWorker(options: ContinuousWorkerOptions) {
     }
 
     const afterJobs = now();
+    lastCycleFinishedAt = afterJobs;
+    lastCycleStatus =
+      cycleFailures > 0 && cycleFailures === cycleExecutions
+        ? "FAILED"
+        : cycleFailures > 0 || cyclePartial
+          ? "PARTIAL"
+          : "SUCCESS";
     if (afterJobs >= nextHeartbeatAt) {
       await persistStatus(status("ONLINE", afterJobs));
       nextHeartbeatAt = new Date(afterJobs.getTime() + heartbeatIntervalMs);

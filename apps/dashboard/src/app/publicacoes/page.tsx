@@ -91,8 +91,17 @@ export default async function PublicationsPage() {
           actionLabel="Ver ofertas"
         />
       ) : (
-        <div className="overflow-x-auto rounded-md border bg-white">
-          <table className="w-full min-w-[1540px] text-left text-sm">
+        <section className="rounded-md border bg-white">
+          <p className="border-b bg-blue-50 px-4 py-2 text-xs text-blue-900">
+            Tabela larga: use rolagem horizontal. As colunas de controle e
+            revisao permanecem visiveis a direita.
+          </p>
+          <div
+            className="overflow-x-auto focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+            tabIndex={0}
+            aria-label="Publicacoes com rolagem horizontal"
+          >
+            <table className="w-full min-w-[1540px] text-left text-sm">
             <thead className="border-b bg-[var(--muted)] text-xs uppercase text-[var(--muted-foreground)]">
               <tr>
                 <th className="px-4 py-3">Status</th>
@@ -638,8 +647,9 @@ export default async function PublicationsPage() {
                 );
               })}
             </tbody>
-          </table>
-        </div>
+            </table>
+          </div>
+        </section>
       )}
     </AdminShell>
   );

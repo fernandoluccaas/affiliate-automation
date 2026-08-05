@@ -1,5 +1,11 @@
 # Worker operations
 
+For the Phase 5F Windows production supervisor, startup/preflight, global worker
+leadership, health/readiness, audit, log rotation, backup/verification, optional
+Task Scheduler setup, power-loss recovery, and operational checklists, see
+[Windows local production operations](windows-production-operations.md). The
+continuous worker and supervisor never initiate WhatsApp Web dispatch.
+
 ## Phase 4 baseline audit
 
 The worker currently has two execution modes:

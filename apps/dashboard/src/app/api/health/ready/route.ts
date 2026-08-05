@@ -7,11 +7,12 @@ export async function GET() {
     return NextResponse.json(
       {
         status: status.status,
+        checkedAt: status.checkedAt,
         checks: {
-          application: "LIVE",
-          postgresql: status.database,
+          database: status.database,
           redis: status.redis,
           migrations: status.migrations.status,
+          build: status.build,
           worker: status.worker.state,
         },
       },
@@ -19,7 +20,10 @@ export async function GET() {
     );
   } catch {
     return NextResponse.json(
-      { status: "NOT_READY", errorCode: "HEALTH_CHECK_FAILED" },
+      {
+        status: "NOT_READY",
+        errorCode: "READINESS_CHECK_FAILED",
+      },
       { status: 503 },
     );
   }

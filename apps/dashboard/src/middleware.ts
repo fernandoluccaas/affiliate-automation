@@ -7,6 +7,7 @@ export const publicPaths = ["/login", "/api/health"];
 export function isPublicPath(pathname: string) {
   return (
     publicPaths.includes(pathname) ||
+    pathname.startsWith("/api/health/") ||
     pathname.startsWith("/go/") ||
     pathname.startsWith("/_next") ||
     pathname.startsWith("/favicon")

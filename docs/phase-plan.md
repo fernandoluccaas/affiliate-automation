@@ -183,6 +183,14 @@ Status: implemented.
 - Added sanitized read-only dispatch status and safe pre-click abandoned-claim release; claims after a click marker remain blocked for manual delivery review.
 - Kept the continuous worker and dashboard free of browser dispatch and kept standard tests on fake publishers only.
 
+## Phase 5F - Continuous local production operations
+
+- Added a Windows PowerShell supervisor for the production dashboard and worker with owned-PID checks, exclusive singleton lock, cooperative shutdown, progressive backoff, crash limits, structured local state, and a fake-process smoke mode.
+- Added a Redis global worker leader with TTL renewal, ownership-checked release, loss detection, and fail-closed second-worker/Redis behavior.
+- Added sanitized live/readiness endpoints, consolidated worker heartbeat, read-only operational status/audit, `/operacoes`, structured bounded logs, verified PostgreSQL backups, and preview-first optional Task Scheduler scripts.
+- Hardened local Docker PostgreSQL/Redis health, restart, volumes, and loopback ports without containerizing Playwright.
+- Kept WhatsApp dispatch attended, manual, unitary, and outside every continuous process and scheduled task. No database migration was required.
+
 ## Phase 5 - Tracking and Attribution
 
 - Implement `/go/[slug]` redirects with click tracking and rate limiting.

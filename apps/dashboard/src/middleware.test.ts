@@ -6,6 +6,8 @@ describe("middleware route protection", () => {
   it("allows public paths", () => {
     expect(isPublicPath("/login")).toBe(true);
     expect(isPublicPath("/api/health")).toBe(true);
+    expect(isPublicPath("/api/health/live")).toBe(true);
+    expect(isPublicPath("/api/health/ready")).toBe(true);
     expect(isPublicPath("/go/oferta-1")).toBe(true);
   });
 
