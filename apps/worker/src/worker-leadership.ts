@@ -3,6 +3,13 @@ import { acquireLock, type LockHandle } from "@affiliate/redis";
 
 export const WORKER_LEADER_KEY = "affiliate:worker:leader";
 
+export type WorkerLeadershipEvent =
+  | "ACQUIRED"
+  | "ACQUIRE_REJECTED"
+  | "RENEWED"
+  | "RENEWAL_FAILED"
+  | "RELEASED";
+
 export type WorkerLeadershipResult<T> =
   | { status: "COMPLETED"; instanceId: string; result: T }
   | {
@@ -29,13 +36,24 @@ export async function runWithWorkerLeadership<T>(input: {
   instanceId?: string;
   setIntervalFn?: typeof setInterval;
   clearIntervalFn?: typeof clearInterval;
+  key?: string;
+  onEvent?: (event: WorkerLeadershipEvent) => void | Promise<void>;
 }): Promise<WorkerLeadershipResult<T>> {
   const env = input.env ?? process.env;
   const ttlMs = workerLeaderTtlMs(env);
   const instanceId = input.instanceId ?? randomUUID();
   const acquire = input.acquire ?? acquireLock;
-  const lock = await acquire(WORKER_LEADER_KEY, ttlMs, { requireRedis: true });
+  const key = input.key ?? WORKER_LEADER_KEY;
+  const emit = async (event: WorkerLeadershipEvent) => {
+    await input.onEvent?.(event);
+  };
+  if (input.signal?.aborted) {
+    await emit("ACQUIRE_REJECTED");
+    return { status: "LEADERSHIP_LOST", instanceId };
+  }
+  const lock = await acquire(key, ttlMs, { requireRedis: true });
   if (!lock.acquired) {
+    await emit("ACQUIRE_REJECTED");
     return {
       status:
         lock.failureReason === "REDIS_UNAVAILABLE" || lock.mode === "unavailable"
@@ -44,28 +62,41 @@ export async function runWithWorkerLeadership<T>(input: {
       instanceId,
     };
   }
+  if (input.signal?.aborted) {
+    await lock.release().catch(() => undefined);
+    await emit("RELEASED");
+    return { status: "LEADERSHIP_LOST", instanceId };
+  }
+  await emit("ACQUIRED");
 
   const controller = new AbortController();
   const externalStop = () => controller.abort();
   input.signal?.addEventListener("abort", externalStop, { once: true });
   let leadershipLost = false;
   let renewalRunning = false;
+  let pendingRenewal: Promise<void> = Promise.resolve();
   const setIntervalFn = input.setIntervalFn ?? setInterval;
   const clearIntervalFn = input.clearIntervalFn ?? clearInterval;
-  const renewal = setIntervalFn(async () => {
+  const renewal = setIntervalFn(() => {
     if (renewalRunning || controller.signal.aborted) return;
     renewalRunning = true;
-    try {
-      if (!(await lock.extend(ttlMs))) {
+    pendingRenewal = (async () => {
+      try {
+        if (await lock.extend(ttlMs)) {
+          await emit("RENEWED");
+          return;
+        }
         leadershipLost = true;
+        await emit("RENEWAL_FAILED");
         controller.abort();
+      } catch {
+        leadershipLost = true;
+        await emit("RENEWAL_FAILED");
+        controller.abort();
+      } finally {
+        renewalRunning = false;
       }
-    } catch {
-      leadershipLost = true;
-      controller.abort();
-    } finally {
-      renewalRunning = false;
-    }
+    })();
   }, Math.max(5_000, Math.floor(ttlMs / 3)));
   renewal.unref?.();
 
@@ -76,7 +107,9 @@ export async function runWithWorkerLeadership<T>(input: {
       : { status: "COMPLETED", instanceId, result };
   } finally {
     clearIntervalFn(renewal);
+    await pendingRenewal.catch(() => undefined);
     input.signal?.removeEventListener("abort", externalStop);
     await lock.release().catch(() => undefined);
+    await emit("RELEASED");
   }
 }

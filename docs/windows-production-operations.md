@@ -1,5 +1,9 @@
 # Windows local production operations
 
+The controlled Phase 5G burn-in is documented separately in
+[`operational-burn-in.md`](operational-burn-in.md). Do not add the first burn-in to
+Task Scheduler or automatic boot before the repository owner accepts a manual run.
+
 Phase 5F runs the durable application locally on Windows 10/11. PostgreSQL and
 Redis run in Docker Desktop; the production Next.js dashboard and continuous
 Node worker run on the host under a PowerShell supervisor. WhatsApp Web remains

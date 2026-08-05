@@ -191,6 +191,14 @@ Status: implemented.
 - Hardened local Docker PostgreSQL/Redis health, restart, volumes, and loopback ports without containerizing Playwright.
 - Kept WhatsApp dispatch attended, manual, unitary, and outside every continuous process and scheduled task. No database migration was required.
 
+## Phase 5G - Operational reliability and safe burn-in
+
+- Add an explicit, fail-closed burn-in entrypoint with no business-job or external-client imports.
+- Prove leadership, heartbeat, timers, health and shutdown with sanitized event evidence and business fingerprints.
+- Use isolated Redis keys for smoke tests and atomic ownership checks for Upstash and local Redis.
+- Centralize contextual heartbeat severity and reset per-component crash backoff after a stable window.
+- Keep the operational dashboard read-only and require manual acceptance before any long burn-in or boot scheduling.
+
 ## Phase 5 - Tracking and Attribution
 
 - Implement `/go/[slug]` redirects with click tracking and rate limiting.

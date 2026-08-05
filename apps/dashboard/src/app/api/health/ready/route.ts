@@ -8,6 +8,13 @@ export async function GET() {
       {
         status: status.status,
         checkedAt: status.checkedAt,
+        mode: status.worker.mode,
+        burnInActive: status.worker.burnInActive,
+        leadership: status.worker.leaderStatus,
+        blockedCycles: status.worker.blockedCycles,
+        externalEffectsObserved: status.worker.externalEffectsObserved,
+        businessChangesObserved: status.worker.businessChangesObserved,
+        humanActionRequired: status.workerContext.humanActionRequired,
         checks: {
           database: status.database,
           redis: status.redis,
@@ -16,7 +23,7 @@ export async function GET() {
           worker: status.worker.state,
         },
       },
-      { status: status.status === "READY" ? 200 : 503 },
+      { status: status.status === "NOT_READY" ? 503 : 200 },
     );
   } catch {
     return NextResponse.json(

@@ -9,7 +9,7 @@ import {
   statSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 function option(name) {
   const index = process.argv.indexOf(name);
@@ -23,7 +23,7 @@ const repository = resolve(option("--repository") || process.cwd());
 const stopFile = resolve(option("--stop-file") || "");
 
 if (!['dashboard', 'worker'].includes(component) ||
-    !['production:dashboard', 'production:worker'].includes(script) ||
+    !['production:dashboard', 'production:worker', 'production:worker:burn-in'].includes(script) ||
     !/^[a-z0-9-]{8,}$/i.test(instanceId || '') ||
     !stopFile.startsWith(join(repository, ".local", "ops"))) {
   process.exitCode = 2;
@@ -38,6 +38,21 @@ const logFiles = {
 };
 const maxBytes = Math.max(1, Number(process.env.AFFILIATE_LOG_MAX_MB || 20)) * 1_048_576;
 const retentionMs = Math.max(1, Number(process.env.AFFILIATE_LOG_RETENTION_DAYS || 14)) * 86_400_000;
+const burnInEventFile = join(repository, ".local", "ops", "burn-in-events.jsonl");
+
+function burnInEvent(event) {
+  if (process.env.AFFILIATE_SUPERVISOR_MODE !== "BURN_IN") return;
+  appendFileSync(
+    burnInEventFile,
+    `${JSON.stringify({
+      timestamp: new Date().toISOString(),
+      component,
+      event,
+      instanceId: instanceId.slice(0, 12),
+    })}\n`,
+    "utf8",
+  );
+}
 
 for (const name of readdirSync(logDirectory)) {
   if (!name.includes(".jsonl.")) continue;
@@ -97,18 +112,33 @@ const child = spawn(process.env.ComSpec || "cmd.exe", [
   `npm.cmd run ${script}`,
 ], {
   cwd: repository,
-  env: process.env,
+  env: { ...process.env, AFFILIATE_COMPONENT_STOP_FILE: stopFile },
   windowsHide: true,
   stdio: ["ignore", "pipe", "pipe"],
 });
+burnInEvent("PROCESS_HOST_STARTED");
 consume(child.stdout, "stdout");
 consume(child.stderr, "stderr");
 
 let stopping = false;
+let forcedStopTimer = null;
 function stop() {
   if (stopping) return;
   stopping = true;
-  child.kill("SIGTERM");
+  if (script === "production:worker:burn-in" || script === "production:worker") {
+    forcedStopTimer = setTimeout(() => {
+      spawnSync("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
+        windowsHide: true,
+        stdio: "ignore",
+      });
+    }, 7_000);
+    forcedStopTimer.unref();
+    return;
+  }
+  spawnSync("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
+    windowsHide: true,
+    stdio: "ignore",
+  });
 }
 process.once("SIGINT", stop);
 process.once("SIGTERM", stop);
@@ -119,10 +149,13 @@ stopMonitor.unref();
 
 child.once("error", () => {
   write("stderr", "error", "APPLICATION_PROCESS_ERROR");
+  burnInEvent("PROCESS_HOST_ERROR");
   process.exitCode = 1;
 });
 child.once("close", (code) => {
   clearInterval(stopMonitor);
+  if (forcedStopTimer) clearTimeout(forcedStopTimer);
   write("stdout", code === 0 ? "info" : "error", "APPLICATION_PROCESS_EXIT");
+  burnInEvent(code === 0 ? "PROCESS_HOST_STOPPED" : "PROCESS_HOST_FAILED");
   process.exitCode = code ?? 1;
 });

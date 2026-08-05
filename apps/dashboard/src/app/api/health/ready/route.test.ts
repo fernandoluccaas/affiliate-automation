@@ -15,6 +15,7 @@ describe("dashboard readiness", () => {
       migrations: { status: "UP_TO_DATE" },
       build: "AVAILABLE",
       worker: { state: "ONLINE" },
+      workerContext: { humanActionRequired: true },
     });
     const { GET } = await import("./route");
     const response = await GET();
@@ -32,6 +33,7 @@ describe("dashboard readiness", () => {
       migrations: { status: "PENDING" },
       build: "AVAILABLE",
       worker: { state: "ONLINE" },
+      workerContext: { humanActionRequired: true },
     });
     const { GET } = await import("./route");
     const response = await GET();
@@ -39,5 +41,32 @@ describe("dashboard readiness", () => {
     await expect(response.json()).resolves.toMatchObject({
       checks: { migrations: "PENDING" },
     });
+  });
+
+  it("exposes a sanitized active burn-in without process identifiers", async () => {
+    collectOperationalStatus.mockResolvedValue({
+      status: "READY",
+      checkedAt: "2026-08-05T12:00:00.000Z",
+      database: "OK",
+      redis: "OK",
+      migrations: { status: "UP_TO_DATE" },
+      build: "AVAILABLE",
+      worker: {
+        state: "ONLINE",
+        mode: "BURN_IN",
+        burnInActive: true,
+        leaderStatus: "ACTIVE",
+        blockedCycles: 4,
+        externalEffectsObserved: 0,
+        businessChangesObserved: 0,
+      },
+      workerContext: { humanActionRequired: false },
+    });
+    const { GET } = await import("./route");
+    const response = await GET();
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).toMatchObject({ mode: "BURN_IN", burnInActive: true, blockedCycles: 4 });
+    expect(JSON.stringify(body)).not.toMatch(/\bpid\b|postgresql:\/\/|redis:\/\//i);
   });
 });

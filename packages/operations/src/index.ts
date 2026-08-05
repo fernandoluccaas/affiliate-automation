@@ -31,6 +31,7 @@ export const OPS_ROOT = ".local/ops";
 export const OPS_LOG_ROOT = ".local/logs";
 export const DEFAULT_BACKUP_ROOT = ".local/backups";
 export const WORKER_STATUS_KEY = "worker:continuous:status";
+export const BURN_IN_REPORT_FILE = ".local/ops/burn-in-report.json";
 export const OPERATIONS_WORKSPACE_ROOT = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../..",
@@ -48,6 +49,13 @@ export type OperationalFinding = {
   publicationId?: string;
   channelId?: string;
   action: string;
+};
+
+export type WorkerOperationalContext = {
+  expectation: "EXPECTED_RUNNING" | "EXPECTED_STOPPED" | "FAILED";
+  heartbeatSeverity: "NONE" | "WARNING" | "CRITICAL";
+  heartbeatAction: string | null;
+  humanActionRequired: boolean;
 };
 
 type JsonRecord = Record<string, unknown>;
@@ -132,6 +140,30 @@ export function supervisorBackoffMs(crashes: number, baseMs = 1_000, maxMs = 60_
   return Math.min(maxMs, baseMs * 2 ** Math.max(0, crashes - 1));
 }
 
+export function resetSupervisorStateAfterStability(
+  state: SupervisorComponentState,
+  input: { now: Date; stableResetSeconds: number },
+) {
+  const startedAt = Date.parse(state.startedAt);
+  const stableForMs = input.now.getTime() - startedAt;
+  if (
+    state.status !== "RUNNING" ||
+    state.consecutiveCrashes === 0 ||
+    !Number.isFinite(startedAt) ||
+    stableForMs < Math.max(1, input.stableResetSeconds) * 1_000
+  ) {
+    return { state, reset: false };
+  }
+  return {
+    state: {
+      ...state,
+      consecutiveCrashes: 0,
+      nextRestartAt: null,
+    },
+    reset: true,
+  };
+}
+
 export function nextSupervisorState(
   state: SupervisorComponentState,
   input: { requested: boolean; exitCode: number; maxCrashes: number; now: Date },
@@ -191,6 +223,52 @@ export function isOwnedProcess(input: {
   );
 }
 
+export function classifyWorkerOperationalContext(input: {
+  supervisorState: string;
+  components: Array<{ status: string; lastExitReason: string | null }>;
+  workerState: string;
+  burnInActive?: boolean;
+}): WorkerOperationalContext {
+  const failed =
+    input.supervisorState === "STALE" ||
+    input.components.some(
+      (component) =>
+        component.status === "FAILED" ||
+        component.lastExitReason === "CRASH" ||
+        component.lastExitReason === "UNEXPECTED_EXIT",
+    );
+  const running = input.supervisorState === "RUNNING";
+  const expectation = failed
+    ? "FAILED"
+    : running
+      ? "EXPECTED_RUNNING"
+      : "EXPECTED_STOPPED";
+  if (input.workerState !== "STALE") {
+    return {
+      expectation,
+      heartbeatSeverity: "NONE",
+      heartbeatAction: null,
+      humanActionRequired: failed,
+    };
+  }
+  if (expectation === "EXPECTED_STOPPED" && !input.burnInActive) {
+    return {
+      expectation,
+      heartbeatSeverity: "WARNING",
+      heartbeatAction: "START_CONTINUOUS_OPERATIONS_WHEN_READY",
+      humanActionRequired: false,
+    };
+  }
+  return {
+    expectation,
+    heartbeatSeverity: "CRITICAL",
+    heartbeatAction: input.burnInActive
+      ? "STOP_BURN_IN_AND_INSPECT_WORKER"
+      : "RESTART_OR_INSPECT_WORKER",
+    humanActionRequired: true,
+  };
+}
+
 export function auditOperationalSnapshot(input: {
   now: Date;
   heartbeat: unknown;
@@ -206,6 +284,7 @@ export function auditOperationalSnapshot(input: {
   channels: Array<{ id: string; configuration: unknown }>;
   runningAutomationRuns: Array<{ id: string; startedAt: Date }>;
   pendingAttempts: Array<{ id: string; publicationId: string; attemptedAt: Date }>;
+  workerContext?: WorkerOperationalContext;
 }): OperationalFinding[] {
   const findings: OperationalFinding[] = [];
   const heartbeat = asRecord(input.heartbeat);
@@ -223,10 +302,12 @@ export function auditOperationalSnapshot(input: {
       staleAfterMs: DEFAULT_WORKER_STALE_AFTER_MS,
     }) === "STALE"
   ) {
+    const context = input.workerContext;
     findings.push({
       code: "WORKER_HEARTBEAT_STALE",
-      severity: "CRITICAL",
-      action: "RESTART_OR_INSPECT_WORKER",
+      severity:
+        context?.heartbeatSeverity === "WARNING" ? "WARNING" : "CRITICAL",
+      action: context?.heartbeatAction ?? "RESTART_OR_INSPECT_WORKER",
     });
   }
 
@@ -699,7 +780,6 @@ async function localSupervisorStatus(workspaceRoot: string, now: Date) {
     }
     return {
       state: processPresent ? "RUNNING" : "STALE",
-      pid,
       instanceId:
         typeof state.instanceId === "string" ? state.instanceId.slice(0, 12) : null,
       uptimeSeconds: startedAt
@@ -707,7 +787,7 @@ async function localSupervisorStatus(workspaceRoot: string, now: Date) {
         : 0,
     };
   } catch {
-    return { state: "STOPPED", pid: null, instanceId: null, uptimeSeconds: 0 };
+    return { state: "STOPPED", instanceId: null, uptimeSeconds: 0 };
   }
 }
 
@@ -725,12 +805,15 @@ async function localComponentStatus(workspaceRoot: string) {
             ? component.component
             : "unknown",
         status,
-        pid: typeof component.pid === "number" ? component.pid : 0,
         restartCount:
           typeof component.restartCount === "number" ? component.restartCount : 0,
         lastExitReason:
           typeof component.lastExitReason === "string" ? component.lastExitReason : null,
         action: status === "FAILED" ? "INSPECT_LOGS_THEN_RESTART_SUPERVISOR" : null,
+        consecutiveCrashes:
+          typeof component.consecutiveCrashes === "number"
+            ? component.consecutiveCrashes
+            : 0,
       };
     });
   } catch {
@@ -831,16 +914,26 @@ export async function collectOperationalStatus(
   const buildReady = existsSync(join(workspaceRoot, "apps/dashboard/.next/BUILD_ID"));
   const supervisor = await localSupervisorStatus(workspaceRoot, now);
   const components = await localComponentStatus(workspaceRoot);
+  const burnInActive = worker.mode === "BURN_IN" && worker.state === "ONLINE";
+  const workerContext = classifyWorkerOperationalContext({
+    supervisorState: supervisor.state,
+    components,
+    workerState,
+    burnInActive,
+  });
+  const dependenciesReady =
+    database === "OK" &&
+    redis.status === "ok" &&
+    appliedMigrations === expectedMigrations &&
+    buildReady;
+  const status = !dependenciesReady || workerContext.heartbeatSeverity === "CRITICAL"
+    ? "NOT_READY"
+    : workerContext.heartbeatSeverity === "WARNING"
+      ? "READY_WITH_WARNINGS"
+      : "READY";
   return {
     checkedAt: now.toISOString(),
-    status:
-      database === "OK" &&
-      redis.status === "ok" &&
-      appliedMigrations === expectedMigrations &&
-      buildReady &&
-      workerState !== "STALE"
-        ? "READY"
-        : "NOT_READY",
+    status,
     database,
     redis: redis.status === "ok" ? "OK" : "ERROR",
     migrations: {
@@ -850,6 +943,7 @@ export async function collectOperationalStatus(
     },
     build: buildReady ? "AVAILABLE" : "MISSING",
     supervisor,
+    workerContext,
     components,
     worker: {
       state: workerState,
@@ -870,6 +964,26 @@ export async function collectOperationalStatus(
           : null,
       uptimeSeconds:
         typeof worker.uptimeSeconds === "number" ? worker.uptimeSeconds : 0,
+      mode: worker.mode === "BURN_IN" ? "BURN_IN" : "NORMAL",
+      burnInActive,
+      blockedCycles:
+        typeof worker.blockedCycles === "number" ? worker.blockedCycles : 0,
+      externalEffectsObserved:
+        typeof worker.externalEffectsObserved === "number"
+          ? worker.externalEffectsObserved
+          : 0,
+      businessChangesObserved:
+        typeof worker.businessChangesObserved === "number"
+          ? worker.businessChangesObserved
+          : 0,
+      leadershipRenewals:
+        typeof worker.leadershipRenewals === "number"
+          ? worker.leadershipRenewals
+          : 0,
+      leadershipRenewalFailures:
+        typeof worker.leadershipRenewalFailures === "number"
+          ? worker.leadershipRenewalFailures
+          : 0,
     },
     lastAutomationRun: lastAutomationRun
       ? {
@@ -909,7 +1023,7 @@ export async function collectStateAudit(
 ) {
   const workspaceRoot = input.workspaceRoot ?? OPERATIONS_WORKSPACE_ROOT;
   const now = input.now ?? new Date();
-  const [worker, publications, channels, runs, attempts, backup] = await Promise.all([
+  const [worker, publications, channels, runs, attempts, backup, supervisor, components] = await Promise.all([
     client.systemSetting.findUnique({
       where: { key: WORKER_STATUS_KEY },
       select: { value: true, updatedAt: true },
@@ -931,7 +1045,28 @@ export async function collectStateAudit(
       select: { id: true, publicationId: true, attemptedAt: true },
     }),
     latestBackup(resolveSafeBackupDirectory(workspaceRoot)),
+    localSupervisorStatus(workspaceRoot, now),
+    localComponentStatus(workspaceRoot),
   ]);
+  const workerRecord = asRecord(worker?.value);
+  const heartbeatAt =
+    typeof workerRecord.lastHeartbeatAt === "string"
+      ? workerRecord.lastHeartbeatAt
+      : typeof workerRecord.heartbeatAt === "string"
+        ? workerRecord.heartbeatAt
+        : null;
+  const workerState = resolveWorkerHealthStatus({
+    storedState: workerRecord.state,
+    heartbeatAt,
+    now,
+  });
+  const workerContext = classifyWorkerOperationalContext({
+    supervisorState: supervisor.state,
+    components,
+    workerState,
+    burnInActive:
+      workerRecord.mode === "BURN_IN" && workerRecord.state === "ONLINE",
+  });
   return auditOperationalSnapshot({
     now,
     heartbeat: worker?.value,
@@ -943,7 +1078,178 @@ export async function collectStateAudit(
     channels,
     runningAutomationRuns: runs,
     pendingAttempts: attempts,
+    workerContext,
   });
+}
+
+function fingerprintRows(rows: unknown[]) {
+  return createHash("sha256")
+    .update(JSON.stringify(rows))
+    .digest("hex");
+}
+
+function whatsappOperationalMetadata(value: unknown) {
+  const metadata = asRecord(value);
+  const keys = [
+    "whatsappWebState",
+    "sendAuthorizationStatus",
+    "sendAuthorizationExpiresAt",
+    "sendAuthorizationClaimedAt",
+    "sendClickStartedAt",
+    "deliveryUncertain",
+    "retryBlocked",
+  ];
+  return Object.fromEntries(
+    keys.filter((key) => metadata[key] !== undefined).map((key) => [key, metadata[key]]),
+  );
+}
+
+export async function captureBusinessStateSnapshot(client: PrismaClient = prisma) {
+  const [products, offers, publications, attempts, runs, channels] = await Promise.all([
+    client.product.findMany({
+      orderBy: { id: "asc" },
+      select: { id: true, updatedAt: true },
+    }),
+    client.offer.findMany({
+      orderBy: { id: "asc" },
+      select: { id: true, updatedAt: true, version: true, status: true },
+    }),
+    client.publication.findMany({
+      orderBy: { id: "asc" },
+      select: {
+        id: true,
+        updatedAt: true,
+        status: true,
+        channelId: true,
+        metadata: true,
+      },
+    }),
+    client.publicationAttempt.findMany({
+      orderBy: { id: "asc" },
+      select: { id: true, attemptedAt: true, status: true, publicationId: true },
+    }),
+    client.automationRun.findMany({
+      orderBy: { id: "asc" },
+      select: { id: true, status: true, startedAt: true, finishedAt: true },
+    }),
+    client.channel.findMany({
+      where: { type: "WHATSAPP_GROUPS" },
+      orderBy: { id: "asc" },
+      select: { id: true, updatedAt: true, configuration: true },
+    }),
+  ]);
+  const entities = {
+    Product: { count: products.length, fingerprint: fingerprintRows(products) },
+    Offer: { count: offers.length, fingerprint: fingerprintRows(offers) },
+    Publication: {
+      count: publications.length,
+      fingerprint: fingerprintRows(
+        publications.map((item) => ({
+          id: item.id,
+          updatedAt: item.updatedAt,
+          status: item.status,
+          channelId: item.channelId,
+          operational: whatsappOperationalMetadata(item.metadata),
+        })),
+      ),
+    },
+    PublicationAttempt: {
+      count: attempts.length,
+      fingerprint: fingerprintRows(attempts),
+    },
+    AutomationRun: { count: runs.length, fingerprint: fingerprintRows(runs) },
+    WhatsAppChannel: {
+      count: channels.length,
+      fingerprint: fingerprintRows(channels),
+    },
+  };
+  return {
+    capturedAt: new Date().toISOString(),
+    entities,
+    fingerprint: fingerprintRows(Object.entries(entities)),
+  };
+}
+
+export function compareBusinessStateSnapshots(
+  before: Awaited<ReturnType<typeof captureBusinessStateSnapshot>>,
+  after: Awaited<ReturnType<typeof captureBusinessStateSnapshot>>,
+) {
+  const changed = Object.keys(before.entities).filter((key) => {
+    const name = key as keyof typeof before.entities;
+    return (
+      before.entities[name].count !== after.entities[name].count ||
+      before.entities[name].fingerprint !== after.entities[name].fingerprint
+    );
+  });
+  return { unchanged: changed.length === 0, changedEntities: changed };
+}
+
+export async function readBurnInReport(workspaceRoot = OPERATIONS_WORKSPACE_ROOT) {
+  try {
+    const value = asRecord(
+      JSON.parse(await readFile(join(workspaceRoot, BURN_IN_REPORT_FILE), "utf8")),
+    );
+    return {
+      status: typeof value.status === "string" ? value.status : "UNKNOWN",
+      startedAt: typeof value.startedAt === "string" ? value.startedAt : null,
+      finishedAt: typeof value.finishedAt === "string" ? value.finishedAt : null,
+      durationSeconds:
+        typeof value.durationSeconds === "number" ? value.durationSeconds : 0,
+      supervisorInstanceId:
+        typeof value.supervisorInstanceId === "string"
+          ? value.supervisorInstanceId.slice(0, 12)
+          : null,
+      dashboardInstanceId:
+        typeof value.dashboardInstanceId === "string"
+          ? value.dashboardInstanceId.slice(0, 12)
+          : null,
+      workerInstanceId:
+        typeof value.workerInstanceId === "string"
+          ? value.workerInstanceId.slice(0, 12)
+          : null,
+      componentUptimeSeconds:
+        typeof value.componentUptimeSeconds === "number"
+          ? value.componentUptimeSeconds
+          : 0,
+      restartCount:
+        typeof value.restartCount === "number" ? value.restartCount : 0,
+      maxConsecutiveCrashes:
+        typeof value.maxConsecutiveCrashes === "number"
+          ? value.maxConsecutiveCrashes
+          : 0,
+      burnInConfirmed: value.burnInConfirmed === true,
+      leadershipRenewals:
+        typeof value.leadershipRenewals === "number" ? value.leadershipRenewals : 0,
+      leadershipRenewalFailures:
+        typeof value.leadershipRenewalFailures === "number"
+          ? value.leadershipRenewalFailures
+          : 0,
+      blockedCycles: typeof value.blockedCycles === "number" ? value.blockedCycles : 0,
+      externalEffectsObserved:
+        typeof value.externalEffectsObserved === "number"
+          ? value.externalEffectsObserved
+          : 0,
+      businessChangesObserved:
+        typeof value.businessChangesObserved === "number"
+          ? value.businessChangesObserved
+          : 0,
+      businessFingerprintUnchanged: value.businessFingerprintUnchanged === true,
+      maxHeartbeatGapMs:
+        typeof value.maxHeartbeatGapMs === "number" ? value.maxHeartbeatGapMs : 0,
+      liveValidated: value.liveValidated === true,
+      readyValidated: value.readyValidated === true,
+      shutdownValidated: value.shutdownValidated === true,
+      realLeaderKeyUnchanged: value.realLeaderKeyUnchanged === true,
+      residualProcesses:
+        typeof value.residualProcesses === "number" ? value.residualProcesses : 0,
+      residualLocks: typeof value.residualLocks === "number" ? value.residualLocks : 0,
+      humanActions: Array.isArray(value.humanActions)
+        ? value.humanActions.filter((item): item is string => typeof item === "string")
+        : [],
+    };
+  } catch {
+    return null;
+  }
 }
 
 export async function directoryFreeBytes(directory: string) {

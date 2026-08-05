@@ -89,6 +89,12 @@ Phase 5F runs PostgreSQL and Redis in Docker Desktop and the production dashboar
 
 Backups use `npm run ops:backup-db` followed by `ops:backup-status` and explicit `ops:verify-backup`. Task Scheduler installation is optional, preview-first, and requires a confirmation flag. None of the continuous processes, health endpoints, scheduled tasks, or backup scripts opens Playwright or dispatches WhatsApp. See [Windows local production operations](docs/windows-production-operations.md) for startup, shutdown, recovery, retention, restore, and daily/weekly/monthly checklists.
 
+Phase 5G adds an explicit fail-closed burn-in worker that exercises PostgreSQL,
+Redis, leadership, heartbeat, timers and shutdown while structurally blocking every
+business job and external integration. Use `npm run ops:burn-in:preflight` and the
+bounded `npm run ops:burn-in:smoke -- --duration-seconds 60`; the dashboard remains
+read-only. See [Operational reliability and safe burn-in](docs/operational-burn-in.md).
+
 Install Chromium explicitly with `npm run whatsapp:web:install-browser`, then use the remaining local commands documented in [docs/whatsapp-groups.md](docs/whatsapp-groups.md). Caption validation resolves an active media surface from preview, media controls, stacking context, geometry and before/after contenteditable fingerprints; it rejects the normal composer. Any failure after click initiation remains `DELIVERY_UNCERTAIN`, blocks the entire channel queue and can be reconciled auditably without resending.
 
 Manual export channels create `EXPORTED` publications. They do not count as external publications and do not update the offer as published.

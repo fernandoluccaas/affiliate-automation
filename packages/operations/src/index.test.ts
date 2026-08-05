@@ -6,10 +6,13 @@ import { describe, expect, it } from "vitest";
 import {
   applyBackupRetention,
   auditOperationalSnapshot,
+  classifyWorkerOperationalContext,
+  compareBusinessStateSnapshots,
   createPostgresBackup,
   isFileInsideDirectory,
   isOwnedProcess,
   nextSupervisorState,
+  resetSupervisorStateAfterStability,
   rotateLogs,
   resolveSafeBackupDirectory,
   sanitizeLogEntry,
@@ -90,6 +93,71 @@ describe("local supervisor policy", () => {
         now,
       }),
     ).toMatchObject({ status: "STOPPED", lastExitReason: "REQUESTED" });
+  });
+
+  it("resets crashes and backoff only after per-component stability", () => {
+    const unstable = { ...supervisorState(), consecutiveCrashes: 3 };
+    expect(
+      resetSupervisorStateAfterStability(unstable, {
+        now: new Date(now.getTime() + 599_000),
+        stableResetSeconds: 600,
+      }),
+    ).toMatchObject({ reset: false, state: { consecutiveCrashes: 3 } });
+    expect(
+      resetSupervisorStateAfterStability(unstable, {
+        now: new Date(now.getTime() + 600_000),
+        stableResetSeconds: 600,
+      }),
+    ).toMatchObject({
+      reset: true,
+      state: { consecutiveCrashes: 0, nextRestartAt: null },
+    });
+    const dashboard = { ...unstable, component: "dashboard" as const };
+    const worker = resetSupervisorStateAfterStability(unstable, {
+      now: new Date(now.getTime() + 600_000),
+      stableResetSeconds: 600,
+    });
+    expect(dashboard.consecutiveCrashes).toBe(3);
+    expect(worker.state.consecutiveCrashes).toBe(0);
+  });
+
+  it("classifies stale heartbeat from one centralized supervisor context", () => {
+    expect(
+      classifyWorkerOperationalContext({
+        supervisorState: "STOPPED",
+        components: [],
+        workerState: "STALE",
+      }),
+    ).toMatchObject({
+      expectation: "EXPECTED_STOPPED",
+      heartbeatSeverity: "WARNING",
+      humanActionRequired: false,
+    });
+    expect(
+      classifyWorkerOperationalContext({
+        supervisorState: "RUNNING",
+        components: [],
+        workerState: "STALE",
+      }),
+    ).toMatchObject({ heartbeatSeverity: "CRITICAL", humanActionRequired: true });
+    expect(
+      classifyWorkerOperationalContext({
+        supervisorState: "RUNNING",
+        components: [],
+        workerState: "STALE",
+        burnInActive: true,
+      }),
+    ).toMatchObject({
+      heartbeatSeverity: "CRITICAL",
+      heartbeatAction: "STOP_BURN_IN_AND_INSPECT_WORKER",
+    });
+    expect(
+      classifyWorkerOperationalContext({
+        supervisorState: "STOPPED",
+        components: [{ status: "FAILED", lastExitReason: "CRASH" }],
+        workerState: "STALE",
+      }),
+    ).toMatchObject({ expectation: "FAILED", heartbeatSeverity: "CRITICAL" });
   });
 
   it("does not consider an unrelated or stale PID owned", () => {
@@ -241,6 +309,53 @@ describe("read-only operational state audit", () => {
     const codes = auditOperationalSnapshot(input).map((item) => item.code);
     expect(codes).toContain("WORKER_HEARTBEAT_STALE");
     expect(codes).toContain("DATABASE_BACKUP_STALE");
+  });
+
+  it("keeps an intentionally stopped stale heartbeat as a read-only warning", () => {
+    const input = auditInput();
+    input.heartbeat = {
+      state: "ONLINE",
+      lastHeartbeatAt: "2026-08-03T10:00:00.000Z",
+    };
+    const findings = auditOperationalSnapshot({
+      ...input,
+      workerContext: classifyWorkerOperationalContext({
+        supervisorState: "STOPPED",
+        components: [],
+        workerState: "STALE",
+      }),
+    });
+    expect(findings).toContainEqual(
+      expect.objectContaining({
+        code: "WORKER_HEARTBEAT_STALE",
+        severity: "WARNING",
+      }),
+    );
+  });
+});
+
+describe("burn-in business fingerprints", () => {
+  it("reports only changed entity names and never copies business values", () => {
+    const before = {
+      capturedAt: now.toISOString(),
+      fingerprint: "before",
+      entities: {
+        Product: { count: 2, fingerprint: "product-safe" },
+        Offer: { count: 3, fingerprint: "offer-safe" },
+      },
+    } as never;
+    const after = {
+      capturedAt: now.toISOString(),
+      fingerprint: "after",
+      entities: {
+        Product: { count: 2, fingerprint: "product-safe" },
+        Offer: { count: 4, fingerprint: "offer-changed" },
+      },
+    } as never;
+    expect(compareBusinessStateSnapshots(before, after)).toEqual({
+      unchanged: false,
+      changedEntities: ["Offer"],
+    });
   });
 });
 
@@ -452,5 +567,10 @@ describe("sanitized rotating logs and safe scripts", () => {
     expect(publicationsPage).toContain("sticky right-0");
     expect(processHost).toContain("contentHash");
     expect(processHost).not.toMatch(/playwright|dispatch-authorized|whatsapp:web:publish/i);
+    expect(supervisor).toContain("AFFILIATE_SUPERVISOR_STABLE_RESET_SECONDS");
+    expect(supervisor).toContain("COMPONENT_STABILITY_RESET");
+    expect(supervisor).not.toContain("browserOpened = $false");
+    expect(supervisor).not.toContain("sendCalled = $false");
+    expect(dashboard).not.toMatch(/\bPID\b|component\.pid|supervisor\.pid/);
   });
 });

@@ -1,22 +1,28 @@
 import { createReadStream } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { readFile, stat } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { basename, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { prisma } from "@affiliate/database";
+import { acquireLock, getRedisKeyFingerprint } from "@affiliate/redis";
 import {
+  BURN_IN_REPORT_FILE,
   OPS_LOG_ROOT,
   OPERATIONS_WORKSPACE_ROOT,
   applyBackupRetention,
   collectOperationalStatus,
   collectStateAudit,
+  captureBusinessStateSnapshot,
+  compareBusinessStateSnapshots,
   createPostgresBackup,
   directoryFreeBytes,
   isFileInsideDirectory,
   latestBackup,
   logDirectoryStatus,
   resolveSafeBackupDirectory,
+  readBurnInReport,
   rotateLogs,
   verifyPostgresBackup,
   withExclusiveFileLock,
@@ -127,7 +133,7 @@ async function dashboardPortCheck() {
   return "OCCUPIED_UNKNOWN" as const;
 }
 
-async function preflight() {
+async function preflight(input: { burnIn?: boolean; print?: boolean } = {}) {
   const checks: Array<{
     name: string;
     status: "READY" | "WARNING" | "NOT_READY";
@@ -169,11 +175,27 @@ async function preflight() {
   }
   checks.push({
     name: "env:WHATSAPP_WEB_DRY_RUN",
-    status: process.env.WHATSAPP_WEB_DRY_RUN !== "false" ? "READY" : "NOT_READY",
-    ...(process.env.WHATSAPP_WEB_DRY_RUN !== "false"
+    status: process.env.WHATSAPP_WEB_DRY_RUN === "true" ? "READY" : "NOT_READY",
+    ...(process.env.WHATSAPP_WEB_DRY_RUN === "true"
       ? {}
       : { action: "RESTORE_WHATSAPP_WEB_DRY_RUN_TRUE" }),
   });
+  checks.push({
+    name: "env:WORKER_REQUIRE_REDIS",
+    status: process.env.WORKER_REQUIRE_REDIS === "true" ? "READY" : "NOT_READY",
+    ...(process.env.WORKER_REQUIRE_REDIS === "true"
+      ? {}
+      : { action: "CONFIGURE_WORKER_REQUIRE_REDIS_TRUE" }),
+  });
+  if (input.burnIn) {
+    checks.push({
+      name: "env:WORKER_BURN_IN_MODE",
+      status: process.env.WORKER_BURN_IN_MODE === "true" ? "READY" : "NOT_READY",
+      ...(process.env.WORKER_BURN_IN_MODE === "true"
+        ? {}
+        : { action: "SET_WORKER_BURN_IN_MODE_TRUE_FOR_THIS_COMMAND" }),
+    });
+  }
   const docker = await run("docker.exe", ["version", "--format", "{{.Server.Version}}"]);
   const compose = await run("docker.exe", ["compose", "ps", "--format", "json"]);
   checks.push({
@@ -258,19 +280,40 @@ async function preflight() {
     status: status.redis === "OK" ? "READY" : "NOT_READY",
     ...(status.redis === "OK" ? {} : { action: "START_REDIS" }),
   });
-  const staleWorkerBlocksStartup =
-    status.worker.state === "STALE" && status.supervisor.state === "RUNNING";
   checks.push({
     name: "worker-heartbeat",
-    status: staleWorkerBlocksStartup
-      ? "NOT_READY"
-      : status.worker.state === "STALE"
-        ? "WARNING"
-        : "READY",
+    status:
+      status.workerContext.heartbeatSeverity === "CRITICAL"
+        ? "NOT_READY"
+        : status.workerContext.heartbeatSeverity === "WARNING"
+          ? "WARNING"
+          : "READY",
     ...(status.worker.state === "STALE"
-      ? { action: "START_OR_INSPECT_CONTINUOUS_WORKER" }
+      ? {
+          action:
+            status.workerContext.heartbeatAction ??
+            "START_OR_INSPECT_CONTINUOUS_WORKER",
+        }
       : {}),
   });
+  if (input.burnIn) {
+    const supervisorConsistent =
+      status.supervisor.state === "STOPPED" &&
+      status.components.every(
+        (component) =>
+          component.status === "STOPPED" &&
+          !["CRASH", "UNEXPECTED_EXIT"].includes(
+            component.lastExitReason ?? "",
+          ),
+      );
+    checks.push({
+      name: "burn-in-supervisor-stopped",
+      status: supervisorConsistent ? "READY" : "NOT_READY",
+      ...(supervisorConsistent
+        ? {}
+        : { action: "STOP_AND_INSPECT_SUPERVISOR_BEFORE_BURN_IN" }),
+    });
+  }
   const backupMaxAgeHours = Number(
     process.env.AFFILIATE_BACKUP_MAX_AGE_HOURS ?? 36,
   );
@@ -291,11 +334,11 @@ async function preflight() {
     checkedAt: new Date().toISOString(),
     checks,
     operationalFindings: findings,
-    browserOpened: false,
-    databaseModified: false,
+    mode: input.burnIn ? "BURN_IN" : "NORMAL",
   };
-  output(result);
-  if (result.status === "NOT_READY") process.exitCode = 2;
+  if (input.print !== false) output(result);
+  if (result.status === "NOT_READY" && input.print !== false) process.exitCode = 2;
+  return result;
 }
 
 async function backupDb() {
@@ -368,6 +411,408 @@ async function verifyBackup() {
   });
 }
 
+function delay(ms: number) {
+  return new Promise<void>((resolvePromise) => setTimeout(resolvePromise, ms));
+}
+
+async function scheduledOperationsTasksPresent() {
+  const names = ["AffiliateAutomationSupervisor", "AffiliateAutomationBackup"];
+  const installed: string[] = [];
+  for (const name of names) {
+    const result = await run("schtasks.exe", ["/Query", "/TN", name], 5_000);
+    if (result.ok) installed.push(name);
+  }
+  return installed;
+}
+
+async function readEvents(file: string) {
+  try {
+    return (await readFile(file, "utf8"))
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .flatMap((line) => {
+        try {
+          const value = JSON.parse(line) as Record<string, unknown>;
+          return [value];
+        } catch {
+          return [];
+        }
+      });
+  } catch {
+    return [];
+  }
+}
+
+async function residualOwnedProcesses() {
+  try {
+    const components = JSON.parse(
+      (await readFile(join(workspaceRoot, ".local/ops/components.json"), "utf8")).replace(
+        /^\uFEFF/,
+        "",
+      ),
+    ) as Array<{ pid?: number }>;
+    return components.filter((component) => {
+      if (!component.pid || component.pid <= 0) return false;
+      try {
+        process.kill(component.pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    }).length;
+  } catch {
+    return 0;
+  }
+}
+
+async function writeBurnInReport(report: Record<string, unknown>) {
+  const file = join(workspaceRoot, BURN_IN_REPORT_FILE);
+  await mkdir(join(workspaceRoot, ".local/ops"), { recursive: true });
+  const temporary = `${file}.${randomUUID()}.tmp`;
+  await writeFile(temporary, JSON.stringify(report, null, 2), "utf8");
+  await rename(temporary, file);
+}
+
+async function runSupervisorSmoke(input: {
+  durationSeconds: number;
+  burnIn: boolean;
+  testLeaderKey?: string;
+}) {
+  const args = [
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    join(workspaceRoot, "scripts/ops/supervisor.ps1"),
+    "-Action",
+    input.burnIn ? "BurnInSmoke" : "Smoke",
+    "-DurationSeconds",
+    String(input.durationSeconds),
+  ];
+  if (!input.burnIn) args.push("-NoJobs");
+  if (input.burnIn && input.testLeaderKey) {
+    args.push("-TestLeaderKey", input.testLeaderKey);
+  }
+  const child = spawn("powershell.exe", args, {
+    cwd: workspaceRoot,
+    windowsHide: true,
+    shell: false,
+    env: {
+      ...process.env,
+      ...(input.burnIn
+        ? {
+            WORKER_BURN_IN_MODE: "true",
+            WORKER_BURN_IN_SMOKE: "true",
+            WORKER_LEADER_KEY_OVERRIDE: input.testLeaderKey!,
+          }
+        : {}),
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  child.stdout.on("data", (chunk: Buffer) => {
+    stdout += chunk.toString("utf8");
+  });
+  const close = new Promise<number | null>((resolvePromise, reject) => {
+    child.once("error", reject);
+    child.once("close", resolvePromise);
+  });
+  return { child, close, stdout: () => stdout };
+}
+
+async function reliabilitySmoke() {
+  const readiness = await preflight({ print: false });
+  if (readiness.status === "NOT_READY") throw new Error("RELIABILITY_PREFLIGHT_FAILED");
+  if ((await scheduledOperationsTasksPresent()).length > 0) {
+    throw new Error("SCHEDULED_OPERATIONS_TASK_PRESENT");
+  }
+  const before = await captureBusinessStateSnapshot(prisma);
+  const startedAt = new Date();
+  const smoke = await runSupervisorSmoke({ durationSeconds: 8, burnIn: false });
+  const exitCode = await smoke.close;
+  const after = await captureBusinessStateSnapshot(prisma);
+  const comparison = compareBusinessStateSnapshots(before, after);
+  const residualProcesses = await residualOwnedProcesses();
+  const raw = smoke.stdout().trim().split(/\r?\n/).at(-1) ?? "{}";
+  let evidence: Record<string, unknown> = {};
+  try {
+    evidence = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    evidence = {};
+  }
+  const success =
+    exitCode === 0 &&
+    evidence.status === "SMOKE_SUCCEEDED" &&
+    comparison.unchanged &&
+    residualProcesses === 0;
+  const result = {
+    status: success ? "RELIABILITY_SMOKE_SUCCEEDED" : "HUMAN_REVIEW_REQUIRED",
+    startedAt: startedAt.toISOString(),
+    finishedAt: new Date().toISOString(),
+    processEvidence: evidence,
+    businessFingerprintUnchanged: comparison.unchanged,
+    changedEntities: comparison.changedEntities,
+    residualProcesses,
+  };
+  output(result);
+  if (!success) process.exitCode = 2;
+}
+
+async function burnInSmoke() {
+  const durationSeconds = Number(option("--duration-seconds") ?? 60);
+  if (!Number.isInteger(durationSeconds) || durationSeconds < 10 || durationSeconds > 600) {
+    throw new Error("BURN_IN_DURATION_INVALID");
+  }
+  const readiness = await preflight({ burnIn: true, print: false });
+  if (readiness.status === "NOT_READY") throw new Error("BURN_IN_PREFLIGHT_FAILED");
+  if ((await scheduledOperationsTasksPresent()).length > 0) {
+    throw new Error("SCHEDULED_OPERATIONS_TASK_PRESENT");
+  }
+
+  const eventFile = join(workspaceRoot, ".local/ops/burn-in-events.jsonl");
+  await rm(eventFile, { force: true });
+  const before = await captureBusinessStateSnapshot(prisma);
+  const findingsBefore = await collectStateAudit(prisma, { workspaceRoot });
+  const realLeaderBefore = await getRedisKeyFingerprint("affiliate:worker:leader");
+  const testLeaderKey = `affiliate:test:worker:leader:${randomUUID()}`;
+  const startedAt = new Date();
+  const smoke = await runSupervisorSmoke({
+    durationSeconds,
+    burnIn: true,
+    testLeaderKey,
+  });
+  let liveValidated = false;
+  let readyValidated = false;
+  const heartbeatSamples: number[] = [];
+  const observationDeadline = Date.now() + (durationSeconds + 20) * 1_000;
+  let closed = false;
+  void smoke.close.finally(() => {
+    closed = true;
+  });
+  while (!closed && Date.now() < observationDeadline) {
+    try {
+      const live = await fetch("http://127.0.0.1:3000/api/health/live", {
+        signal: AbortSignal.timeout(2_000),
+      });
+      liveValidated ||= live.ok;
+    } catch {
+      // Startup is observed until the bounded supervisor deadline.
+    }
+    try {
+      const ready = await fetch("http://127.0.0.1:3000/api/health/ready", {
+        signal: AbortSignal.timeout(2_000),
+      });
+      if (ready.ok) {
+        const body = (await ready.json()) as Record<string, unknown>;
+        readyValidated ||= body.mode === "BURN_IN" && body.burnInActive === true;
+      }
+    } catch {
+      // Readiness remains fail-closed until all dependencies are available.
+    }
+    try {
+      const status = await collectOperationalStatus(prisma, { workspaceRoot });
+      if (status.worker.lastHeartbeatAt) {
+        const timestamp = Date.parse(status.worker.lastHeartbeatAt);
+        if (
+          Number.isFinite(timestamp) &&
+          timestamp >= startedAt.getTime() &&
+          !heartbeatSamples.includes(timestamp)
+        ) {
+          heartbeatSamples.push(timestamp);
+        }
+      }
+    } catch {
+      // Database loss is reflected by the final failed report.
+    }
+    await delay(500);
+  }
+  if (!closed) {
+    await run("powershell.exe", [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      join(workspaceRoot, "scripts/ops/supervisor.ps1"),
+      "-Action",
+      "Stop",
+    ], 30_000);
+  }
+  let forcedStopTimer: NodeJS.Timeout | undefined;
+  const exitCode = await Promise.race([
+    smoke.close,
+    new Promise<null>((resolvePromise) => {
+      forcedStopTimer = setTimeout(() => {
+        smoke.child.kill();
+        resolvePromise(null);
+      }, 10_000);
+      forcedStopTimer.unref?.();
+    }),
+  ]);
+  if (forcedStopTimer) clearTimeout(forcedStopTimer);
+  await delay(500);
+  const finishedAt = new Date();
+  const after = await captureBusinessStateSnapshot(prisma);
+  const findingsAfter = await collectStateAudit(prisma, { workspaceRoot });
+  const comparison = compareBusinessStateSnapshots(before, after);
+  const realLeaderAfter = await getRedisKeyFingerprint("affiliate:worker:leader");
+  const probe = await acquireLock(testLeaderKey, 1_000, { requireRedis: true });
+  const residualLocks = probe.acquired ? 0 : 1;
+  if (probe.acquired) await probe.release();
+  const residualProcesses = await residualOwnedProcesses();
+  const events = await readEvents(eventFile);
+  let componentEvidence: Array<Record<string, unknown>> = [];
+  try {
+    const parsed = JSON.parse(
+      (await readFile(join(workspaceRoot, ".local/ops/components.json"), "utf8")).replace(
+        /^\uFEFF/,
+        "",
+      ),
+    ) as unknown;
+    componentEvidence = Array.isArray(parsed)
+      ? parsed.map((item) =>
+          item && typeof item === "object" ? (item as Record<string, unknown>) : {},
+        )
+      : [];
+  } catch {
+    componentEvidence = [];
+  }
+  const finalStatus = await collectOperationalStatus(prisma, { workspaceRoot });
+  const leadershipRenewals = events.filter(
+    (event) => event.event === "LEADERSHIP_RENEWED",
+  ).length;
+  const leadershipRenewalFailures = events.filter(
+    (event) => event.event === "LEADERSHIP_RENEWAL_FAILED",
+  ).length;
+  const prohibitedEvents = events.filter((event) =>
+    /BROWSER|PLAYWRIGHT|PUBLISHER|TELEGRAM|MERCADO_LIVRE|OLLAMA|OPENAI|DISPATCH/.test(
+      String(event.event ?? ""),
+    ),
+  );
+  const heartbeatGaps = heartbeatSamples
+    .sort((a, b) => a - b)
+    .slice(1)
+    .map((value, index) => value - (heartbeatSamples[index] ?? value));
+  const previousCodes = new Set(findingsBefore.map((finding) => finding.code));
+  const afterCodes = new Set(findingsAfter.map((finding) => finding.code));
+  const realLeaderUnchanged =
+    realLeaderBefore.exists === realLeaderAfter.exists &&
+    realLeaderBefore.fingerprint === realLeaderAfter.fingerprint;
+  const success =
+    exitCode === 0 &&
+    liveValidated &&
+    readyValidated &&
+    comparison.unchanged &&
+    residualProcesses === 0 &&
+    residualLocks === 0 &&
+    prohibitedEvents.length === 0 &&
+    leadershipRenewals > 0 &&
+    leadershipRenewalFailures === 0 &&
+    realLeaderUnchanged;
+  const humanActions = success
+    ? []
+    : ["PRESERVE_LOGS_AND_REVIEW_BURN_IN_FAILURE"];
+  const report = {
+    status: success ? "BURN_IN_SUCCEEDED" : "HUMAN_REVIEW_REQUIRED",
+    startedAt: startedAt.toISOString(),
+    finishedAt: finishedAt.toISOString(),
+    durationSeconds: Math.round((finishedAt.getTime() - startedAt.getTime()) / 1_000),
+    supervisorInstanceId:
+      typeof events.find((event) => event.component === "supervisor")?.instanceId === "string"
+        ? String(events.find((event) => event.component === "supervisor")?.instanceId).slice(0, 12)
+        : null,
+    workerInstanceId:
+      typeof events.find((event) => event.event === "BURN_IN_RUNTIME_STARTED")
+        ?.instanceId === "string"
+        ? String(
+            events.find((event) => event.event === "BURN_IN_RUNTIME_STARTED")
+              ?.instanceId,
+          ).slice(0, 12)
+        : finalStatus.worker.instanceId,
+    dashboardInstanceId:
+      typeof componentEvidence.find((item) => item.component === "dashboard")?.instanceId ===
+      "string"
+        ? String(
+            componentEvidence.find((item) => item.component === "dashboard")?.instanceId,
+          ).slice(0, 12)
+        : null,
+    componentUptimeSeconds: Math.round(
+      (finishedAt.getTime() - startedAt.getTime()) / 1_000,
+    ),
+    restartCount: componentEvidence.reduce(
+      (total, item) => total + (typeof item.restartCount === "number" ? item.restartCount : 0),
+      0,
+    ),
+    maxConsecutiveCrashes: componentEvidence.reduce(
+      (maximum, item) =>
+        Math.max(
+          maximum,
+          typeof item.consecutiveCrashes === "number" ? item.consecutiveCrashes : 0,
+        ),
+      0,
+    ),
+    burnInConfirmed: events.some((event) => event.event === "BURN_IN_RUNTIME_STARTED"),
+    leaderKeyScope: "ISOLATED_TEST",
+    leaderKeyFingerprint: createHash("sha256").update(testLeaderKey).digest("hex").slice(0, 12),
+    leadershipChanges: events.filter((event) => event.event === "LEADERSHIP_ACQUIRED").length,
+    leadershipRenewals,
+    leadershipRenewalFailures,
+    maxHeartbeatGapMs: heartbeatGaps.length > 0 ? Math.max(...heartbeatGaps) : 0,
+    lastCycleStatus: finalStatus.worker.lastCycleStatus,
+    blockedCycles: finalStatus.worker.blockedCycles,
+    externalEffectsObserved: prohibitedEvents.length + finalStatus.worker.externalEffectsObserved,
+    businessChangesObserved: comparison.changedEntities.length,
+    businessFingerprintUnchanged: comparison.unchanged,
+    changedEntities: comparison.changedEntities,
+    liveValidated,
+    readyValidated,
+    shutdownValidated: residualProcesses === 0,
+    residualProcesses,
+    residualLocks,
+    realLeaderKeyUnchanged: realLeaderUnchanged,
+    findingsPreexisting: [...previousCodes].filter((code) => afterCodes.has(code)),
+    findingsNew: [...afterCodes].filter((code) => !previousCodes.has(code)),
+    findingsResolvedNaturally: [...previousCodes].filter((code) => !afterCodes.has(code)),
+    humanActions,
+  };
+  await writeBurnInReport(report);
+  output(report);
+  if (!success) process.exitCode = 2;
+}
+
+async function burnInStart() {
+  if (!process.argv.includes("--confirm-burn-in")) {
+    throw new Error("BURN_IN_CONFIRMATION_REQUIRED");
+  }
+  const readiness = await preflight({ burnIn: true, print: false });
+  if (readiness.status === "NOT_READY") throw new Error("BURN_IN_PREFLIGHT_FAILED");
+  const result = await run("powershell.exe", [
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    join(workspaceRoot, "scripts/ops/supervisor.ps1"),
+    "-Action",
+    "Start",
+    "-BurnIn",
+  ]);
+  if (!result.ok) throw new Error("BURN_IN_START_FAILED");
+  output({ status: "BURN_IN_START_REQUESTED", confirmationAccepted: true });
+}
+
+async function burnInStop() {
+  const result = await run("powershell.exe", [
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    join(workspaceRoot, "scripts/ops/supervisor.ps1"),
+    "-Action",
+    "Stop",
+  ], 60_000);
+  if (!result.ok) throw new Error("BURN_IN_STOP_FAILED");
+  output({ status: "BURN_IN_STOPPED" });
+}
+
 function taskPreview(kind: "supervisor" | "backup") {
   output({
     status: "PREVIEW_ONLY",
@@ -417,11 +862,41 @@ async function taskMutation(kind: "supervisor" | "backup", action: "install" | "
 async function main() {
   const command = process.argv[2];
   if (command === "preflight") return preflight();
+  if (command === "burn-in-preflight") return preflight({ burnIn: true });
+  if (command === "burn-in-start") return burnInStart();
+  if (command === "burn-in-stop") return burnInStop();
+  if (command === "burn-in-smoke") return burnInSmoke();
+  if (command === "reliability-smoke") return reliabilitySmoke();
+  if (command === "burn-in-report") {
+    output({
+      status: "BURN_IN_REPORT",
+      report: await readBurnInReport(workspaceRoot),
+      stateModified: false,
+    });
+    return;
+  }
+  if (command === "burn-in-status") {
+    const status = await collectOperationalStatus(prisma, { workspaceRoot });
+    output({
+      status: status.worker.burnInActive ? "BURN_IN_RUNNING" : "BURN_IN_STOPPED",
+      mode: status.worker.mode,
+      worker: status.worker,
+      supervisor: status.supervisor,
+      report: await readBurnInReport(workspaceRoot),
+      stateModified: false,
+    });
+    return;
+  }
   if (command === "status") {
     const status = await collectOperationalStatus(prisma, { workspaceRoot });
     const findings =
       status.database === "OK" ? await collectStateAudit(prisma, { workspaceRoot }) : [];
-    output({ ...status, findings, browserOpened: false, stateModified: false });
+    output({
+      ...status,
+      findings,
+      lastBurnIn: await readBurnInReport(workspaceRoot),
+      stateModified: false,
+    });
     return;
   }
   if (command === "audit-state") {
@@ -429,7 +904,6 @@ async function main() {
       status: "AUDIT_COMPLETED",
       findings: await collectStateAudit(prisma, { workspaceRoot }),
       stateModified: false,
-      browserOpened: false,
     });
     return;
   }

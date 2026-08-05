@@ -61,6 +61,8 @@ export type WorkerOperationalMetrics = {
 
 export type WorkerOperationalStatus = {
   state: "ONLINE" | "OFFLINE";
+  mode: "NORMAL" | "BURN_IN";
+  burnInActive: boolean;
   instanceId: string;
   leaderStatus: "ACTIVE" | "RELEASING";
   startedAt: string;
@@ -68,11 +70,16 @@ export type WorkerOperationalStatus = {
   lastHeartbeatAt: string;
   lastCycleStartedAt: string | null;
   lastCycleFinishedAt: string | null;
-  lastCycleStatus: "SUCCESS" | "PARTIAL" | "FAILED" | null;
+  lastCycleStatus: "SUCCESS" | "PARTIAL" | "FAILED" | "SAFE_BLOCKED" | null;
   currentPlanningRunId: string | null;
   version: string;
   commit: string | null;
   uptimeSeconds: number;
+  blockedCycles: number;
+  externalEffectsObserved: number;
+  businessChangesObserved: number;
+  leadershipRenewals: number;
+  leadershipRenewalFailures: number;
   stoppedAt?: string;
   nextRuns: Record<WorkerComponent, string>;
   lastRuns: Partial<
@@ -116,6 +123,15 @@ export type ContinuousWorkerOptions = {
   version?: string;
   commit?: string | null;
   logger?: (entry: Record<string, unknown>) => void;
+  mode?: "NORMAL" | "BURN_IN";
+  leadershipMetrics?: () => {
+    renewals: number;
+    renewalFailures: number;
+  };
+  safetyCounters?: () => {
+    externalEffectsObserved: number;
+    businessChangesObserved: number;
+  };
 };
 
 function positiveMinutes(value: string | undefined, fallback: number) {
@@ -375,12 +391,16 @@ export async function runContinuousWorker(options: ContinuousWorkerOptions) {
   let lastCycleStartedAt: Date | null = null;
   let lastCycleFinishedAt: Date | null = null;
   let lastCycleStatus: WorkerOperationalStatus["lastCycleStatus"] = null;
+  let blockedCycles = 0;
+  const mode = options.mode ?? "NORMAL";
 
   const status = (
     state: WorkerOperationalStatus["state"],
     at: Date,
   ): WorkerOperationalStatus => ({
     state,
+    mode,
+    burnInActive: mode === "BURN_IN",
     instanceId,
     leaderStatus: state === "OFFLINE" ? "RELEASING" : "ACTIVE",
     startedAt: startedAt.toISOString(),
@@ -393,6 +413,14 @@ export async function runContinuousWorker(options: ContinuousWorkerOptions) {
     version: options.version ?? process.env.npm_package_version ?? "0.0.0",
     commit: (options.commit ?? process.env.AFFILIATE_BUILD_COMMIT)?.slice(0, 12) ?? null,
     uptimeSeconds: Math.max(0, Math.floor((at.getTime() - startedAt.getTime()) / 1_000)),
+    blockedCycles,
+    externalEffectsObserved:
+      options.safetyCounters?.().externalEffectsObserved ?? 0,
+    businessChangesObserved:
+      options.safetyCounters?.().businessChangesObserved ?? 0,
+    leadershipRenewals: options.leadershipMetrics?.().renewals ?? 0,
+    leadershipRenewalFailures:
+      options.leadershipMetrics?.().renewalFailures ?? 0,
     ...(state === "OFFLINE" ? { stoppedAt: at.toISOString() } : {}),
     nextRuns: Object.fromEntries(
       COMPONENTS.map((component) => [
@@ -414,7 +442,10 @@ export async function runContinuousWorker(options: ContinuousWorkerOptions) {
     let cycleFailures = 0;
     let cycleExecutions = 0;
     let cyclePartial = false;
-    const controls = await readWorkerControls();
+    const controls =
+      mode === "BURN_IN"
+        ? { discoveryPaused: false, publicationPaused: false }
+        : await readWorkerControls();
 
     for (const component of COMPONENTS) {
       if (options.signal.aborted) break;
@@ -537,12 +568,17 @@ export async function runContinuousWorker(options: ContinuousWorkerOptions) {
 
     const afterJobs = now();
     lastCycleFinishedAt = afterJobs;
-    lastCycleStatus =
-      cycleFailures > 0 && cycleFailures === cycleExecutions
-        ? "FAILED"
-        : cycleFailures > 0 || cyclePartial
-          ? "PARTIAL"
-          : "SUCCESS";
+    if (mode === "BURN_IN" && cycleExecutions > 0) {
+      blockedCycles += 1;
+      lastCycleStatus = "SAFE_BLOCKED";
+    } else if (mode !== "BURN_IN") {
+      lastCycleStatus =
+        cycleFailures > 0 && cycleFailures === cycleExecutions
+          ? "FAILED"
+          : cycleFailures > 0 || cyclePartial
+            ? "PARTIAL"
+            : "SUCCESS";
+    }
     if (afterJobs >= nextHeartbeatAt) {
       await persistStatus(status("ONLINE", afterJobs));
       nextHeartbeatAt = new Date(afterJobs.getTime() + heartbeatIntervalMs);

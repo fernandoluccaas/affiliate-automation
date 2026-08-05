@@ -20,6 +20,7 @@ import {
   type PublisherResult,
 } from "@affiliate/publisher-connectors";
 import { acquireLock, type LockHandle } from "@affiliate/redis";
+import { existsSync } from "node:fs";
 import {
   getWhatsAppWebQueueStatus,
   lockWhatsAppWebChannelForUpdate,
@@ -2034,6 +2035,9 @@ export async function startWorker(
     dependencies?: ContinuousWorkerDependencies;
   } = {},
 ) {
+  if (process.env.WORKER_BURN_IN_MODE === "true") {
+    throw new Error("BURN_IN_REQUIRES_ISOLATED_WORKER_ENTRYPOINT");
+  }
   if (loopStarted) {
     throw new Error("Worker loop already started in this process.");
   }
@@ -2050,6 +2054,13 @@ export async function startWorker(
 
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
+  const componentStopFile = process.env.AFFILIATE_COMPONENT_STOP_FILE;
+  const componentStopMonitor = componentStopFile
+    ? setInterval(() => {
+        if (existsSync(componentStopFile)) stop();
+      }, 250)
+    : null;
+  componentStopMonitor?.unref();
 
   if (options.signal) {
     options.signal.addEventListener("abort", stop, { once: true });
@@ -2164,6 +2175,7 @@ export async function startWorker(
         }),
     });
   } finally {
+    if (componentStopMonitor) clearInterval(componentStopMonitor);
     process.removeListener("SIGINT", stop);
     process.removeListener("SIGTERM", stop);
     await prisma.$disconnect();

@@ -58,6 +58,32 @@ describe("worker singleton leadership", () => {
     expect(secondRun).not.toHaveBeenCalled();
   });
 
+  it("allows a safe takeover only after the previous owner releases", async () => {
+    let held = false;
+    const acquire = vi.fn(async () => {
+      if (held) {
+        return handle({ acquired: false, failureReason: "LOCK_ALREADY_HELD" });
+      }
+      held = true;
+      const lock = handle();
+      lock.release = vi.fn(async () => {
+        held = false;
+      });
+      return lock;
+    });
+    const firstRun = vi.fn(async () => "first");
+    const secondRun = vi.fn(async () => "second");
+
+    await expect(
+      runWithWorkerLeadership({ acquire, run: firstRun, instanceId: "first-owner" }),
+    ).resolves.toMatchObject({ status: "COMPLETED", result: "first" });
+    await expect(
+      runWithWorkerLeadership({ acquire, run: secondRun, instanceId: "second-owner" }),
+    ).resolves.toMatchObject({ status: "COMPLETED", result: "second" });
+    expect(firstRun).toHaveBeenCalledOnce();
+    expect(secondRun).toHaveBeenCalledOnce();
+  });
+
   it("fails closed when required Redis is unavailable", async () => {
     const run = vi.fn(async () => undefined);
     const result = await runWithWorkerLeadership({
@@ -96,6 +122,59 @@ describe("worker singleton leadership", () => {
     await expect(resultPromise).resolves.toMatchObject({
       status: "LEADERSHIP_LOST",
     });
+    expect(lock.release).toHaveBeenCalledOnce();
+  });
+
+  it("records renewal evidence without exposing ownership and never resumes after loss", async () => {
+    let renew!: () => void;
+    const events: string[] = [];
+    const lock = handle({ extend: vi.fn(async () => false) });
+    const resultPromise = runWithWorkerLeadership({
+      instanceId: "worker-evidence",
+      key: "affiliate:test:worker:leader:evidence-0001",
+      acquire: vi.fn(async () => lock),
+      onEvent: (event) => {
+        events.push(event);
+      },
+      setIntervalFn: ((callback: () => void) => {
+        renew = callback;
+        return { unref: vi.fn() } as unknown as NodeJS.Timeout;
+      }) as typeof setInterval,
+      clearIntervalFn: vi.fn() as unknown as typeof clearInterval,
+      run: async (signal) =>
+        new Promise<void>((resolve) =>
+          signal.addEventListener("abort", () => resolve(), { once: true }),
+        ),
+    });
+    await vi.waitFor(() => expect(renew).toBeTypeOf("function"));
+    renew();
+    await expect(resultPromise).resolves.toMatchObject({ status: "LEADERSHIP_LOST" });
+    expect(events).toEqual(["ACQUIRED", "RENEWAL_FAILED", "RELEASED"]);
+    expect(JSON.stringify(events)).not.toContain(lock.token);
+  });
+
+  it("releases an acquired lock without starting work when shutdown wins acquisition", async () => {
+    const controller = new AbortController();
+    const lock = handle();
+    let finishAcquire!: () => void;
+    const acquire = vi.fn(
+      () =>
+        new Promise<LockHandle>((resolve) => {
+          finishAcquire = () => resolve(lock);
+        }),
+    );
+    const run = vi.fn(async () => undefined);
+    const result = runWithWorkerLeadership({
+      signal: controller.signal,
+      acquire,
+      run,
+      instanceId: "worker-shutdown",
+    });
+    await vi.waitFor(() => expect(finishAcquire).toBeTypeOf("function"));
+    controller.abort();
+    finishAcquire();
+    await expect(result).resolves.toMatchObject({ status: "LEADERSHIP_LOST" });
+    expect(run).not.toHaveBeenCalled();
     expect(lock.release).toHaveBeenCalledOnce();
   });
 

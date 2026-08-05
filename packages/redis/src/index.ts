@@ -1,6 +1,24 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { Socket } from "node:net";
 import { Redis } from "@upstash/redis";
+
+export const OWNED_LOCK_EXTEND_SCRIPT =
+  "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('pexpire', KEYS[1], ARGV[2]) else return 0 end";
+export const OWNED_LOCK_RELEASE_SCRIPT =
+  "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end";
+
+export type AtomicRedisClient = {
+  set(
+    key: string,
+    value: string,
+    options: { nx: true; px: number },
+  ): Promise<unknown>;
+  eval(
+    script: string,
+    keys: string[],
+    args: Array<string | number>,
+  ): Promise<unknown>;
+};
 
 export type RedisMode = "upstash" | "redis-url" | "unavailable";
 
@@ -8,6 +26,12 @@ export type RedisHealth = {
   mode: RedisMode;
   status: "ok" | "unavailable" | "error";
   message?: string;
+};
+
+export type RedisKeyFingerprint = {
+  mode: RedisMode;
+  exists: boolean;
+  fingerprint: string | null;
 };
 
 export type LockHandle = {
@@ -151,12 +175,41 @@ export async function getRedisHealth(): Promise<RedisHealth> {
   }
 }
 
+export async function getRedisKeyFingerprint(
+  key: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<RedisKeyFingerprint> {
+  const config = getRedisConfig(env);
+  if (config.mode === "unavailable") {
+    return { mode: "unavailable", exists: false, fingerprint: null };
+  }
+  let value: string | null = null;
+  if (config.mode === "upstash") {
+    const redis = new Redis({ url: config.url, token: config.token });
+    value = await redis.get<string>(key);
+  } else {
+    const reply = await redisUrlCommand(config.url, ["GET", key]);
+    if (!reply.startsWith("$-1")) {
+      const separator = reply.indexOf("\r\n");
+      value = separator >= 0 ? reply.slice(separator + 2).replace(/\r\n$/, "") : null;
+    }
+  }
+  return {
+    mode: config.mode,
+    exists: value !== null,
+    fingerprint: value
+      ? createHash("sha256").update(value).digest("hex")
+      : null,
+  };
+}
+
 export async function acquireLock(
   key: string,
   ttlMs: number,
   options: {
     env?: NodeJS.ProcessEnv;
     requireRedis?: boolean;
+    upstashClient?: AtomicRedisClient;
   } = {},
 ): Promise<LockHandle> {
   const env = options.env ?? process.env;
@@ -179,7 +232,8 @@ export async function acquireLock(
 
   if (config.mode === "upstash") {
     try {
-      const redis = new Redis({ url: config.url, token: config.token });
+      const redis: AtomicRedisClient =
+        options.upstashClient ?? new Redis({ url: config.url, token: config.token });
       const result = await redis.set(key, token, { nx: true, px: ttlMs });
 
       return {
@@ -192,7 +246,7 @@ export async function acquireLock(
           : { failureReason: "LOCK_ALREADY_HELD" as const }),
         extend: async (nextTtlMs) => {
           const extended = await redis.eval(
-            "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('pexpire', KEYS[1], ARGV[2]) else return 0 end",
+            OWNED_LOCK_EXTEND_SCRIPT,
             [key],
             [token, nextTtlMs],
           );
@@ -200,11 +254,7 @@ export async function acquireLock(
           return Number(extended) === 1;
         },
         release: async () => {
-          const current = await redis.get<string>(key);
-
-          if (current === token) {
-            await redis.del(key);
-          }
+          await redis.eval(OWNED_LOCK_RELEASE_SCRIPT, [key], [token]);
         },
       };
     } catch {
@@ -233,7 +283,7 @@ export async function acquireLock(
       extend: async (nextTtlMs) => {
         const reply = await redisUrlCommand(config.url, [
           "EVAL",
-          "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('pexpire', KEYS[1], ARGV[2]) else return 0 end",
+          OWNED_LOCK_EXTEND_SCRIPT,
           1,
           key,
           token,
@@ -245,7 +295,7 @@ export async function acquireLock(
       release: async () => {
         await redisUrlCommand(config.url, [
           "EVAL",
-          "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
+          OWNED_LOCK_RELEASE_SCRIPT,
           1,
           key,
           token,

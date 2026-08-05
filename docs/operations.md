@@ -1,5 +1,11 @@
 # Worker operations
 
+Phase 5G separates the safe burn-in worker from the normal business worker. The
+dedicated entrypoint writes only the existing sanitized heartbeat; discovery,
+planning, publication, AI and browser paths are absent from its dependency graph.
+Status, preflight, audit, health and `/operacoes` share one contextual heartbeat
+classifier. See [Operational reliability and safe burn-in](operational-burn-in.md).
+
 For the Phase 5F Windows production supervisor, startup/preflight, global worker
 leadership, health/readiness, audit, log rotation, backup/verification, optional
 Task Scheduler setup, power-loss recovery, and operational checklists, see
