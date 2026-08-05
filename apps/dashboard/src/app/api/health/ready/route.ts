@@ -14,6 +14,8 @@ export async function GET() {
         blockedCycles: status.worker.blockedCycles,
         externalEffectsObserved: status.worker.externalEffectsObserved,
         businessChangesObserved: status.worker.businessChangesObserved,
+        workerState: status.worker.state,
+        lastHeartbeatAt: status.worker.lastHeartbeatAt,
         humanActionRequired: status.workerContext.humanActionRequired,
         checks: {
           database: status.database,

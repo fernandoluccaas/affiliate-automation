@@ -34,6 +34,7 @@
     "ops:burn-in:stop": "npm run cli -w @affiliate/operations -- burn-in-stop",
     "ops:burn-in:report": "npm run cli -w @affiliate/operations -- burn-in-report",
     "ops:burn-in:smoke": "npm run cli -w @affiliate/operations -- burn-in-smoke",
+    "ops:burn-in:manual-smoke": "npm run cli -w @affiliate/operations -- burn-in-manual-smoke",
     "ops:task-supervisor:preview": "npm run cli -w @affiliate/operations -- task-supervisor-preview",
     "ops:task-supervisor:install": "npm run cli -w @affiliate/operations -- task-supervisor-install",
     "ops:task-supervisor:remove": "npm run cli -w @affiliate/operations -- task-supervisor-remove",

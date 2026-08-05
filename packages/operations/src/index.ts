@@ -26,6 +26,20 @@ import {
   DEFAULT_WORKER_STALE_AFTER_MS,
   resolveWorkerHealthStatus,
 } from "@affiliate/shared";
+export {
+  BURN_IN_REPORT_HISTORY,
+  BURN_IN_SESSION_FILE,
+  completeManualBurnInSession,
+  createManualBurnInSession,
+  eventsForSession,
+  readManualBurnInSession,
+  readBurnInSessionObservations,
+  sessionStatusView,
+  updateManualBurnInSession,
+  writeAtomicJson,
+  type BurnInReportSource,
+  type ManualBurnInSession,
+} from "./burn-in-session";
 
 export const OPS_ROOT = ".local/ops";
 export const OPS_LOG_ROOT = ".local/logs";
@@ -1191,6 +1205,14 @@ export async function readBurnInReport(workspaceRoot = OPERATIONS_WORKSPACE_ROOT
     );
     return {
       status: typeof value.status === "string" ? value.status : "UNKNOWN",
+      reportSource:
+        value.reportSource === "MANUAL" ||
+        value.reportSource === "MANUAL_TEST" ||
+        value.reportSource === "SMOKE"
+          ? value.reportSource
+          : "UNKNOWN",
+      sessionId:
+        typeof value.sessionId === "string" ? value.sessionId.slice(0, 12) : null,
       startedAt: typeof value.startedAt === "string" ? value.startedAt : null,
       finishedAt: typeof value.finishedAt === "string" ? value.finishedAt : null,
       durationSeconds:
@@ -1218,6 +1240,8 @@ export async function readBurnInReport(workspaceRoot = OPERATIONS_WORKSPACE_ROOT
           ? value.maxConsecutiveCrashes
           : 0,
       burnInConfirmed: value.burnInConfirmed === true,
+      leadershipChanges:
+        typeof value.leadershipChanges === "number" ? value.leadershipChanges : 0,
       leadershipRenewals:
         typeof value.leadershipRenewals === "number" ? value.leadershipRenewals : 0,
       leadershipRenewalFailures:
@@ -1234,17 +1258,32 @@ export async function readBurnInReport(workspaceRoot = OPERATIONS_WORKSPACE_ROOT
           ? value.businessChangesObserved
           : 0,
       businessFingerprintUnchanged: value.businessFingerprintUnchanged === true,
+      changedEntities: Array.isArray(value.changedEntities)
+        ? value.changedEntities.filter((item): item is string => typeof item === "string")
+        : [],
       maxHeartbeatGapMs:
         typeof value.maxHeartbeatGapMs === "number" ? value.maxHeartbeatGapMs : 0,
       liveValidated: value.liveValidated === true,
       readyValidated: value.readyValidated === true,
       shutdownValidated: value.shutdownValidated === true,
       realLeaderKeyUnchanged: value.realLeaderKeyUnchanged === true,
+      leaderReleaseValidated: value.leaderReleaseValidated === true,
+      lastCycleStatus:
+        typeof value.lastCycleStatus === "string" ? value.lastCycleStatus : null,
       residualProcesses:
         typeof value.residualProcesses === "number" ? value.residualProcesses : 0,
       residualLocks: typeof value.residualLocks === "number" ? value.residualLocks : 0,
       humanActions: Array.isArray(value.humanActions)
         ? value.humanActions.filter((item): item is string => typeof item === "string")
+        : [],
+      findingsPreexisting: Array.isArray(value.findingsPreexisting)
+        ? value.findingsPreexisting.filter((item): item is string => typeof item === "string")
+        : [],
+      findingsNew: Array.isArray(value.findingsNew)
+        ? value.findingsNew.filter((item): item is string => typeof item === "string")
+        : [],
+      findingsResolvedNaturally: Array.isArray(value.findingsResolvedNaturally)
+        ? value.findingsResolvedNaturally.filter((item): item is string => typeof item === "string")
         : [],
     };
   } catch {

@@ -4,7 +4,8 @@ param(
   [int]$DurationSeconds = 20,
   [switch]$NoJobs,
   [switch]$BurnIn,
-  [string]$TestLeaderKey = ""
+  [string]$TestLeaderKey = "",
+  [string]$SessionId = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -82,6 +83,7 @@ function Write-BurnInEvent([string]$Event, [string]$InstanceId, [string]$Compone
     component = $Component
     event = $Event
     instanceId = $InstanceId.Substring(0, [Math]::Min(12, $InstanceId.Length))
+    sessionId = $env:AFFILIATE_BURN_IN_SESSION_ID
   }
   ($entry | ConvertTo-Json -Compress) | Add-Content -LiteralPath $burnInEventFile -Encoding utf8
 }
@@ -217,6 +219,7 @@ if ($BurnIn) {
   if ($Action -eq "BurnInSmoke" -and $TestLeaderKey -notmatch '^affiliate:test:worker:leader:[a-f0-9-]{16,80}$') {
     throw "BURN_IN_ISOLATED_TEST_KEY_REQUIRED"
   }
+  if ($SessionId -notmatch '^[a-f0-9-]{16,80}$') { throw "BURN_IN_SESSION_ID_REQUIRED" }
 }
 
 if ($Action -eq "Start") {
@@ -227,6 +230,7 @@ if ($Action -eq "Start") {
   if ($existing) { Remove-Item -LiteralPath $supervisorFile -Force }
   $arguments = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $PSCommandPath, "-Action", "Run")
   if ($BurnIn) { $arguments += "-BurnIn" }
+  if ($BurnIn) { $arguments += @("-SessionId", $SessionId) }
   Start-Process -FilePath "powershell.exe" -ArgumentList $arguments -WorkingDirectory $repoRoot -WindowStyle Hidden | Out-Null
   exit 0
 }
@@ -256,6 +260,7 @@ $instanceId = [Guid]::NewGuid().ToString("N")
 $startedAt = [DateTime]::UtcNow
 $env:AFFILIATE_SUPERVISOR_MODE = if ($BurnIn) { "BURN_IN" } else { "NORMAL" }
 $env:AFFILIATE_SUPERVISOR_INSTANCE_ID = $instanceId
+$env:AFFILIATE_BURN_IN_SESSION_ID = $SessionId
 if ($burnInSmoke) {
   $env:WORKER_BURN_IN_SMOKE = "true"
   $env:WORKER_LEADER_KEY_OVERRIDE = $TestLeaderKey
@@ -282,9 +287,34 @@ $observedOwnedProcesses = 0
 $maxConsecutiveCrashes = 0
 $componentFailureObserved = $false
 $runCompletedNormally = $false
+$nextHealthObservation = [DateTime]::UtcNow
 
 try {
   while ([DateTime]::UtcNow -lt $deadline -and -not (Test-Path -LiteralPath $stopFile)) {
+    if ($BurnIn -and [DateTime]::UtcNow -ge $nextHealthObservation) {
+      try {
+        $live = Invoke-RestMethod -Uri "http://127.0.0.1:3000/api/health/live" -TimeoutSec 2
+        if ($live.status -eq "LIVE") { Write-BurnInEvent "LIVE_VALIDATED" $instanceId "monitor" }
+      } catch { }
+      try {
+        $ready = Invoke-RestMethod -Uri "http://127.0.0.1:3000/api/health/ready" -TimeoutSec 2
+        if ($ready.mode -eq "BURN_IN" -and $ready.burnInActive -eq $true) {
+          Write-BurnInEvent "READY_VALIDATED" $instanceId "monitor"
+          if ($ready.lastHeartbeatAt) {
+            $entry = [ordered]@{
+              timestamp = [DateTime]::UtcNow.ToString("o")
+              component = "monitor"
+              event = "HEARTBEAT_OBSERVED"
+              instanceId = $instanceId.Substring(0, [Math]::Min(12, $instanceId.Length))
+              sessionId = $env:AFFILIATE_BURN_IN_SESSION_ID
+              heartbeatAt = $ready.lastHeartbeatAt
+            }
+            ($entry | ConvertTo-Json -Compress) | Add-Content -LiteralPath $burnInEventFile -Encoding utf8
+          }
+        }
+      } catch { }
+      $nextHealthObservation = [DateTime]::UtcNow.AddSeconds(2)
+    }
     for ($index = 0; $index -lt $components.Count; $index++) {
       $component = $components[$index]
       if ($component.status -eq "FAILED") { continue }

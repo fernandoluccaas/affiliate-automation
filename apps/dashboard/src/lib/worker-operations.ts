@@ -52,7 +52,9 @@ export function workerStatusFromValue(
     instanceId:
       typeof record.instanceId === "string" ? record.instanceId.slice(0, 12) : null,
     leaderStatus:
-      record.leaderStatus === "ACTIVE" || record.leaderStatus === "RELEASING"
+      ["ACTIVE", "RELEASING", "RELEASED", "RELEASE_FAILED"].includes(
+        String(record.leaderStatus),
+      )
         ? record.leaderStatus
         : null,
     lastCycleStartedAt:

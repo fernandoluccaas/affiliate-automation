@@ -8,7 +8,8 @@ export type WorkerLeadershipEvent =
   | "ACQUIRE_REJECTED"
   | "RENEWED"
   | "RENEWAL_FAILED"
-  | "RELEASED";
+  | "RELEASED"
+  | "RELEASE_FAILED";
 
 export type WorkerLeadershipResult<T> =
   | { status: "COMPLETED"; instanceId: string; result: T }
@@ -63,8 +64,12 @@ export async function runWithWorkerLeadership<T>(input: {
     };
   }
   if (input.signal?.aborted) {
-    await lock.release().catch(() => undefined);
-    await emit("RELEASED");
+    try {
+      await lock.release();
+      await emit("RELEASED");
+    } catch {
+      await emit("RELEASE_FAILED");
+    }
     return { status: "LEADERSHIP_LOST", instanceId };
   }
   await emit("ACQUIRED");
@@ -109,7 +114,11 @@ export async function runWithWorkerLeadership<T>(input: {
     clearIntervalFn(renewal);
     await pendingRenewal.catch(() => undefined);
     input.signal?.removeEventListener("abort", externalStop);
-    await lock.release().catch(() => undefined);
-    await emit("RELEASED");
+    try {
+      await lock.release();
+      await emit("RELEASED");
+    } catch {
+      await emit("RELEASE_FAILED");
+    }
   }
 }

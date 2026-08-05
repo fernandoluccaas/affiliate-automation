@@ -64,7 +64,7 @@ export type WorkerOperationalStatus = {
   mode: "NORMAL" | "BURN_IN";
   burnInActive: boolean;
   instanceId: string;
-  leaderStatus: "ACTIVE" | "RELEASING";
+  leaderStatus: "ACTIVE" | "RELEASING" | "RELEASED" | "RELEASE_FAILED";
   startedAt: string;
   heartbeatAt: string;
   lastHeartbeatAt: string;

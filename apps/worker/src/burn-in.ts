@@ -101,6 +101,7 @@ async function emitEvent(
       component: "worker",
       event,
       instanceId: instanceId.slice(0, 12),
+      sessionId: env.AFFILIATE_BURN_IN_SESSION_ID,
     })}\n`,
     "utf8",
   );
@@ -154,6 +155,27 @@ export async function startBurnInWorker(input: {
     if (event === "RENEWED") leadership.renewals += 1;
     if (event === "RENEWAL_FAILED") leadership.renewalFailures += 1;
     await emitEvent(env, `LEADERSHIP_${event}`, currentInstance);
+    if (event === "RELEASED" || event === "RELEASE_FAILED") {
+      const existing = await prisma.systemSetting.findUnique({
+        where: { key: "worker:continuous:status" },
+        select: { value: true },
+      });
+      const value = existing?.value;
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        const record = value as Record<string, unknown>;
+        if (record.instanceId === currentInstance && record.state === "OFFLINE") {
+          await prisma.systemSetting.update({
+            where: { key: "worker:continuous:status" },
+            data: {
+              value: {
+                ...record,
+                leaderStatus: event === "RELEASED" ? "RELEASED" : "RELEASE_FAILED",
+              } as never,
+            },
+          });
+        }
+      }
+    }
   };
   const cadence = validation.config.cycleIntervalMs;
   const cadences: WorkerCadences = {

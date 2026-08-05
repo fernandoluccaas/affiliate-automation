@@ -49,6 +49,7 @@ function burnInEvent(event) {
       component,
       event,
       instanceId: instanceId.slice(0, 12),
+      sessionId: process.env.AFFILIATE_BURN_IN_SESSION_ID,
     })}\n`,
     "utf8",
   );

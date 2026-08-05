@@ -1,7 +1,11 @@
 import {
   collectOperationalStatus,
   collectStateAudit,
+  OPERATIONS_WORKSPACE_ROOT,
   readBurnInReport,
+  readBurnInSessionObservations,
+  readManualBurnInSession,
+  sessionStatusView,
 } from "@affiliate/operations";
 import { AdminShell } from "@/components/admin-shell";
 import { formatDateTime } from "@/lib/format";
@@ -22,6 +26,17 @@ export default async function OperationsPage() {
   const status = await collectOperationalStatus();
   const findings = status.database === "OK" ? await collectStateAudit() : [];
   const burnInReport = await readBurnInReport();
+  const burnInSessionResult = await readManualBurnInSession(
+    OPERATIONS_WORKSPACE_ROOT,
+  );
+  const burnInSession = sessionStatusView(burnInSessionResult);
+  const burnInObservations =
+    burnInSessionResult.status === "VALID"
+      ? await readBurnInSessionObservations(
+          OPERATIONS_WORKSPACE_ROOT,
+          burnInSessionResult.session.sessionId,
+        )
+      : null;
   const critical = findings.filter(
     (finding) =>
       finding.severity === "CRITICAL" ||
@@ -70,9 +85,14 @@ export default async function OperationsPage() {
           detail={`efeitos externos ${status.worker.externalEffectsObserved} / alterações de negócio ${status.worker.businessChangesObserved}`}
         />
         <StatusCard
-          title="Último burn-in"
+          title="Burn-in atual"
+          value={burnInSession?.state ?? "AUSENTE"}
+          detail={burnInSession ? `${burnInSession.source} / ${burnInSession.elapsedSeconds}s / sessão ${burnInSession.sessionId} / live ${String(burnInObservations?.liveObserved)} / ready ${String(burnInObservations?.readyObserved)}` : "nenhuma sessão manual"}
+        />
+        <StatusCard
+          title="Último burn-in concluído"
           value={burnInReport?.status ?? "AUSENTE"}
-          detail={burnInReport ? `${burnInReport.durationSeconds}s / locks ${burnInReport.residualLocks}` : "execute no terminal local"}
+          detail={burnInReport ? `${burnInReport.reportSource} / ${burnInReport.durationSeconds}s / locks ${burnInReport.residualLocks}` : "execute no terminal local"}
         />
         <StatusCard
           title="Última automação"

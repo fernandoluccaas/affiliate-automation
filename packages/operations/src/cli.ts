@@ -1,7 +1,7 @@
 import { createReadStream } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { readFile, rm, stat } from "node:fs/promises";
 import { createServer } from "node:net";
 import { basename, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
@@ -9,24 +9,33 @@ import { prisma } from "@affiliate/database";
 import { acquireLock, getRedisKeyFingerprint } from "@affiliate/redis";
 import {
   BURN_IN_REPORT_FILE,
+  BURN_IN_REPORT_HISTORY,
   OPS_LOG_ROOT,
   OPERATIONS_WORKSPACE_ROOT,
   applyBackupRetention,
+  completeManualBurnInSession,
   collectOperationalStatus,
   collectStateAudit,
   captureBusinessStateSnapshot,
   compareBusinessStateSnapshots,
+  createManualBurnInSession,
   createPostgresBackup,
   directoryFreeBytes,
+  eventsForSession,
   isFileInsideDirectory,
   latestBackup,
   logDirectoryStatus,
   resolveSafeBackupDirectory,
   readBurnInReport,
+  readBurnInSessionObservations,
+  readManualBurnInSession,
   rotateLogs,
+  sessionStatusView,
   verifyPostgresBackup,
+  updateManualBurnInSession,
   withExclusiveFileLock,
   writableDirectory,
+  writeAtomicJson,
 } from "./index";
 
 const workspaceRoot = OPERATIONS_WORKSPACE_ROOT;
@@ -188,6 +197,22 @@ async function preflight(input: { burnIn?: boolean; print?: boolean } = {}) {
       : { action: "CONFIGURE_WORKER_REQUIRE_REDIS_TRUE" }),
   });
   if (input.burnIn) {
+    const session = await readManualBurnInSession(workspaceRoot);
+    const sessionReady =
+      session.status === "MISSING" ||
+      (session.status === "VALID" && session.session.state === "COMPLETED");
+    checks.push({
+      name: "burn-in-manual-session",
+      status: sessionReady ? "READY" : "NOT_READY",
+      ...(sessionReady
+        ? {}
+        : {
+            action:
+              session.status === "CORRUPT"
+                ? "REVIEW_CORRUPT_BURN_IN_SESSION"
+                : "FINALIZE_OR_REVIEW_INCOMPLETE_BURN_IN_SESSION",
+          }),
+    });
     checks.push({
       name: "env:WORKER_BURN_IN_MODE",
       status: process.env.WORKER_BURN_IN_MODE === "true" ? "READY" : "NOT_READY",
@@ -467,16 +492,30 @@ async function residualOwnedProcesses() {
 
 async function writeBurnInReport(report: Record<string, unknown>) {
   const file = join(workspaceRoot, BURN_IN_REPORT_FILE);
-  await mkdir(join(workspaceRoot, ".local/ops"), { recursive: true });
-  const temporary = `${file}.${randomUUID()}.tmp`;
-  await writeFile(temporary, JSON.stringify(report, null, 2), "utf8");
-  await rename(temporary, file);
+  await writeAtomicJson(file, report);
+  if (typeof report.sessionId === "string" && /^[a-f0-9-]{16,80}$/i.test(report.sessionId)) {
+    await writeAtomicJson(
+      join(workspaceRoot, BURN_IN_REPORT_HISTORY, `${report.sessionId}.json`),
+      report,
+    );
+  }
+}
+
+async function currentBurnInSessionView() {
+  const result = await readManualBurnInSession(workspaceRoot);
+  const view = sessionStatusView(result);
+  if (!view || result.status !== "VALID") return view;
+  return {
+    ...view,
+    ...(await readBurnInSessionObservations(workspaceRoot, result.session.sessionId)),
+  };
 }
 
 async function runSupervisorSmoke(input: {
   durationSeconds: number;
   burnIn: boolean;
   testLeaderKey?: string;
+  sessionId?: string;
 }) {
   const args = [
     "-NoProfile",
@@ -492,6 +531,9 @@ async function runSupervisorSmoke(input: {
   if (!input.burnIn) args.push("-NoJobs");
   if (input.burnIn && input.testLeaderKey) {
     args.push("-TestLeaderKey", input.testLeaderKey);
+  }
+  if (input.burnIn && input.sessionId) {
+    args.push("-SessionId", input.sessionId);
   }
   const child = spawn("powershell.exe", args, {
     cwd: workspaceRoot,
@@ -575,11 +617,13 @@ async function burnInSmoke() {
   const findingsBefore = await collectStateAudit(prisma, { workspaceRoot });
   const realLeaderBefore = await getRedisKeyFingerprint("affiliate:worker:leader");
   const testLeaderKey = `affiliate:test:worker:leader:${randomUUID()}`;
+  const sessionId = randomUUID();
   const startedAt = new Date();
   const smoke = await runSupervisorSmoke({
     durationSeconds,
     burnIn: true,
     testLeaderKey,
+    sessionId,
   });
   let liveValidated = false;
   let readyValidated = false;
@@ -659,7 +703,7 @@ async function burnInSmoke() {
   const residualLocks = probe.acquired ? 0 : 1;
   if (probe.acquired) await probe.release();
   const residualProcesses = await residualOwnedProcesses();
-  const events = await readEvents(eventFile);
+  const events = eventsForSession(await readEvents(eventFile), sessionId);
   let componentEvidence: Array<Record<string, unknown>> = [];
   try {
     const parsed = JSON.parse(
@@ -712,6 +756,8 @@ async function burnInSmoke() {
     ? []
     : ["PRESERVE_LOGS_AND_REVIEW_BURN_IN_FAILURE"];
   const report = {
+    reportSource: "SMOKE",
+    sessionId,
     status: success ? "BURN_IN_SUCCEEDED" : "HUMAN_REVIEW_REQUIRED",
     startedAt: startedAt.toISOString(),
     finishedAt: finishedAt.toISOString(),
@@ -779,12 +825,25 @@ async function burnInSmoke() {
   if (!success) process.exitCode = 2;
 }
 
-async function burnInStart() {
+async function burnInStart(reportSource: "MANUAL" | "MANUAL_TEST" = "MANUAL") {
   if (!process.argv.includes("--confirm-burn-in")) {
     throw new Error("BURN_IN_CONFIRMATION_REQUIRED");
   }
   const readiness = await preflight({ burnIn: true, print: false });
   if (readiness.status === "NOT_READY") throw new Error("BURN_IN_PREFLIGHT_FAILED");
+  if ((await scheduledOperationsTasksPresent()).length > 0) {
+    throw new Error("SCHEDULED_OPERATIONS_TASK_PRESENT");
+  }
+  const baseline = await captureBusinessStateSnapshot(prisma);
+  const findingsBefore = await collectStateAudit(prisma, { workspaceRoot });
+  const realLeaderBefore = await getRedisKeyFingerprint("affiliate:worker:leader");
+  const session = await createManualBurnInSession({
+    workspaceRoot,
+    baseline,
+    findingsBefore,
+    realLeaderBefore,
+    reportSource,
+  });
   const result = await run("powershell.exe", [
     "-NoProfile",
     "-ExecutionPolicy",
@@ -794,12 +853,74 @@ async function burnInStart() {
     "-Action",
     "Start",
     "-BurnIn",
+    "-SessionId",
+    session.sessionId,
   ]);
-  if (!result.ok) throw new Error("BURN_IN_START_FAILED");
-  output({ status: "BURN_IN_START_REQUESTED", confirmationAccepted: true });
+  if (!result.ok) {
+    await updateManualBurnInSession(workspaceRoot, {
+      ...session,
+      state: "INCOMPLETE",
+      humanActions: ["REVIEW_BURN_IN_START_FAILURE"],
+    });
+    throw new Error("BURN_IN_START_FAILED");
+  }
+  output({
+    status: "BURN_IN_START_REQUESTED",
+    source: session.reportSource,
+    sessionId: session.sessionId.slice(0, 12),
+    startedAt: session.startedAt,
+    confirmationAccepted: true,
+  });
+}
+
+async function manualBurnInSmoke() {
+  const durationSeconds = Number(option("--duration-seconds") ?? 60);
+  if (!Number.isInteger(durationSeconds) || durationSeconds < 30 || durationSeconds > 120) {
+    throw new Error("BURN_IN_MANUAL_TEST_DURATION_INVALID");
+  }
+  const testLeaderKey = `affiliate:test:worker:leader:${randomUUID()}`;
+  const previousSmoke = process.env.WORKER_BURN_IN_SMOKE;
+  const previousKey = process.env.WORKER_LEADER_KEY_OVERRIDE;
+  process.env.WORKER_BURN_IN_SMOKE = "true";
+  process.env.WORKER_LEADER_KEY_OVERRIDE = testLeaderKey;
+  if (!process.argv.includes("--confirm-burn-in")) process.argv.push("--confirm-burn-in");
+  try {
+    await burnInStart("MANUAL_TEST");
+    await delay(durationSeconds * 1_000);
+    const currentSession = sessionStatusView(await readManualBurnInSession(workspaceRoot));
+    const status = await collectOperationalStatus(prisma, { workspaceRoot });
+    output({ status: "MANUAL_TEST_OBSERVED", currentSession, worker: status.worker });
+    await burnInStop();
+  } finally {
+    if (previousSmoke === undefined) delete process.env.WORKER_BURN_IN_SMOKE;
+    else process.env.WORKER_BURN_IN_SMOKE = previousSmoke;
+    if (previousKey === undefined) delete process.env.WORKER_LEADER_KEY_OVERRIDE;
+    else process.env.WORKER_LEADER_KEY_OVERRIDE = previousKey;
+  }
 }
 
 async function burnInStop() {
+  const sessionResult = await readManualBurnInSession(workspaceRoot);
+  if (sessionResult.status === "CORRUPT") {
+    await run("powershell.exe", [
+      "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+      join(workspaceRoot, "scripts/ops/supervisor.ps1"), "-Action", "Stop",
+    ], 60_000);
+    output({ status: "HUMAN_REVIEW_REQUIRED", humanActions: ["REVIEW_CORRUPT_BURN_IN_SESSION"] });
+    process.exitCode = 2;
+    return;
+  }
+  if (sessionResult.status === "MISSING") throw new Error("BURN_IN_SESSION_MISSING");
+  const session = sessionResult.session;
+  if (session.state === "COMPLETED") {
+    output({
+      status: "BURN_IN_ALREADY_STOPPED",
+      sessionId: session.sessionId.slice(0, 12),
+      report: await readBurnInReport(workspaceRoot),
+    });
+    return;
+  }
+  await updateManualBurnInSession(workspaceRoot, { ...session, state: "FINALIZING" });
   const result = await run("powershell.exe", [
     "-NoProfile",
     "-ExecutionPolicy",
@@ -809,8 +930,96 @@ async function burnInStop() {
     "-Action",
     "Stop",
   ], 60_000);
-  if (!result.ok) throw new Error("BURN_IN_STOP_FAILED");
-  output({ status: "BURN_IN_STOPPED" });
+  const finishedAt = new Date();
+  let after: Awaited<ReturnType<typeof captureBusinessStateSnapshot>>;
+  let findingsAfter: Awaited<ReturnType<typeof collectStateAudit>>;
+  try {
+    after = await captureBusinessStateSnapshot(prisma);
+    findingsAfter = await collectStateAudit(prisma, { workspaceRoot });
+  } catch {
+    await updateManualBurnInSession(workspaceRoot, {
+      ...session,
+      state: "INCOMPLETE",
+      humanActions: ["CAPTURE_FINAL_SNAPSHOT_AND_REVIEW_MANUALLY"],
+    });
+    output({ status: "HUMAN_REVIEW_REQUIRED", humanActions: ["CAPTURE_FINAL_SNAPSHOT_AND_REVIEW_MANUALLY"] });
+    process.exitCode = 2;
+    return;
+  }
+  const comparison = compareBusinessStateSnapshots(session.baseline as never, after);
+  const realLeaderAfter = await getRedisKeyFingerprint("affiliate:worker:leader");
+  const beforeLeader = session.realLeaderBefore as { exists?: boolean; fingerprint?: string | null };
+  const realLeaderKeyUnchanged =
+    beforeLeader.exists === realLeaderAfter.exists &&
+    beforeLeader.fingerprint === realLeaderAfter.fingerprint;
+  const leaderReleaseValidated = !realLeaderAfter.exists;
+  const residualProcesses = await residualOwnedProcesses();
+  const allEvents = await readEvents(join(workspaceRoot, ".local/ops/burn-in-events.jsonl"));
+  const events = eventsForSession(allEvents, session.sessionId);
+  const heartbeatSamples = events
+    .filter((event) => event.event === "HEARTBEAT_OBSERVED" && typeof event.heartbeatAt === "string")
+    .map((event) => Date.parse(String(event.heartbeatAt)))
+    .filter(Number.isFinite)
+    .sort((a, b) => a - b);
+  const gaps = heartbeatSamples.slice(1).map((value, index) => value - heartbeatSamples[index]!);
+  const previousCodes = new Set(
+    (session.findingsBefore as Array<{ code?: unknown }>).flatMap((finding) =>
+      typeof finding.code === "string" ? [finding.code] : [],
+    ),
+  );
+  const afterCodes = new Set(findingsAfter.map((finding) => finding.code));
+  const finalStatus = await collectOperationalStatus(prisma, { workspaceRoot });
+  const prohibitedEvents = events.filter((event) =>
+    /BROWSER|PLAYWRIGHT|PUBLISHER|TELEGRAM|MERCADO_LIVRE|OLLAMA|OPENAI|DISPATCH/.test(String(event.event ?? "")),
+  );
+  const liveValidated = events.some((event) => event.event === "LIVE_VALIDATED");
+  const readyValidated = events.some((event) => event.event === "READY_VALIDATED");
+  const releaseFailed = events.some((event) => event.event === "LEADERSHIP_RELEASE_FAILED");
+  const success =
+    result.ok && comparison.unchanged && residualProcesses === 0 &&
+    leaderReleaseValidated && !releaseFailed && prohibitedEvents.length === 0 &&
+    liveValidated && readyValidated;
+  const humanActions = success ? [] : ["PRESERVE_LOGS_AND_REVIEW_BURN_IN_FAILURE"];
+  const startedAt = new Date(session.startedAt);
+  const report = {
+    reportSource: session.reportSource,
+    sessionId: session.sessionId,
+    status: success ? "BURN_IN_SUCCEEDED" : "HUMAN_REVIEW_REQUIRED",
+    startedAt: session.startedAt,
+    finishedAt: finishedAt.toISOString(),
+    durationSeconds: Math.max(0, Math.round((finishedAt.getTime() - startedAt.getTime()) / 1_000)),
+    componentUptimeSeconds: Math.max(0, Math.round((finishedAt.getTime() - startedAt.getTime()) / 1_000)),
+    supervisorInstanceId: String(events.find((event) => event.event === "SUPERVISOR_STARTED")?.instanceId ?? "").slice(0, 12) || null,
+    dashboardInstanceId: String(events.find((event) => event.event === "COMPONENT_STARTED" && event.component === "dashboard")?.instanceId ?? "").slice(0, 12) || null,
+    workerInstanceId: String(events.find((event) => event.event === "BURN_IN_RUNTIME_STARTED")?.instanceId ?? "").slice(0, 12) || finalStatus.worker.instanceId,
+    restartCount: events.filter((event) => event.event === "COMPONENT_RESTARTED").length,
+    maxConsecutiveCrashes: events.filter((event) => event.event === "COMPONENT_EXITED_UNEXPECTEDLY").length,
+    burnInConfirmed: events.some((event) => event.event === "BURN_IN_RUNTIME_STARTED"),
+    leadershipChanges: events.filter((event) => event.event === "LEADERSHIP_ACQUIRED").length,
+    leadershipRenewals: events.filter((event) => event.event === "LEADERSHIP_RENEWED").length,
+    leadershipRenewalFailures: events.filter((event) => event.event === "LEADERSHIP_RENEWAL_FAILED").length,
+    maxHeartbeatGapMs: gaps.length ? Math.max(...gaps) : 0,
+    lastCycleStatus: finalStatus.worker.lastCycleStatus,
+    blockedCycles: finalStatus.worker.blockedCycles,
+    externalEffectsObserved: prohibitedEvents.length + finalStatus.worker.externalEffectsObserved,
+    businessChangesObserved: comparison.changedEntities.length,
+    businessFingerprintUnchanged: comparison.unchanged,
+    changedEntities: comparison.changedEntities,
+    liveValidated,
+    readyValidated,
+    shutdownValidated: result.ok && residualProcesses === 0,
+    residualProcesses,
+    residualLocks: leaderReleaseValidated ? 0 : 1,
+    realLeaderKeyUnchanged,
+    leaderReleaseValidated,
+    findingsPreexisting: [...previousCodes].filter((code) => afterCodes.has(code)),
+    findingsNew: [...afterCodes].filter((code) => !previousCodes.has(code)),
+    findingsResolvedNaturally: [...previousCodes].filter((code) => !afterCodes.has(code)),
+    humanActions,
+  };
+  await completeManualBurnInSession({ workspaceRoot, session, report, reportFile: BURN_IN_REPORT_FILE });
+  output({ status: result.ok ? "BURN_IN_STOPPED" : "HUMAN_REVIEW_REQUIRED", report });
+  if (!success) process.exitCode = 2;
 }
 
 function taskPreview(kind: "supervisor" | "backup") {
@@ -866,23 +1075,33 @@ async function main() {
   if (command === "burn-in-start") return burnInStart();
   if (command === "burn-in-stop") return burnInStop();
   if (command === "burn-in-smoke") return burnInSmoke();
+  if (command === "burn-in-manual-smoke") return manualBurnInSmoke();
   if (command === "reliability-smoke") return reliabilitySmoke();
   if (command === "burn-in-report") {
     output({
       status: "BURN_IN_REPORT",
-      report: await readBurnInReport(workspaceRoot),
+      currentSession: await currentBurnInSessionView(),
+      lastCompletedReport: await readBurnInReport(workspaceRoot),
       stateModified: false,
     });
     return;
   }
   if (command === "burn-in-status") {
     const status = await collectOperationalStatus(prisma, { workspaceRoot });
+    const currentSession = await currentBurnInSessionView();
     output({
-      status: status.worker.burnInActive ? "BURN_IN_RUNNING" : "BURN_IN_STOPPED",
+      status:
+        currentSession?.state === "HUMAN_REVIEW_REQUIRED" ||
+        currentSession?.state === "INCOMPLETE"
+          ? "HUMAN_REVIEW_REQUIRED"
+          : status.worker.burnInActive
+            ? "BURN_IN_RUNNING"
+            : "BURN_IN_STOPPED",
       mode: status.worker.mode,
       worker: status.worker,
       supervisor: status.supervisor,
-      report: await readBurnInReport(workspaceRoot),
+      currentSession,
+      lastCompletedReport: await readBurnInReport(workspaceRoot),
       stateModified: false,
     });
     return;
@@ -894,7 +1113,8 @@ async function main() {
     output({
       ...status,
       findings,
-      lastBurnIn: await readBurnInReport(workspaceRoot),
+      currentBurnInSession: await currentBurnInSessionView(),
+      lastCompletedBurnIn: await readBurnInReport(workspaceRoot),
       stateModified: false,
     });
     return;

@@ -79,6 +79,10 @@ live/ready HTTP responses, process state, Redis ownership probes and sanitized d
 snapshots. It never contains lock tokens, connection URLs, cookies, messages, group
 names, browser profile paths or environment values.
 
+Smoke reports are always marked `reportSource: SMOKE`. They are stored as the last
+completed report, but are never presented as evidence for a concurrently running
+manual session.
+
 ## Explicit continuous burn-in
 
 Starting requires an exact confirmation flag:
@@ -89,6 +93,18 @@ npm run ops:burn-in:preflight
 npm run ops:burn-in:start -- --confirm-burn-in
 npm run ops:burn-in:status
 ```
+
+Start creates `.local/ops/burn-in-session.json` atomically before the supervisor is
+launched. The session contains a random identifier, start timestamp, sanitized
+business baseline, initial findings and the real leadership-key fingerprint. Events
+from the supervisor, process hosts and worker carry that exact session identifier.
+An active, incomplete or corrupt session blocks another start and requires review;
+there is no command that discards incomplete evidence.
+
+While the session is active, the supervisor performs a bounded read-only observation
+of `/api/health/live`, `/api/health/ready` and the sanitized heartbeat. It does not run
+jobs and stops with the supervisor. `ops:burn-in:status` reports `currentSession`
+separately from `lastCompletedReport`, including the current elapsed time.
 
 Without `--confirm-burn-in`, no supervisor, dashboard, worker, PID, file lock,
 leadership lock or heartbeat is created.
@@ -101,6 +117,25 @@ npm run ops:burn-in:status
 npm run ops:burn-in:report
 Remove-Item Env:WORKER_BURN_IN_MODE
 ```
+
+Stop is cooperative and idempotent. It captures the final snapshot and findings,
+filters evidence by the current `sessionId`, validates process and leadership release,
+writes the report through a temporary file and atomic rename, archives it below
+`.local/ops/burn-in-reports`, then marks the session completed. A second stop preserves
+the completed report. Missing final evidence, residual processes/locks or an unproven
+leadership release produces `HUMAN_REVIEW_REQUIRED`. After a proven release, the
+public worker leadership state is `RELEASED`; an unproven release is
+`RELEASE_FAILED`.
+
+The automated manual-path smoke exercises start, observation, status, stop and report
+with the same lifecycle and an isolated Redis key:
+
+```powershell
+npm run ops:burn-in:manual-smoke -- --duration-seconds 60
+```
+
+Its report is marked `reportSource: MANUAL_TEST`; a real operator-started session is
+marked `reportSource: MANUAL`.
 
 Do not use Task Scheduler for the first burn-in and do not configure automatic boot
 until the owner has accepted a manual run.

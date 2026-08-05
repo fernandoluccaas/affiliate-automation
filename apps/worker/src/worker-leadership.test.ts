@@ -188,4 +188,20 @@ describe("worker singleton leadership", () => {
     expect(lock.release).toHaveBeenCalledOnce();
     expect(JSON.stringify(result)).not.toContain(lock.token);
   });
+
+  it("reports an unproven release without claiming RELEASED", async () => {
+    const events: string[] = [];
+    await runWithWorkerLeadership({
+      instanceId: "worker-release-failed",
+      acquire: vi.fn(async () =>
+        handle({ release: vi.fn(async () => Promise.reject(new Error("redis unavailable"))) }),
+      ),
+      onEvent: (event) => {
+        events.push(event);
+      },
+      run: async () => undefined,
+    });
+    expect(events).toContain("RELEASE_FAILED");
+    expect(events.at(-1)).not.toBe("RELEASED");
+  });
 });

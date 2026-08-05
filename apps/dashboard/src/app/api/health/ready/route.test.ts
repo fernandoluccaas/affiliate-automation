@@ -59,6 +59,7 @@ describe("dashboard readiness", () => {
         blockedCycles: 4,
         externalEffectsObserved: 0,
         businessChangesObserved: 0,
+        lastHeartbeatAt: "2026-08-05T11:59:59.000Z",
       },
       workerContext: { humanActionRequired: false },
     });
@@ -66,7 +67,13 @@ describe("dashboard readiness", () => {
     const response = await GET();
     expect(response.status).toBe(200);
     const body = await response.json();
-    expect(body).toMatchObject({ mode: "BURN_IN", burnInActive: true, blockedCycles: 4 });
+    expect(body).toMatchObject({
+      mode: "BURN_IN",
+      burnInActive: true,
+      blockedCycles: 4,
+      workerState: "ONLINE",
+      lastHeartbeatAt: "2026-08-05T11:59:59.000Z",
+    });
     expect(JSON.stringify(body)).not.toMatch(/\bpid\b|postgresql:\/\/|redis:\/\//i);
   });
 });

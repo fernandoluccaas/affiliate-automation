@@ -3,6 +3,7 @@ import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { resolveWorkerHealthStatus } from "@affiliate/shared";
 import {
   applyBackupRetention,
   auditOperationalSnapshot,
@@ -67,6 +68,25 @@ function auditInput() {
 }
 
 describe("local supervisor policy", () => {
+  it.each([
+    ["recent online", "ONLINE", "2026-08-05T11:59:59.000Z", "ONLINE"],
+    ["exact boundary", "ONLINE", "2026-08-05T11:58:30.000Z", "ONLINE"],
+    ["expired online", "ONLINE", "2026-08-05T11:58:29.999Z", "STALE"],
+    ["recent offline", "OFFLINE", "2026-08-05T11:59:59.000Z", "OFFLINE"],
+    ["old offline", "OFFLINE", "2026-08-04T11:59:59.000Z", "OFFLINE"],
+    ["UTC ISO", "ONLINE", "2026-08-05T12:00:00.000Z", "ONLINE"],
+    ["equivalent local offset", "ONLINE", "2026-08-05T09:00:00.000-03:00", "ONLINE"],
+    ["small concurrent-write skew", "ONLINE", "2026-08-05T12:00:02.000Z", "ONLINE"],
+    ["invalid future clock", "ONLINE", "2026-08-05T12:00:06.000Z", "STALE"],
+  ])("classifies controlled heartbeat clock: %s", (_name, state, heartbeatAt, expected) => {
+    expect(resolveWorkerHealthStatus({
+      storedState: state,
+      heartbeatAt,
+      now: new Date("2026-08-05T12:00:00.000Z"),
+      staleAfterMs: 90_000,
+      clockSkewToleranceMs: 5_000,
+    })).toBe(expected);
+  });
   it("increases backoff and stops after the configured crash limit", () => {
     expect(supervisorBackoffMs(1)).toBe(1_000);
     expect(supervisorBackoffMs(4)).toBe(8_000);
@@ -556,6 +576,10 @@ describe("sanitized rotating logs and safe scripts", () => {
       resolve(process.cwd(), "../../scripts/ops/process-host.mjs"),
       "utf8",
     );
+    const operationsCli = await readFile(
+      resolve(process.cwd(), "src/cli.ts"),
+      "utf8",
+    );
     expect(worker).not.toMatch(/playwright|dispatchAuthorizedWhatsApp/i);
     expect(supervisor).not.toMatch(/playwright|dispatch-authorized|whatsapp:web:publish/i);
     expect(supervisor).not.toMatch(/release-dispatch-claim/i);
@@ -567,6 +591,11 @@ describe("sanitized rotating logs and safe scripts", () => {
     expect(publicationsPage).toContain("sticky right-0");
     expect(processHost).toContain("contentHash");
     expect(processHost).not.toMatch(/playwright|dispatch-authorized|whatsapp:web:publish/i);
+    expect(operationsCli).toContain("BURN_IN_CONFIRMATION_REQUIRED");
+    expect(operationsCli).toContain('reportSource: "SMOKE"');
+    expect(operationsCli).toContain('burnInStart("MANUAL_TEST")');
+    expect(supervisor).toContain("AFFILIATE_BURN_IN_SESSION_ID");
+    expect(supervisor).toContain("HEARTBEAT_OBSERVED");
     expect(supervisor).toContain("AFFILIATE_SUPERVISOR_STABLE_RESET_SECONDS");
     expect(supervisor).toContain("COMPONENT_STABILITY_RESET");
     expect(supervisor).not.toContain("browserOpened = $false");
