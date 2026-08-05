@@ -119,6 +119,41 @@ describe("continuous worker configuration", () => {
 });
 
 describe("runContinuousWorker", () => {
+  it("records real lifecycle cycles as blocked in burn-in mode", async () => {
+    await mockSettings({ discoveryPaused: true, publicationPaused: true });
+    const jobs = dependencies();
+    for (const component of Object.keys(jobs) as Array<keyof typeof jobs>) {
+      jobs[component] = vi.fn(async () => ({
+        burnInBlocked: true,
+        workerComponentOutcome: {
+          status: "SKIPPED",
+          lockBackend: "AVAILABLE",
+        },
+      }));
+    }
+    const controller = new AbortController();
+    const result = await runContinuousWorker({
+      dependencies: jobs,
+      signal: controller.signal,
+      mode: "BURN_IN",
+      leadershipMetrics: () => ({ renewals: 3, renewalFailures: 0 }),
+      now: () => new Date("2026-08-05T12:00:00.000Z"),
+      sleep: async () => controller.abort(),
+      logger: vi.fn(),
+    });
+    expect(result).toMatchObject({
+      state: "OFFLINE",
+      mode: "BURN_IN",
+      burnInActive: true,
+      blockedCycles: 1,
+      externalEffectsObserved: 0,
+      businessChangesObserved: 0,
+      leadershipRenewals: 3,
+      leadershipRenewalFailures: 0,
+    });
+    expect(Object.values(jobs).every((job) => vi.mocked(job).mock.calls.length === 1)).toBe(true);
+  });
+
   it("runs components on independent cadences without catch-up bursts", async () => {
     const { upsert } = await mockSettings();
     const jobs = dependencies();
@@ -149,7 +184,7 @@ describe("runContinuousWorker", () => {
           controller.abort();
         }
       },
-      processId: 123,
+      instanceId: "worker-test-instance",
       logger: vi.fn(),
     });
 
@@ -168,7 +203,7 @@ describe("runContinuousWorker", () => {
         update: {
           value: expect.objectContaining({
             state: "OFFLINE",
-            processId: 123,
+            instanceId: "worker-test-instance",
           }),
         },
       }),

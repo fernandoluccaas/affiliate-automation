@@ -49,6 +49,24 @@ export function workerStatusFromValue(
   return {
     state,
     heartbeatAt,
+    instanceId:
+      typeof record.instanceId === "string" ? record.instanceId.slice(0, 12) : null,
+    leaderStatus:
+      ["ACTIVE", "RELEASING", "RELEASED", "RELEASE_FAILED"].includes(
+        String(record.leaderStatus),
+      )
+        ? record.leaderStatus
+        : null,
+    lastCycleStartedAt:
+      typeof record.lastCycleStartedAt === "string"
+        ? record.lastCycleStartedAt
+        : null,
+    lastCycleFinishedAt:
+      typeof record.lastCycleFinishedAt === "string"
+        ? record.lastCycleFinishedAt
+        : null,
+    lastCycleStatus:
+      typeof record.lastCycleStatus === "string" ? record.lastCycleStatus : null,
     nextDiscovery:
       typeof nextRuns.discovery === "string" ? nextRuns.discovery : null,
     nextPublication:

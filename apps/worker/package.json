@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "tsx src/index.ts",
     "once": "tsx src/index.ts --once",
-    "start": "tsx src/index.ts",
+    "start": "node --env-file=../../.env --import tsx src/index.ts",
+    "burn-in": "node --env-file=../../.env --import tsx src/burn-in-entry.ts",
     "whatsapp:web": "tsx src/whatsapp-web-cli.ts",
     "build": "tsc -p tsconfig.json",
     "lint": "eslint .",

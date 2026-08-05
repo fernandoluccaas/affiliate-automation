@@ -1,5 +1,17 @@
 # Worker operations
 
+Phase 5G separates the safe burn-in worker from the normal business worker. The
+dedicated entrypoint writes only the existing sanitized heartbeat; discovery,
+planning, publication, AI and browser paths are absent from its dependency graph.
+Status, preflight, audit, health and `/operacoes` share one contextual heartbeat
+classifier. See [Operational reliability and safe burn-in](operational-burn-in.md).
+
+For the Phase 5F Windows production supervisor, startup/preflight, global worker
+leadership, health/readiness, audit, log rotation, backup/verification, optional
+Task Scheduler setup, power-loss recovery, and operational checklists, see
+[Windows local production operations](windows-production-operations.md). The
+continuous worker and supervisor never initiate WhatsApp Web dispatch.
+
 ## Phase 4 baseline audit
 
 The worker currently has two execution modes:
@@ -271,7 +283,7 @@ An awaiting item reserves one daily slot and the worker creates no more than `WH
 
 The assisted flow remains the stable fallback. The experimental Web flow has a separate local runbook:
 
-The shared worker is a planner only for `WEB_EXPERIMENTAL`: `npm run worker:once` persists the immutable `SCHEDULED` row with `AWAITING_VISUAL_INSPECTION` and defers it without opening Playwright. Open `/publicacoes`, verify the badge and snapshot, and copy the local commands from its details panel. A second worker run must reuse the same channel/Offer-version decision rather than creating a duplicate.
+The shared worker is a planner only for `WEB_EXPERIMENTAL`: `npm run worker:once` persists the immutable `SCHEDULED` row with `AWAITING_VISUAL_INSPECTION` and defers it without opening Playwright. Open `/publicacoes`, verify the active item and backlog, and copy only the commands offered for that active item. While any non-terminal Publication exists for the channel, later worker runs record `ACTIVE_PUBLICATION_EXISTS` and create no additional Web row; Telegram planning continues.
 
 1. Start PostgreSQL and Redis and keep the feature disabled while configuring the group.
 2. Install Chromium once with `npm run whatsapp:web:install-browser`.
@@ -281,10 +293,15 @@ The shared worker is a planner only for `WEB_EXPERIMENTAL`: `npm run worker:once
 6. Run `npm run whatsapp:web:health -- --profile principal`, then `npm run whatsapp:web:diagnose -- --profile principal`, and finally `npm run whatsapp:web:locate -- --channel-id <id>`. Diagnose does not type, open a conversation or create a draft; locate uses the persisted exact group name and does not prepare content.
 7. Run `npm run whatsapp:web:dry-run -- --publication-id <id>`. It must return `READY_TO_SEND`; no send button is called and the draft must be cleared.
 8. Run `npm run whatsapp:web:inspect-layout -- --publication-id <id> --hold-ms 30000` to compare sanitized contenteditable fingerprints before/after the preview and inspect active media anchors without filling or sending. Optional local `--devtools` is restricted to layout/draft inspection.
-9. Run `npm run whatsapp:web:inspect-draft -- --publication-id <id> --hold-ms 20000`, visually verify the correct group, image, complete caption and affiliate link, then answer `s` only if all are visible. An unresolved target still holds the preview without filling it. The command never sends and must clear the draft.
-10. Run `npm run whatsapp:web:preflight -- --publication-id <id>`. It must return `READY_TO_COMMIT_SEND`, `captionStable=true`, one affiliate URL, one visible and enabled trigger scoped to the current media editor, execute only a trial click, and clear the draft.
-11. Run `npm run whatsapp:web:config-check -- --publication-id <id>`. While `WHATSAPP_WEB_DRY_RUN=true`, it must report `realSendEligible=false`, `blockingReason=WHATSAPP_WEB_REAL_SEND_DISABLED_BY_DRY_RUN` and `browserOpened=false`, without acquiring media, profile lock or Chromium.
-12. After human review only, set `WHATSAPP_WEB_DRY_RUN=false`, repeat `config-check`, and run `npm run whatsapp:web:publish -- --publication-id <id> --confirm-send`. A valid visual-inspection fingerprint is mandatory. Omitting `--confirm-send` refuses delivery before any side effect. Once `sendClickStartedAt` exists, `DELIVERY_UNCERTAIN` is preserved and automatic retry remains blocked until manual review.
+9. Run `npm run whatsapp:web:queue-status -- --channel-id <id>` and use only `activePublicationId`.
+10. Run `npm run whatsapp:web:inspect-draft -- --publication-id <id> --hold-ms 30000`, visually verify the correct group, image, complete caption and affiliate link, then answer `s` only if all are visible. Success records `VISUAL_INSPECTION_CONFIRMED` for the exact fingerprint. The command never sends and clears the draft.
+11. Run `npm run whatsapp:web:preflight -- --publication-id <id>`. It is accepted only for the active item with a valid inspection; success persists `PREFLIGHT_READY` and the same fingerprint.
+12. Run `npm run whatsapp:web:authorize-send -- --publication-id <id> --expires-in-minutes 15`. This database-only operation returns `browserOpened=false` and `sendCalled=false`. Revoke it safely with `npm run whatsapp:web:revoke-send-authorization -- --publication-id <id> --reason "motivo"`.
+13. `config-check` remains read-only. Inspect the state with `npm run whatsapp:web:dispatch-status -- --publication-id <id>`.
+14. The only controlled send entry point is `npm run whatsapp:web:dispatch-authorized -- --publication-id <id> --confirm-send`; the legacy `whatsapp:web:publish` script is an alias. With the repository default `WHATSAPP_WEB_DRY_RUN=true`, it must return `WHATSAPP_WEB_REAL_SEND_DISABLED_BY_DRY_RUN`, `authorizationClaimed=false`, `browserOpened=false` and `sendCalled=false`.
+15. If a process stops after claim but before `sendClickStartedAt`, inspect it and, only after confirming no click marker exists, run `npm run whatsapp:web:release-dispatch-claim -- --publication-id <id> --reason "processo encerrado antes do clique" --confirm-release`. This requires a new preflight and authorization. Never release a claim after a click marker; review delivery instead.
+
+Backlog maintenance is non-destructive: `whatsapp:web:cancel-publication -- --publication-id <id> --reason "motivo"` cancels only a never-sent item and promotes the next item; `whatsapp:web:archive-publication` hides only terminal items. Both preserve the Publication snapshot and audit actor/time/reason. A final not-delivered reconciliation releases the next queue item. Unresolved `DELIVERY_UNCERTAIN` cannot be archived or cancelled and blocks the whole channel.
 13. For an already attempted uncertain delivery, restore `WHATSAPP_WEB_DRY_RUN=true` and run `npm run whatsapp:web:inspect-delivery -- --publication-id <id> --hold-ms 20000`. This command opens only the exact configured group, never sends or changes database state, and returns sanitized matching signals.
 14. After visual confirmation, reconcile without a browser using `npm run whatsapp:web:resolve-delivery -- --publication-id <id> --delivered --confirm-delivered --reason "Confirmada visualmente no grupo correto"`. The original attempt/error/click markers remain auditable, retry remains disabled and first-success auto-pause is applied.
 

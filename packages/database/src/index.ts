@@ -12,3 +12,4 @@ if (process.env.NODE_ENV !== "production") {
 
 export * from "@prisma/client";
 export * from "./whatsapp-delivery-resolution";
+export * from "./whatsapp-operational-queue";

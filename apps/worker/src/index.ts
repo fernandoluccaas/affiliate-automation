@@ -20,7 +20,10 @@ import {
   type PublisherResult,
 } from "@affiliate/publisher-connectors";
 import { acquireLock, type LockHandle } from "@affiliate/redis";
+import { existsSync } from "node:fs";
 import {
+  getWhatsAppWebQueueStatus,
+  lockWhatsAppWebChannelForUpdate,
   prisma,
   Prisma,
   type Channel,
@@ -42,6 +45,7 @@ import {
   type WorkerCadences,
   type WorkerComponent,
 } from "./runtime";
+import { runWithWorkerLeadership } from "./worker-leadership";
 
 const DEFAULT_MAX_ATTEMPTS = 4;
 const PUBLICATION_RETRY_MINUTES = [1, 5, 15, 30] as const;
@@ -76,6 +80,14 @@ type JobMetrics = {
   whatsappWebLoginRequired: number;
   whatsappWebSelectorMismatch: number;
   whatsappWebMediaFallback: number;
+  whatsappQueueActive: number;
+  whatsappQueueWaiting: number;
+  whatsappQueueBlockedByDeliveryUncertain: number;
+  whatsappPlanningSkippedActiveExists: number;
+  whatsappAuthorizationsActive: number;
+  whatsappAuthorizationsExpired: number;
+  whatsappPublicationsCancelled: number;
+  whatsappPublicationsArchived: number;
   skipReasons: Record<string, number>;
   planningDecisions: PublicationPlanningDecision[];
 };
@@ -84,6 +96,8 @@ export type PublicationPlanningResult =
   | "CREATED"
   | "ALREADY_EXISTS"
   | "BLOCKED_BY_DELIVERY_UNCERTAIN"
+  | "ACTIVE_PUBLICATION_EXISTS"
+  | "CHANNEL_BLOCKED_BY_DELIVERY_UNCERTAIN"
   | "BLOCKED_BY_CHANNEL_PAUSE"
   | "BLOCKED_BY_DISABLED_CHANNEL"
   | "BLOCKED_BY_POLICY"
@@ -157,6 +171,14 @@ function emptyMetrics(): JobMetrics {
     whatsappWebLoginRequired: 0,
     whatsappWebSelectorMismatch: 0,
     whatsappWebMediaFallback: 0,
+    whatsappQueueActive: 0,
+    whatsappQueueWaiting: 0,
+    whatsappQueueBlockedByDeliveryUncertain: 0,
+    whatsappPlanningSkippedActiveExists: 0,
+    whatsappAuthorizationsActive: 0,
+    whatsappAuthorizationsExpired: 0,
+    whatsappPublicationsCancelled: 0,
+    whatsappPublicationsArchived: 0,
     skipReasons: {},
     planningDecisions: [],
   };
@@ -195,6 +217,14 @@ function mergeMetrics(target: JobMetrics, source: JobMetrics) {
     "whatsappWebLoginRequired",
     "whatsappWebSelectorMismatch",
     "whatsappWebMediaFallback",
+    "whatsappQueueActive",
+    "whatsappQueueWaiting",
+    "whatsappQueueBlockedByDeliveryUncertain",
+    "whatsappPlanningSkippedActiveExists",
+    "whatsappAuthorizationsActive",
+    "whatsappAuthorizationsExpired",
+    "whatsappPublicationsCancelled",
+    "whatsappPublicationsArchived",
   ];
 
   for (const key of numericKeys) {
@@ -233,6 +263,8 @@ type WorkerSkipReason =
   | "DUPLICATE_PUBLICATION"
   | "CHANNEL_DISABLED"
   | "CHANNEL_PAUSED"
+  | "ACTIVE_PUBLICATION_EXISTS"
+  | "WHATSAPP_WEB_DELIVERY_UNCERTAIN"
   | "PLANNING_FAILED";
 
 function recordSkip(metrics: JobMetrics, reason: WorkerSkipReason) {
@@ -482,6 +514,10 @@ function compactPlanningDecisions(decisions: PublicationPlanningDecision[]) {
     const planningPriority =
       decision.planningResult === "CREATED"
         ? 100
+        : decision.planningResult === "CHANNEL_BLOCKED_BY_DELIVERY_UNCERTAIN"
+          ? 95
+          : decision.planningResult === "ACTIVE_PUBLICATION_EXISTS"
+            ? 92
         : decision.planningResult === "BLOCKED_BY_DELIVERY_UNCERTAIN"
           ? 90
           : decision.planningResult === "ALREADY_EXISTS"
@@ -839,6 +875,24 @@ export async function scheduleReadyOffers(
   const prioritizedOffers = [...offers].sort(compareReadyOfferPriority);
   const scheduledChannelIds = new Set<string>();
   const selectedOfferIds = new Set<string>();
+  const whatsappQueues = new Map<
+    string,
+    Awaited<ReturnType<typeof getWhatsAppWebQueueStatus>>
+  >();
+
+  for (const channel of channels) {
+    if (!isExperimentalWhatsAppGroup(channel)) continue;
+    const queue = await getWhatsAppWebQueueStatus(prisma, channel.id);
+    whatsappQueues.set(channel.id, queue);
+    metrics.whatsappQueueActive += queue.activePublicationId ? 1 : 0;
+    metrics.whatsappQueueWaiting += queue.waitingCount;
+    metrics.whatsappQueueBlockedByDeliveryUncertain +=
+      queue.deliveryUncertainCount > 0 ? 1 : 0;
+    metrics.whatsappAuthorizationsActive += queue.authorizationsActive;
+    metrics.whatsappAuthorizationsExpired += queue.authorizationsExpired;
+    metrics.whatsappPublicationsCancelled += queue.cancelledCount;
+    metrics.whatsappPublicationsArchived += queue.archivedCount;
+  }
 
   for (const offer of prioritizedOffers) {
     for (const channel of channels) {
@@ -860,6 +914,35 @@ export async function scheduleReadyOffers(
             channelBlock.planningResult,
             { reason: channelBlock.reason },
           );
+          continue;
+        }
+
+        const existingQueue = whatsappQueues.get(channel.id);
+        if (existingQueue?.activePublicationId) {
+          const uncertain = existingQueue.deliveryUncertainCount > 0;
+          recordSkip(
+            metrics,
+            uncertain
+              ? "WHATSAPP_WEB_DELIVERY_UNCERTAIN"
+              : "ACTIVE_PUBLICATION_EXISTS",
+          );
+          metrics.whatsappPlanningSkippedActiveExists += 1;
+          recordPlanningDecision(
+            metrics,
+            offer,
+            channel,
+            uncertain
+              ? "CHANNEL_BLOCKED_BY_DELIVERY_UNCERTAIN"
+              : "ACTIVE_PUBLICATION_EXISTS",
+            {
+              executionResult: "DEFERRED",
+              reason: uncertain
+                ? "WHATSAPP_WEB_DELIVERY_UNCERTAIN"
+                : `ACTIVE_PUBLICATION:${existingQueue.activePublicationId}`,
+              publicationId: existingQueue.activePublicationId,
+            },
+          );
+          scheduledChannelIds.add(channel.id);
           continue;
         }
 
@@ -1001,8 +1084,11 @@ export async function scheduleReadyOffers(
         }
 
         const lock = await acquireLock(
-          `publication:${channel.id}:${offer.id}`,
+          webExperimental
+            ? `whatsapp:web:planning:${channel.id}`
+            : `publication:${channel.id}:${offer.id}`,
           60_000,
+          webExperimental ? { requireRedis: true } : undefined,
         );
 
         if (!lock.acquired) {
@@ -1022,7 +1108,14 @@ export async function scheduleReadyOffers(
             });
           }
           let publicationId: string | null = null;
+          let activePublicationId: string | null = null;
           await prisma.$transaction(async (tx) => {
+            if (webExperimental) {
+              await lockWhatsAppWebChannelForUpdate(tx, channel.id);
+              const queue = await getWhatsAppWebQueueStatus(tx, channel.id, now);
+              activePublicationId = queue.activePublicationId;
+              if (activePublicationId) return;
+            }
             const publication = await createPublicationIdempotently(
               tx,
               offer,
@@ -1040,6 +1133,23 @@ export async function scheduleReadyOffers(
               });
             }
           });
+          if (activePublicationId) {
+            recordSkip(metrics, "ACTIVE_PUBLICATION_EXISTS");
+            metrics.whatsappPlanningSkippedActiveExists += 1;
+            recordPlanningDecision(
+              metrics,
+              offer,
+              channel,
+              "ACTIVE_PUBLICATION_EXISTS",
+              {
+                executionResult: "DEFERRED",
+                reason: `ACTIVE_PUBLICATION:${activePublicationId}`,
+                publicationId: activePublicationId,
+              },
+            );
+            scheduledChannelIds.add(channel.id);
+            continue;
+          }
           metrics.scheduled += 1;
           metrics.publicationsPlanned += 1;
           metrics.publicationsCreated += 1;
@@ -1925,6 +2035,9 @@ export async function startWorker(
     dependencies?: ContinuousWorkerDependencies;
   } = {},
 ) {
+  if (process.env.WORKER_BURN_IN_MODE === "true") {
+    throw new Error("BURN_IN_REQUIRES_ISOLATED_WORKER_ENTRYPOINT");
+  }
   if (loopStarted) {
     throw new Error("Worker loop already started in this process.");
   }
@@ -1941,6 +2054,13 @@ export async function startWorker(
 
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
+  const componentStopFile = process.env.AFFILIATE_COMPONENT_STOP_FILE;
+  const componentStopMonitor = componentStopFile
+    ? setInterval(() => {
+        if (existsSync(componentStopFile)) stop();
+      }, 250)
+    : null;
+  componentStopMonitor?.unref();
 
   if (options.signal) {
     options.signal.addEventListener("abort", stop, { once: true });
@@ -2041,15 +2161,21 @@ export async function startWorker(
   );
 
   try {
-    return await runContinuousWorker({
-      dependencies,
+    return await runWithWorkerLeadership({
       signal: shutdownController.signal,
-      cadences,
-      ...(options.heartbeatIntervalMs
-        ? { heartbeatIntervalMs: options.heartbeatIntervalMs }
-        : {}),
+      run: (leadershipSignal, instanceId) =>
+        runContinuousWorker({
+          dependencies,
+          signal: leadershipSignal,
+          cadences,
+          instanceId,
+          ...(options.heartbeatIntervalMs
+            ? { heartbeatIntervalMs: options.heartbeatIntervalMs }
+            : {}),
+        }),
     });
   } finally {
+    if (componentStopMonitor) clearInterval(componentStopMonitor);
     process.removeListener("SIGINT", stop);
     process.removeListener("SIGTERM", stop);
     await prisma.$disconnect();
@@ -2059,15 +2185,35 @@ export async function startWorker(
 if (process.env.NODE_ENV !== "test") {
   const once = process.argv.includes("--once");
 
-  startWorker({ once }).catch(() => {
-    console.error(
-      JSON.stringify({
-        event: "worker_failed",
-        stage: "WORKER_LOOP",
-        status: "FAILED",
-        errorCode: "WORKER_FAILED",
-      }),
-    );
-    process.exit(1);
-  });
+  startWorker({ once })
+    .then((result) => {
+      if (
+        !once &&
+        result &&
+        typeof result === "object" &&
+        "status" in result &&
+        result.status !== "COMPLETED"
+      ) {
+        console.error(
+          JSON.stringify({
+            event: "worker_leadership_unavailable",
+            component: "worker",
+            level: "error",
+            errorCode: result.status,
+          }),
+        );
+        process.exitCode = 2;
+      }
+    })
+    .catch(() => {
+      console.error(
+        JSON.stringify({
+          event: "worker_failed",
+          stage: "WORKER_LOOP",
+          status: "FAILED",
+          errorCode: "WORKER_FAILED",
+        }),
+      );
+      process.exit(1);
+    });
 }

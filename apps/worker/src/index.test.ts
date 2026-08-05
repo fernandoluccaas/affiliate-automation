@@ -560,7 +560,10 @@ describe("createPublicationIdempotently", () => {
         findMany: vi.fn().mockResolvedValue([offer]),
         update: offerUpdate,
       },
-      channel: { findMany: vi.fn().mockResolvedValue([channel]) },
+      channel: {
+        findMany: vi.fn().mockResolvedValue([channel]),
+        findUnique: vi.fn().mockResolvedValue(channel),
+      },
       publication: {
         count: vi.fn().mockResolvedValue(0),
         findFirst: vi.fn().mockResolvedValue(null),
@@ -568,7 +571,15 @@ describe("createPublicationIdempotently", () => {
         upsert,
       },
       $transaction: vi.fn(async (callback: (tx: unknown) => unknown) =>
-        callback({ publication: { upsert }, offer: { update: offerUpdate } }),
+        callback({
+          $queryRaw: vi.fn().mockResolvedValue([{ id: channel.id }]),
+          channel: { findUnique: vi.fn().mockResolvedValue(channel) },
+          publication: {
+            findMany: vi.fn().mockResolvedValue([]),
+            upsert,
+          },
+          offer: { update: offerUpdate },
+        }),
       ),
     });
 
@@ -619,6 +630,151 @@ describe("createPublicationIdempotently", () => {
     else process.env.WHATSAPP_GROUPS_WEB_EXPERIMENTAL_ENABLED = previousEnabled;
     if (previousDryRun === undefined) delete process.env.WHATSAPP_WEB_DRY_RUN;
     else process.env.WHATSAPP_WEB_DRY_RUN = previousDryRun;
+  });
+
+  it("blocks a fourth Web Publication while Telegram planning continues", async () => {
+    const actual = await import("@affiliate/database");
+    const now = new Date("2026-08-03T12:05:00.000Z");
+    const previousEnabled =
+      process.env.WHATSAPP_GROUPS_WEB_EXPERIMENTAL_ENABLED;
+    process.env.WHATSAPP_GROUPS_WEB_EXPERIMENTAL_ENABLED = "true";
+    const offer = {
+      id: "offer-queue-candidate",
+      status: "READY_TO_PUBLISH",
+      productId: "product-queue-candidate",
+      title: "Oferta segura",
+      externalProductId: "MLB-QUEUE",
+      marketplace: "MERCADO_LIVRE",
+      category: "Tecnologia",
+      imageUrl: null,
+      originalPrice: 200,
+      currentPrice: 100,
+      discountPercentage: 50,
+      couponCode: null,
+      couponExpiration: null,
+      freeShipping: true,
+      shippingStatus: "FREE",
+      stockStatus: "IN_STOCK",
+      score: 95,
+      scoreCompletenessPercentage: 100,
+      affiliateUrl: "https://meli.la/queue",
+      trackingStrategy: "DIRECT_AFFILIATE_LINK",
+      version: 1,
+      collectedAt: now,
+      publishedAt: null,
+      affiliateLinks: [],
+    };
+    const baseChannel = {
+      name: "Canal",
+      enabled: true,
+      timezone: "America/Fortaleza",
+      dailyPublicationLimit: 10,
+      minimumIntervalMinutes: 0,
+      allowedStartTime: null,
+      allowedEndTime: null,
+      minimumScore: 0,
+      minDiscountPercentage: 0,
+      productRepeatIntervalDays: 0,
+      allowedMarketplaces: ["MERCADO_LIVRE"],
+      allowedCategories: [],
+      createdAt: now,
+      updatedAt: now,
+    };
+    const channels = [
+      {
+        ...baseChannel,
+        id: "channel-web-queue",
+        type: "WHATSAPP_GROUPS",
+        configuration: {
+          publicationMode: "WEB_EXPERIMENTAL",
+          webAutomationEnabled: true,
+          groupDisplayName: "Grupo autorizado",
+        },
+      },
+      {
+        ...baseChannel,
+        id: "channel-telegram-queue",
+        type: "TELEGRAM",
+        configuration: { chatId: "configured-server-side" },
+      },
+    ];
+    const activePublication = {
+      id: "publication-web-active",
+      offerId: "offer-existing",
+      channelId: "channel-web-queue",
+      status: "SCHEDULED",
+      scheduledAt: new Date("2026-08-03T10:00:00.000Z"),
+      createdAt: new Date("2026-08-03T10:00:00.000Z"),
+      updatedAt: new Date("2026-08-03T10:00:00.000Z"),
+      metadata: {
+        publicationMode: "WEB_EXPERIMENTAL",
+        whatsappWebState: "AWAITING_VISUAL_INSPECTION",
+        plannedAt: "2026-08-03T10:00:00.000Z",
+      },
+      messagePayload: { message: "snapshot seguro" },
+      imageUrlSnapshot: null,
+      affiliateUrlSnapshot: "https://meli.la/existing",
+      trackingUrlSnapshot: "https://meli.la/existing",
+      offerVersionSnapshot: 1,
+      currentPriceSnapshot: 100,
+    };
+    const upsert = vi.fn().mockResolvedValue({ id: "publication-telegram" });
+    const offerUpdate = vi.fn().mockResolvedValue(offer);
+    Object.assign(actual.prisma, {
+      offer: {
+        findMany: vi.fn().mockResolvedValue([offer]),
+        update: offerUpdate,
+      },
+      channel: {
+        findMany: vi.fn().mockResolvedValue(channels),
+        findUnique: vi.fn(({ where }: { where: { id: string } }) =>
+          Promise.resolve(
+            channels.find((candidate) => candidate.id === where.id) ?? null,
+          ),
+        ),
+      },
+      publication: {
+        count: vi.fn().mockResolvedValue(0),
+        findFirst: vi.fn().mockResolvedValue(null),
+        findMany: vi.fn().mockResolvedValue([activePublication]),
+        upsert,
+      },
+      $transaction: vi.fn(async (callback: (tx: unknown) => unknown) =>
+        callback({ publication: { upsert }, offer: { update: offerUpdate } }),
+      ),
+    });
+
+    const metrics = await scheduleReadyOffers(now);
+
+    expect(metrics).toMatchObject({
+      publicationsCreated: 1,
+      whatsappQueueActive: 1,
+      whatsappPlanningSkippedActiveExists: 1,
+      whatsappWebAttempts: 0,
+    });
+    expect(metrics.planningDecisions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          channelId: "channel-web-queue",
+          planningResult: "ACTIVE_PUBLICATION_EXISTS",
+          publicationId: "publication-web-active",
+        }),
+        expect.objectContaining({
+          channelId: "channel-telegram-queue",
+          planningResult: "CREATED",
+        }),
+      ]),
+    );
+    expect(upsert).toHaveBeenCalledTimes(1);
+    expect(upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({ channelId: "channel-telegram-queue" }),
+      }),
+    );
+
+    if (previousEnabled === undefined)
+      delete process.env.WHATSAPP_GROUPS_WEB_EXPERIMENTAL_ENABLED;
+    else process.env.WHATSAPP_GROUPS_WEB_EXPERIMENTAL_ENABLED = previousEnabled;
   });
 
   it("defers queued Web publications without invoking a publisher or creating an attempt", async () => {
@@ -910,7 +1066,14 @@ describe("createPublicationIdempotently", () => {
         findMany: vi.fn().mockResolvedValue([offer]),
         update: offerUpdate,
       },
-      channel: { findMany: vi.fn().mockResolvedValue(channels) },
+      channel: {
+        findMany: vi.fn().mockResolvedValue(channels),
+        findUnique: vi.fn(({ where }: { where: { id: string } }) =>
+          Promise.resolve(
+            channels.find((candidate) => candidate.id === where.id) ?? null,
+          ),
+        ),
+      },
       publication: {
         count: vi.fn().mockResolvedValue(0),
         findFirst: vi.fn().mockResolvedValue(null),

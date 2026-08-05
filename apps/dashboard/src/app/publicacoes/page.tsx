@@ -1,12 +1,20 @@
-import { prisma } from "@affiliate/database";
+import {
+  getWhatsAppWebQueueStatus,
+  prisma,
+  type WhatsAppWebQueueItem,
+} from "@affiliate/database";
 import { AdminShell } from "@/components/admin-shell";
 import { EmptyState } from "@/components/empty-state";
 import { formatCurrency, formatDateTime, formatPercentage } from "@/lib/format";
 import { publicationTitleSnapshot } from "@/lib/publication-snapshot";
 import { whatsappWebPublicationView } from "@/lib/whatsapp-web-publication-view";
 import {
+  archiveWhatsAppWebPublicationAction,
   authorizeWhatsAppWebRetryAction,
+  authorizeWhatsAppWebSendAction,
+  cancelWhatsAppWebPublicationAction,
   reviewWhatsAppWebDeliveryAction,
+  revokeWhatsAppWebSendAuthorizationAction,
 } from "@/lib/actions";
 import { Button } from "@/components/ui/button";
 
@@ -17,13 +25,64 @@ export default async function PublicationsPage() {
     orderBy: { scheduledAt: "desc" },
     take: 50,
     include: {
-      channel: { select: { name: true, type: true } },
+      channel: true,
       attempts: { orderBy: { attemptedAt: "desc" } },
     },
   });
+  const queueItems = new Map<string, WhatsAppWebQueueItem>();
+  const webChannelIds = [
+    ...new Set(
+      publications.flatMap((publication) => {
+        const metadata =
+          publication.metadata &&
+          typeof publication.metadata === "object" &&
+          !Array.isArray(publication.metadata)
+            ? (publication.metadata as Record<string, unknown>)
+            : {};
+        return metadata.publicationMode === "WEB_EXPERIMENTAL"
+          ? [publication.channelId]
+          : [];
+      }),
+    ),
+  ];
+  const queueSummaries = new Map(
+    (
+      await Promise.all(
+        webChannelIds.map((channelId) =>
+          getWhatsAppWebQueueStatus(prisma, channelId),
+        ),
+      )
+    ).map((queue) => [queue.channelId, queue] as const),
+  );
+  for (const queue of queueSummaries.values()) {
+    for (const item of queue.items) queueItems.set(item.publicationId, item);
+  }
 
   return (
     <AdminShell currentPath="/publicacoes" title="Publicacoes">
+      {queueSummaries.size > 0 ? (
+        <section className="mb-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+          {[...queueSummaries.values()].map((queue) => (
+            <div key={queue.channelId} className="rounded-md border bg-white p-4">
+              <h2 className="font-semibold">Fila operacional WhatsApp Web</h2>
+              <dl className="mt-2 grid grid-cols-[130px_1fr] gap-1 text-xs">
+                <dt>Próxima</dt>
+                <dd className="break-all font-mono">
+                  {queue.activePublicationId ?? "nenhuma"}
+                </dd>
+                <dt>Estado</dt>
+                <dd>{queue.activeState ?? "SEM ITEM ATIVO"}</dd>
+                <dt>Aguardando</dt>
+                <dd>{queue.waitingCount}</dd>
+                <dt>Entrega incerta</dt>
+                <dd>{queue.deliveryUncertainCount}</dd>
+                <dt>Total não terminal</dt>
+                <dd>{queue.total}</dd>
+              </dl>
+            </div>
+          ))}
+        </section>
+      ) : null}
       {publications.length === 0 ? (
         <EmptyState
           title="Nenhuma publicacao encontrada"
@@ -32,8 +91,17 @@ export default async function PublicationsPage() {
           actionLabel="Ver ofertas"
         />
       ) : (
-        <div className="overflow-x-auto rounded-md border bg-white">
-          <table className="w-full min-w-[1540px] text-left text-sm">
+        <section className="rounded-md border bg-white">
+          <p className="border-b bg-blue-50 px-4 py-2 text-xs text-blue-900">
+            Tabela larga: use rolagem horizontal. As colunas de controle e
+            revisao permanecem visiveis a direita.
+          </p>
+          <div
+            className="overflow-x-auto focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+            tabIndex={0}
+            aria-label="Publicacoes com rolagem horizontal"
+          >
+            <table className="w-full min-w-[1540px] text-left text-sm">
             <thead className="border-b bg-[var(--muted)] text-xs uppercase text-[var(--muted-foreground)]">
               <tr>
                 <th className="px-4 py-3">Status</th>
@@ -49,8 +117,8 @@ export default async function PublicationsPage() {
                 <th className="px-4 py-3">Tentativas</th>
                 <th className="px-4 py-3">Erro</th>
                 <th className="px-4 py-3">ID externo</th>
-                <th className="px-4 py-3">Controle Web</th>
-                <th className="px-4 py-3">Revisao</th>
+                <th className="sticky right-[300px] z-20 bg-[var(--muted)] px-4 py-3">Controle Web</th>
+                <th className="sticky right-0 z-20 bg-[var(--muted)] px-4 py-3">Revisao</th>
               </tr>
             </thead>
             <tbody>
@@ -73,8 +141,33 @@ export default async function PublicationsPage() {
                 const manualNotDelivered =
                   metadata.manualDeliveryResolution ===
                   "MANUALLY_CONFIRMED_NOT_DELIVERED";
-                const webView = whatsappWebPublicationView(publication);
+                const webView = whatsappWebPublicationView(
+                  publication,
+                  queueItems.get(publication.id),
+                );
                 const latestAttempt = publication.attempts[0];
+                const canCancel = Boolean(
+                  webView &&
+                    !deliveryUncertain &&
+                    ![
+                      "PUBLISHED",
+                      "CANCELLED",
+                      "ARCHIVED",
+                      "SEND_IN_PROGRESS",
+                    ].includes(webView.storedState),
+                );
+                const canArchive = Boolean(
+                  webView &&
+                    !deliveryUncertain &&
+                    ["PUBLISHED", "CANCELLED"].includes(webView.storedState),
+                );
+                const canAuthorize = Boolean(
+                  webView?.active &&
+                    ["PREFLIGHT_READY", "AUTHORIZATION_EXPIRED"].includes(
+                      webView.storedState,
+                    ),
+                );
+                const canRevoke = webView?.authorizationStatus === "ACTIVE";
 
                 return (
                   <tr key={publication.id} className="border-b last:border-0">
@@ -156,7 +249,7 @@ export default async function PublicationsPage() {
                     <td className="px-4 py-3">
                       {publication.externalId ?? "-"}
                     </td>
-                    <td className="min-w-[360px] px-4 py-3">
+                    <td className="sticky right-[300px] z-10 min-w-[360px] border-l bg-white px-4 py-3 align-top">
                       {webView ? (
                         <details className="rounded border border-amber-200 bg-amber-50/50 p-3">
                           <summary className="cursor-pointer font-medium">
@@ -177,7 +270,18 @@ export default async function PublicationsPage() {
                               {publication.channel.type} / WEB_EXPERIMENTAL
                             </dd>
                             <dt>Estado Web</dt>
-                            <dd>{webView.state}</dd>
+                            <dd>
+                              {webView.state} (persistido: {webView.storedState})
+                            </dd>
+                            <dt>Fila</dt>
+                            <dd>
+                              {webView.active
+                                ? "próxima Publication ativa"
+                                : `posição ${webView.queuePosition ?? "-"}`}
+                              {webView.blockingPublicationId
+                                ? ` / aguarda ${webView.blockingPublicationId}`
+                                : ""}
+                            </dd>
                             <dt>Planejada</dt>
                             <dd>{formatDateTime(webView.plannedAt)}</dd>
                             <dt>Planejador / run</dt>
@@ -194,6 +298,9 @@ export default async function PublicationsPage() {
                               {webView.visualInspectionConfirmed
                                 ? "confirmada"
                                 : "pendente"}
+                              {webView.visualInspectionAt
+                                ? ` / ${formatDateTime(webView.visualInspectionAt)}`
+                                : ""}
                             </dd>
                             <dt>Preflight</dt>
                             <dd>
@@ -204,6 +311,30 @@ export default async function PublicationsPage() {
                               {webView.preflightCompleted
                                 ? "concluído"
                                 : "pendente"}
+                              {webView.preflightAt
+                                ? ` / ${formatDateTime(webView.preflightAt)}`
+                                : ""}
+                            </dd>
+                            <dt>Autorização</dt>
+                            <dd>
+                              {webView.authorizationStatus ?? "ausente"} / expira{" "}
+                              {formatDateTime(webView.authorizationExpiresAt)} / fp{" "}
+                              {webView.authorizationFingerprint?.slice(0, 12) ?? "-"}
+                            </dd>
+                            <dt>Claim</dt>
+                            <dd>
+                              {webView.authorizationClaimId ?? "-"} /{" "}
+                              {formatDateTime(webView.authorizationClaimedAt)}
+                            </dd>
+                            <dt>Autorizacao consumida</dt>
+                            <dd>
+                              {formatDateTime(webView.authorizationConsumedAt)}
+                            </dd>
+                            <dt>Marcador de clique</dt>
+                            <dd>
+                              inicio {formatDateTime(webView.sendClickStartedAt)} /{" "}
+                              clicado {String(webView.sendWasClicked)} /{" "}
+                              {formatDateTime(webView.sendClickedAt)}
                             </dd>
                             <dt>Envio real</dt>
                             <dd>
@@ -213,6 +344,8 @@ export default async function PublicationsPage() {
                             </dd>
                             <dt>Bloqueio</dt>
                             <dd>{webView.dispatchBlockedReason ?? "-"}</dd>
+                            <dt>Proxima acao humana</dt>
+                            <dd>{webView.nextHumanAction}</dd>
                             <dt>Entrega incerta</dt>
                             <dd>{String(webView.deliveryUncertain)}</dd>
                             <dt>Entrega confirmada</dt>
@@ -248,6 +381,20 @@ export default async function PublicationsPage() {
                               {publication.imageUrlSnapshot ?? "-"}
                             </dd>
                           </dl>
+                          {webView.transitionHistory.length > 0 ? (
+                            <div className="mt-3 rounded border bg-white p-2 text-xs">
+                              <p className="font-medium">Histórico de transições</p>
+                              <ol className="mt-1 grid gap-1">
+                                {webView.transitionHistory.map((entry, index) => (
+                                  <li key={`${entry.at}-${index}`}>
+                                    {entry.from} → {entry.to} /{" "}
+                                    {formatDateTime(entry.at)} / ator {entry.by}
+                                    {entry.reason ? ` / ${entry.reason}` : ""}
+                                  </li>
+                                ))}
+                              </ol>
+                            </div>
+                          ) : null}
                           <div className="mt-3 grid gap-2">
                             <p className="text-xs font-medium">
                               Comandos locais para copiar — não executados pelo
@@ -262,12 +409,142 @@ export default async function PublicationsPage() {
                               </code>
                             ))}
                           </div>
+                          <div className="mt-4 grid gap-3 border-t border-amber-200 pt-3">
+                            <p className="text-xs font-medium">
+                              Ações de controle — nunca abrem o navegador
+                            </p>
+                            {canAuthorize ? (
+                              <form
+                                action={authorizeWhatsAppWebSendAction}
+                                className="grid gap-2 rounded border bg-white p-2 text-xs"
+                              >
+                                <input
+                                  type="hidden"
+                                  name="publicationId"
+                                  value={publication.id}
+                                />
+                                <input
+                                  type="hidden"
+                                  name="expiresInMinutes"
+                                  value="15"
+                                />
+                                <label className="flex items-start gap-2">
+                                  <input
+                                    type="checkbox"
+                                    name="confirmation"
+                                    value="AUTHORIZE_ONE_WHATSAPP_WEB_SEND"
+                                    required
+                                  />
+                                  <span>
+                                    Autorizo somente esta Publication por 15
+                                    minutos.
+                                  </span>
+                                </label>
+                                <Button type="submit" variant="outline">
+                                  Autorizar uma publicação
+                                </Button>
+                              </form>
+                            ) : null}
+                            {canRevoke ? (
+                              <form
+                                action={revokeWhatsAppWebSendAuthorizationAction}
+                                className="grid gap-2 rounded border bg-white p-2 text-xs"
+                              >
+                                <input
+                                  type="hidden"
+                                  name="publicationId"
+                                  value={publication.id}
+                                />
+                                <input
+                                  name="reason"
+                                  required
+                                  maxLength={500}
+                                  placeholder="Motivo da revogação"
+                                  className="rounded border px-2 py-1"
+                                />
+                                <label className="flex gap-2">
+                                  <input
+                                    type="checkbox"
+                                    name="confirmed"
+                                    value="true"
+                                    required
+                                  />
+                                  Confirmo a revogação.
+                                </label>
+                                <Button type="submit" variant="outline">
+                                  Revogar autorização
+                                </Button>
+                              </form>
+                            ) : null}
+                            {canCancel ? (
+                              <form
+                                action={cancelWhatsAppWebPublicationAction}
+                                className="grid gap-2 rounded border bg-white p-2 text-xs"
+                              >
+                                <input
+                                  type="hidden"
+                                  name="publicationId"
+                                  value={publication.id}
+                                />
+                                <input
+                                  name="reason"
+                                  required
+                                  maxLength={500}
+                                  placeholder="Motivo do cancelamento"
+                                  className="rounded border px-2 py-1"
+                                />
+                                <label className="flex gap-2">
+                                  <input
+                                    type="checkbox"
+                                    name="confirmed"
+                                    value="true"
+                                    required
+                                  />
+                                  Confirmo o cancelamento sem envio.
+                                </label>
+                                <Button type="submit" variant="outline">
+                                  Cancelar Publication
+                                </Button>
+                              </form>
+                            ) : null}
+                            {canArchive ? (
+                              <form
+                                action={archiveWhatsAppWebPublicationAction}
+                                className="grid gap-2 rounded border bg-white p-2 text-xs"
+                              >
+                                <input
+                                  type="hidden"
+                                  name="publicationId"
+                                  value={publication.id}
+                                />
+                                <input
+                                  name="reason"
+                                  required
+                                  maxLength={500}
+                                  placeholder="Motivo do arquivamento"
+                                  className="rounded border px-2 py-1"
+                                />
+                                <label className="flex gap-2">
+                                  <input
+                                    type="checkbox"
+                                    name="confirmed"
+                                    value="true"
+                                    required
+                                  />
+                                  Confirmo o arquivamento auditável.
+                                </label>
+                                <Button type="submit" variant="outline">
+                                  Arquivar Publication
+                                </Button>
+                              </form>
+                            ) : null}
+                          </div>
                         </details>
                       ) : (
                         "-"
                       )}
                     </td>
-                    <td className="min-w-[300px] px-4 py-3">
+                    <td className="sticky right-0 z-10 min-w-[300px] border-l bg-white px-4 py-3 align-top">
                       {deliveryUncertain ? (
                         <div className="grid gap-2 rounded border border-amber-300 bg-amber-50 p-3">
                           <p>
@@ -370,8 +647,9 @@ export default async function PublicationsPage() {
                 );
               })}
             </tbody>
-          </table>
-        </div>
+            </table>
+          </div>
+        </section>
       )}
     </AdminShell>
   );
