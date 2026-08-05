@@ -5,6 +5,7 @@ import {
   getOpenAiIntegrationStatus,
 } from "@affiliate/ai-copywriter";
 import { prisma } from "@affiliate/database";
+import { shopeeAffiliateStatus } from "@affiliate/shopee-affiliate";
 import Link from "next/link";
 import { AdminShell } from "@/components/admin-shell";
 import { Button } from "@/components/ui/button";
@@ -55,8 +56,9 @@ export default async function IntegrationsPage({ searchParams }: IntegrationsPag
   const ollama = getOllamaIntegrationStatus();
   const ollamaHealth = await new OllamaAiProvider().healthCheck();
   const openAi = getOpenAiIntegrationStatus();
+  const shopee = shopeeAffiliateStatus();
   const message = messageText(params?.message);
-  const [mercadoLivreAccount, mercadoLivreConfig] = await Promise.all([
+  const [mercadoLivreAccount, mercadoLivreConfig, lastShopeeImport] = await Promise.all([
     prisma.marketplaceAccount.findFirst({
       where: { marketplace: "MERCADO_LIVRE" },
       orderBy: { updatedAt: "desc" },
@@ -72,6 +74,11 @@ export default async function IntegrationsPage({ searchParams }: IntegrationsPag
       },
     }),
     prisma.mercadoLivreDiscoveryConfig.findFirst({ orderBy: { updatedAt: "desc" } }),
+    prisma.importJob.findFirst({
+      where: { marketplace: "SHOPEE" },
+      orderBy: { createdAt: "desc" },
+      select: { status: true, totalFound: true, totalResolved: true, totalFailed: true, finishedAt: true },
+    }),
   ]);
 
   return (
@@ -81,6 +88,43 @@ export default async function IntegrationsPage({ searchParams }: IntegrationsPag
       ) : null}
 
       <div className="grid gap-4 lg:grid-cols-3">
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <PlugZap aria-hidden="true" size={18} />
+              Shopee Afiliados
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="grid gap-3 text-sm">
+            <div className="flex items-center justify-between">
+              <span>Modo</span>
+              <span>{shopee.mode}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span>Estado</span>
+              <span>{shopee.state}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span>Credenciais configuradas</span>
+              <span>{shopee.credentialsConfigured ? "sim" : "não"}</span>
+            </div>
+            <div className="grid gap-1">
+              <span className="text-[var(--muted-foreground)]">Último import CSV</span>
+              <span>{lastShopeeImport?.status ?? "AUSENTE"}</span>
+              <span className="text-xs text-[var(--muted-foreground)]">
+                {lastShopeeImport ? `${lastShopeeImport.totalResolved}/${lastShopeeImport.totalFound} válidas; ${lastShopeeImport.totalFailed} falhas; ${lastShopeeImport.finishedAt ? formatDateTime(lastShopeeImport.finishedAt) : "em andamento"}` : "Use o CLI local para inspecionar e importar."}
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span>Último sync Open API</span>
+              <span>AUSENTE</span>
+            </div>
+            <p className="text-xs text-[var(--muted-foreground)]">
+              Área somente leitura. Não inicia importação nem publicação.
+            </p>
+          </CardContent>
+        </Card>
+
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">

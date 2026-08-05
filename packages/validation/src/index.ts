@@ -263,6 +263,11 @@ const MERCADO_LIVRE_AFFILIATE_DOMAINS = [
   "mercadolivre.com.br",
   "mercadolibre.com",
 ] as const;
+const SHOPEE_AFFILIATE_DOMAINS = [
+  "shopee.com.br",
+  "shopee.com",
+  "shope.ee",
+] as const;
 
 function hostnameMatchesDomain(hostname: string, domain: string) {
   return hostname === domain || hostname.endsWith(`.${domain}`);
@@ -381,6 +386,19 @@ export function validateMarketplaceAffiliateUrl(
       ok: false,
       code: "LOCAL_OR_PRIVATE_HOST",
       message: "Affiliate URL cannot use a local or private host.",
+    };
+  }
+
+  if (
+    marketplace === "SHOPEE" &&
+    !SHOPEE_AFFILIATE_DOMAINS.some((domain) =>
+      hostnameMatchesDomain(hostname, domain),
+    )
+  ) {
+    return {
+      ok: false,
+      code: "HOST_NOT_ALLOWED",
+      message: "Affiliate URL host is not allowed for Shopee.",
     };
   }
 

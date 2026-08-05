@@ -147,13 +147,25 @@ describe("validateMarketplaceAffiliateUrl", () => {
     );
   });
 
-  it("preserves generic safe HTTPS validation for other marketplaces", () => {
-    expect(
-      validateMarketplaceAffiliateUrl(
-        "SHOPEE",
-        "https://affiliate.example/link",
-      ),
-    ).toMatchObject({ ok: true });
+  it.each([
+    "https://shopee.com.br/product/1/2",
+    "https://affiliate.shopee.com.br/link",
+    "https://shope.ee/safe",
+  ])("accepts an allowlisted Shopee affiliate host %s", (url) => {
+    expect(validateMarketplaceAffiliateUrl("SHOPEE", url)).toMatchObject({
+      ok: true,
+    });
+  });
+
+  it.each([
+    "https://affiliate.example/link",
+    "https://shopee.com.br.evil.example/link",
+    "https://evilshopee.com.br/link",
+  ])("rejects a non-allowlisted Shopee affiliate host %s", (url) => {
+    expect(validateMarketplaceAffiliateUrl("SHOPEE", url)).toMatchObject({
+      ok: false,
+      code: "HOST_NOT_ALLOWED",
+    });
   });
 });
 

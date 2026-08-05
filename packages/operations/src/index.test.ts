@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import { resolveWorkerHealthStatus } from "@affiliate/shared";
 import {
   applyBackupRetention,
+  auditShopeeImports,
   auditOperationalSnapshot,
   classifyWorkerOperationalContext,
   compareBusinessStateSnapshots,
@@ -25,6 +26,23 @@ import {
 } from "./index";
 
 const now = new Date("2026-08-03T12:00:00.000Z");
+
+describe("Shopee import audit", () => {
+  it("reports failed, abandoned and duplicate imports without flagging fresh work", () => {
+    const findings = auditShopeeImports([
+      { id: "fresh", status: "RUNNING", createdAt: new Date(now.getTime() - 60_000), summary: null },
+      { id: "abandoned", status: "RUNNING", createdAt: new Date(now.getTime() - 31 * 60_000), summary: null },
+      { id: "failed", status: "FAILED", createdAt: now, summary: null },
+      { id: "duplicate", status: "SUCCEEDED", createdAt: now, summary: { lastDuplicateAt: now.toISOString() } },
+    ], now);
+    expect(findings.map((finding) => finding.code)).toEqual([
+      "SHOPEE_IMPORT_ABANDONED",
+      "SHOPEE_IMPORT_FAILED",
+      "SHOPEE_IMPORT_DUPLICATE_FILE",
+    ]);
+    expect(findings.some((finding) => finding.action.includes("fresh"))).toBe(false);
+  });
+});
 
 function supervisorState(): SupervisorComponentState {
   return {

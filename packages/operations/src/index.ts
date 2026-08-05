@@ -22,6 +22,7 @@ import {
   type PrismaClient,
 } from "@affiliate/database";
 import { getRedisHealth } from "@affiliate/redis";
+import { shopeeAffiliateStatus } from "@affiliate/shopee-affiliate";
 import {
   DEFAULT_WORKER_STALE_AFTER_MS,
   resolveWorkerHealthStatus,
@@ -868,6 +869,26 @@ export async function collectOperationalStatus(
           },
         })
       : null;
+  const lastShopeeImport =
+    database === "OK"
+      ? await client.importJob.findFirst({
+          where: { marketplace: "SHOPEE" },
+          orderBy: { createdAt: "desc" },
+          select: {
+            id: true,
+            status: true,
+            source: true,
+            totalFound: true,
+            totalResolved: true,
+            totalFailed: true,
+            startedAt: true,
+            finishedAt: true,
+            createdAt: true,
+            errorMessage: true,
+            summary: true,
+          },
+        })
+      : null;
   const worker = asRecord(workerSetting?.value);
   const heartbeatAt =
     typeof worker.lastHeartbeatAt === "string"
@@ -956,6 +977,29 @@ export async function collectOperationalStatus(
       applied: appliedMigrations,
     },
     build: buildReady ? "AVAILABLE" : "MISSING",
+    shopee: {
+      ...shopeeAffiliateStatus(),
+      lastSync: null,
+      lastImport: lastShopeeImport
+        ? {
+            id: lastShopeeImport.id.slice(0, 12),
+            status: lastShopeeImport.status,
+            source: lastShopeeImport.source.startsWith("SHOPEE_AFFILIATE_CSV:")
+              ? "CSV"
+              : "UNKNOWN",
+            totalFound: lastShopeeImport.totalFound,
+            totalResolved: lastShopeeImport.totalResolved,
+            totalFailed: lastShopeeImport.totalFailed,
+            startedAt: lastShopeeImport.startedAt?.toISOString() ?? null,
+            finishedAt: lastShopeeImport.finishedAt?.toISOString() ?? null,
+            errorCode: lastShopeeImport.errorMessage,
+            duplicateRecordedAt:
+              typeof asRecord(lastShopeeImport.summary).lastDuplicateAt === "string"
+                ? asRecord(lastShopeeImport.summary).lastDuplicateAt
+                : null,
+          }
+        : null,
+    },
     supervisor,
     workerContext,
     components,
@@ -1031,13 +1075,38 @@ export async function collectOperationalStatus(
   };
 }
 
+export function auditShopeeImports(
+  jobs: Array<{ id: string; status: string; createdAt: Date; summary: unknown }>,
+  now: Date,
+) {
+  const findings: OperationalFinding[] = [];
+  for (const job of jobs) {
+    const duplicateRecorded = typeof asRecord(job.summary).lastDuplicateAt === "string";
+    if (duplicateRecorded) {
+      findings.push({
+        code: "SHOPEE_IMPORT_DUPLICATE_FILE",
+        severity: "INFO",
+        action: `REVIEW_SHOPEE_IMPORT:${job.id}`,
+      });
+    }
+    const abandoned = job.status === "RUNNING" && now.getTime() - job.createdAt.getTime() > 30 * 60_000;
+    if (job.status !== "FAILED" && !abandoned) continue;
+    findings.push({
+      code: abandoned ? "SHOPEE_IMPORT_ABANDONED" : "SHOPEE_IMPORT_FAILED",
+      severity: abandoned ? "HUMAN_REVIEW_REQUIRED" : "WARNING",
+      action: `REVIEW_SHOPEE_IMPORT:${job.id}`,
+    });
+  }
+  return findings;
+}
+
 export async function collectStateAudit(
   client: PrismaClient = prisma,
   input: { workspaceRoot?: string; now?: Date } = {},
 ) {
   const workspaceRoot = input.workspaceRoot ?? OPERATIONS_WORKSPACE_ROOT;
   const now = input.now ?? new Date();
-  const [worker, publications, channels, runs, attempts, backup, supervisor, components] = await Promise.all([
+  const [worker, publications, channels, runs, attempts, backup, supervisor, components, shopeeImports] = await Promise.all([
     client.systemSetting.findUnique({
       where: { key: WORKER_STATUS_KEY },
       select: { value: true, updatedAt: true },
@@ -1061,6 +1130,12 @@ export async function collectStateAudit(
     latestBackup(resolveSafeBackupDirectory(workspaceRoot)),
     localSupervisorStatus(workspaceRoot, now),
     localComponentStatus(workspaceRoot),
+    client.importJob.findMany({
+      where: { marketplace: "SHOPEE" },
+      orderBy: { createdAt: "desc" },
+      take: 20,
+      select: { id: true, status: true, createdAt: true, summary: true },
+    }),
   ]);
   const workerRecord = asRecord(worker?.value);
   const heartbeatAt =
@@ -1081,7 +1156,7 @@ export async function collectStateAudit(
     burnInActive:
       workerRecord.mode === "BURN_IN" && workerRecord.state === "ONLINE",
   });
-  return auditOperationalSnapshot({
+  const findings = auditOperationalSnapshot({
     now,
     heartbeat: worker?.value,
     heartbeatUpdatedAt: worker?.updatedAt ?? null,
@@ -1094,6 +1169,8 @@ export async function collectStateAudit(
     pendingAttempts: attempts,
     workerContext,
   });
+  findings.push(...auditShopeeImports(shopeeImports, now));
+  return findings;
 }
 
 function fingerprintRows(rows: unknown[]) {

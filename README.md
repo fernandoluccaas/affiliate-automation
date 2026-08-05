@@ -172,6 +172,22 @@ See [docs/mercado-livre-supported-import.md](docs/mercado-livre-supported-import
 For an end-to-end owner-authorized session check, follow
 [docs/mercado-livre-one-click-manual-test.md](docs/mercado-livre-one-click-manual-test.md).
 
+## Shopee Affiliates
+
+Phase 6A reuses the existing Product, Offer, validation, scoring and import-job
+architecture for official Shopee affiliate CSV exports. The integration defaults
+to `OFF`; `CSV` supports sanitized inspect, dry-run and explicitly confirmed
+local imports, while `OPEN_API` remains fail-closed as
+`WAITING_FOR_OFFICIAL_ACCESS` until all official Brazilian Affiliate Open API
+contracts can be verified. It does not scrape, open a browser, automate login,
+store credentials, run in the continuous worker or create Publications.
+
+Use `shopee:affiliate:status`, `shopee:affiliate:preflight`,
+`shopee:affiliate:inspect-csv` and `shopee:affiliate:import-csv`. The integration
+card in `/integracoes` is read-only. See [Shopee Affiliates integration](docs/shopee-affiliate.md)
+for safe modes, the explicit CSV alias table, identity and checksum rules, Sub
+IDs, URL validation, CLI examples and current Open API limitations.
+
 ## Tracking
 
 Affiliate links are exposed through `/go/[slug]`. The route records a `Click` with affiliate link, offer, publication when available, channel when available, marketplace, referer and user agent. It never stores raw IP addresses. If tracking fails, the user is still redirected with a temporary HTTP redirect.
