@@ -29,14 +29,14 @@ export default async function OperationsPage() {
   );
 
   return (
-    <AdminShell currentPath="/operacoes" title="Operacoes locais">
+    <AdminShell currentPath="/operacoes" title="Operações locais">
       <p className="rounded-md border border-blue-200 bg-blue-50 p-3 text-sm">
         Painel somente leitura. Processos, backups, tarefas e dispatch continuam
         disponíveis exclusivamente no terminal local.
       </p>
 
       <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <StatusCard title="Aplicacao" value={status.status} />
+        <StatusCard title="Aplicação" value={status.status} />
         <StatusCard
           title="Supervisor"
           value={status.supervisor.state}
@@ -52,30 +52,30 @@ export default async function OperationsPage() {
         <StatusCard
           title="Modo"
           value={status.worker.mode}
-          detail={status.worker.burnInActive ? "burn-in ativo" : "operaÃ§Ã£o normal"}
+          detail={status.worker.burnInActive ? "burn-in ativo" : "operação normal"}
         />
         <StatusCard
-          title="Lideranca"
+          title="Liderança"
           value={status.worker.leaderStatus ?? "AUSENTE"}
           detail={`instance ${status.worker.instanceId ?? "-"}`}
         />
         <StatusCard
-          title="Ultimo ciclo"
+          title="Último ciclo"
           value={status.worker.lastCycleStatus ?? "AUSENTE"}
           detail={formatDateTime(status.worker.lastCycleFinishedAt)}
         />
         <StatusCard
           title="Ciclos bloqueados"
           value={String(status.worker.blockedCycles)}
-          detail={`efeitos externos ${status.worker.externalEffectsObserved} / alteraÃ§Ãµes de negÃ³cio ${status.worker.businessChangesObserved}`}
+          detail={`efeitos externos ${status.worker.externalEffectsObserved} / alterações de negócio ${status.worker.businessChangesObserved}`}
         />
         <StatusCard
-          title="Ãšltimo burn-in"
+          title="Último burn-in"
           value={burnInReport?.status ?? "AUSENTE"}
           detail={burnInReport ? `${burnInReport.durationSeconds}s / locks ${burnInReport.residualLocks}` : "execute no terminal local"}
         />
         <StatusCard
-          title="Ultima automacao"
+          title="Última automação"
           value={status.lastAutomationRun?.status ?? "AUSENTE"}
           detail={formatDateTime(status.lastAutomationRun?.startedAt ?? null)}
         />
@@ -91,7 +91,7 @@ export default async function OperationsPage() {
         <StatusCard
           title="Alertas humanos"
           value={String(critical.length)}
-          detail="nenhuma acao automatica e executada"
+          detail="nenhuma ação automática é executada"
         />
       </section>
 

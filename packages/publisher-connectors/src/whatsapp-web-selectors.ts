@@ -61,7 +61,7 @@ export const whatsappWebAccessibleAliases = {
     "Upload failed",
     "Could not upload",
     "Falha no upload",
-    "NÃ£o foi possÃ­vel enviar",
+    "Não foi possível enviar",
     "Error de carga",
     "No se pudo cargar",
   ],

@@ -573,4 +573,18 @@ describe("sanitized rotating logs and safe scripts", () => {
     expect(supervisor).not.toContain("sendCalled = $false");
     expect(dashboard).not.toMatch(/\bPID\b|component\.pid|supervisor\.pid/);
   });
+
+  it("keeps the operational dashboard copy encoded as UTF-8", async () => {
+    const dashboard = await readFile(
+      resolve(process.cwd(), "../../apps/dashboard/src/app/operacoes/page.tsx"),
+      "utf8",
+    );
+
+    expect(dashboard).toContain("operação normal");
+    expect(dashboard).toContain("alterações de negócio");
+    expect(dashboard).toContain("Último burn-in");
+    expect(dashboard).not.toContain("opera\u00c3\u00a7\u00c3\u00a3o normal");
+    expect(dashboard).not.toContain("altera\u00c3\u00a7\u00c3\u00b5es de neg\u00c3\u00b3cio");
+    expect(dashboard).not.toContain("\u00c3\u0160ltimo burn-in");
+  });
 });
