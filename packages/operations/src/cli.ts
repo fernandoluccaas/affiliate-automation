@@ -258,9 +258,15 @@ async function preflight() {
     status: status.redis === "OK" ? "READY" : "NOT_READY",
     ...(status.redis === "OK" ? {} : { action: "START_REDIS" }),
   });
+  const staleWorkerBlocksStartup =
+    status.worker.state === "STALE" && status.supervisor.state === "RUNNING";
   checks.push({
     name: "worker-heartbeat",
-    status: status.worker.state === "STALE" ? "NOT_READY" : "READY",
+    status: staleWorkerBlocksStartup
+      ? "NOT_READY"
+      : status.worker.state === "STALE"
+        ? "WARNING"
+        : "READY",
     ...(status.worker.state === "STALE"
       ? { action: "START_OR_INSPECT_CONTINUOUS_WORKER" }
       : {}),
