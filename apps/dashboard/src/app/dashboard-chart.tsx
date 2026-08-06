@@ -1,6 +1,14 @@
 "use client";
 
-import { Bar, BarChart, CartesianGrid, ResponsiveContainer, XAxis, YAxis } from "recharts";
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 import type { ClickSeriesPoint } from "@/lib/dashboard-metrics";
 
 type DashboardChartProps = {
@@ -12,20 +20,52 @@ export function DashboardChart({ data }: DashboardChartProps) {
 
   if (!hasClicks) {
     return (
-      <div className="flex h-[220px] items-center justify-center rounded-md border border-dashed bg-[var(--background)] px-4 text-center text-sm text-[var(--muted-foreground)]">
-        Nenhum clique registrado nos ultimos sete dias.
+      <div
+        role="status"
+        className="flex h-[240px] items-center justify-center rounded-md border border-dashed bg-[var(--background)] px-4 text-center text-sm text-[var(--muted-foreground)]"
+      >
+        Nenhum clique foi registrado nos últimos sete dias. Os dados aparecerão
+        aqui quando o tracking receber eventos.
       </div>
     );
   }
 
   return (
-    <ResponsiveContainer width="100%" height={220}>
-      <BarChart data={data}>
-        <CartesianGrid strokeDasharray="3 3" stroke="#d8d8d0" />
-        <XAxis dataKey="day" />
-        <YAxis allowDecimals={false} />
-        <Bar dataKey="clicks" fill="#155e75" radius={[4, 4, 0, 0]} />
-      </BarChart>
-    </ResponsiveContainer>
+    <div
+      role="img"
+      aria-label="Gráfico de cliques registrados por dia nos últimos sete dias"
+    >
+      <ResponsiveContainer width="100%" height={240}>
+        <BarChart data={data} accessibilityLayer>
+          <CartesianGrid
+            strokeDasharray="3 3"
+            stroke="var(--border)"
+            vertical={false}
+          />
+          <XAxis dataKey="day" tickLine={false} axisLine={false} />
+          <YAxis
+            allowDecimals={false}
+            tickLine={false}
+            axisLine={false}
+            width={32}
+          />
+          <Tooltip
+            cursor={{ fill: "var(--muted)" }}
+            contentStyle={{
+              background: "var(--surface-elevated)",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--radius-md)",
+              color: "var(--foreground)",
+            }}
+          />
+          <Bar
+            name="Cliques"
+            dataKey="clicks"
+            fill="var(--chart-1)"
+            radius={[5, 5, 0, 0]}
+          />
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
   );
 }

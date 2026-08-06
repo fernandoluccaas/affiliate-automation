@@ -12,6 +12,10 @@ import {
 } from "@/lib/actions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Alert } from "@/components/ui/alert";
+import { StatusBadge } from "@/components/ui/status-badge";
+import { DataTableContainer } from "@/components/ui/table";
 
 type QuickOffer = {
   id: string;
@@ -107,12 +111,15 @@ export function AffiliateLinkBatch({ offers }: AffiliateLinkBatchProps) {
 
   return (
     <div className="grid gap-6">
-      <section className="rounded-md border bg-white p-4">
-        <h2 className="font-semibold">Método A — edição rápida</h2>
+      <section className="rounded-[var(--radius-lg)] border bg-[var(--surface)] p-5 shadow-[var(--shadow-sm)]">
+        <h2 className="text-lg font-semibold">Método A — edição rápida</h2>
         <p className="mt-1 text-sm text-[var(--muted-foreground)]">
           Cole vários links na tabela e pré-visualize antes de confirmar.
         </p>
-        <div className="mt-4 overflow-x-auto">
+        <DataTableContainer
+          className="mt-4 shadow-none"
+          label="Edição rápida de links afiliados"
+        >
           <table className="w-full min-w-[920px] text-left text-sm">
             <thead className="border-b bg-[var(--muted)] text-xs uppercase">
               <tr>
@@ -156,15 +163,19 @@ export function AffiliateLinkBatch({ offers }: AffiliateLinkBatchProps) {
                       value={quickLinks[offer.id] ?? ""}
                     />
                   </td>
-                  <td className="px-3 py-2">{offer.status}</td>
+                  <td className="px-3 py-2">
+                    <StatusBadge status={offer.status} />
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
-        </div>
+        </DataTableContainer>
         <Button
           className="mt-4"
-          disabled={busy || quickEntries.length === 0}
+          disabled={quickEntries.length === 0}
+          loading={busy}
+          loadingLabel="Preparando preview…"
           onClick={() =>
             runPreview({ method: "ENTRIES", entries: quickEntries })
           }
@@ -174,21 +185,24 @@ export function AffiliateLinkBatch({ offers }: AffiliateLinkBatchProps) {
         </Button>
       </section>
 
-      <section className="grid gap-4 rounded-md border bg-white p-4">
+      <section className="grid gap-4 rounded-[var(--radius-lg)] border bg-[var(--surface)] p-5 shadow-[var(--shadow-sm)]">
         <div>
           <h2 className="font-semibold">Método B — colagem em lote</h2>
           <p className="mt-1 text-sm text-[var(--muted-foreground)]">
             Use uma linha por produto no formato identificador|affiliateUrl.
           </p>
         </div>
-        <textarea
-          className="min-h-32 rounded-md border px-3 py-2 font-mono text-sm"
+        <Textarea
+          aria-label="Links em lote separados por pipe"
+          className="min-h-32 font-mono"
           onChange={(event) => setPipeText(event.target.value)}
           placeholder="MLB1234567890|https://meli.la/abc123"
           value={pipeText}
         />
         <Button
-          disabled={busy || !pipeText.trim()}
+          disabled={!pipeText.trim()}
+          loading={busy}
+          loadingLabel="Preparando preview…"
           onClick={() => runPreview({ method: "PIPE", raw: pipeText })}
           type="button"
         >
@@ -196,7 +210,7 @@ export function AffiliateLinkBatch({ offers }: AffiliateLinkBatchProps) {
         </Button>
       </section>
 
-      <section className="grid gap-4 rounded-md border bg-white p-4">
+      <section className="grid gap-4 rounded-[var(--radius-lg)] border bg-[var(--surface)] p-5 shadow-[var(--shadow-sm)]">
         <div>
           <h2 className="font-semibold">Método C — CSV</h2>
           <p className="mt-1 text-sm text-[var(--muted-foreground)]">
@@ -210,7 +224,9 @@ export function AffiliateLinkBatch({ offers }: AffiliateLinkBatchProps) {
           type="file"
         />
         <Button
-          disabled={busy || !csvText.trim()}
+          disabled={!csvText.trim()}
+          loading={busy}
+          loadingLabel="Lendo CSV…"
           onClick={() => runPreview({ method: "CSV", raw: csvText })}
           type="button"
         >
@@ -219,8 +235,7 @@ export function AffiliateLinkBatch({ offers }: AffiliateLinkBatchProps) {
       </section>
 
       {parseIssues.length > 0 ? (
-        <section className="rounded-md border border-red-300 bg-red-50 p-4">
-          <h2 className="font-semibold">Erros de leitura</h2>
+        <Alert tone="danger" title="Não foi possível ler todas as linhas" live>
           <ul className="mt-2 list-disc pl-5 text-sm">
             {parseIssues.map((issue) => (
               <li key={`${issue.line}-${issue.message}`}>
@@ -228,11 +243,14 @@ export function AffiliateLinkBatch({ offers }: AffiliateLinkBatchProps) {
               </li>
             ))}
           </ul>
-        </section>
+        </Alert>
       ) : null}
 
       {preview ? (
-        <section className="rounded-md border bg-white p-4">
+        <section
+          className="rounded-[var(--radius-lg)] border bg-[var(--surface)] p-5 shadow-[var(--shadow-sm)]"
+          aria-live="polite"
+        >
           <h2 className="font-semibold">Preview</h2>
           <div className="mt-3 grid gap-2 sm:grid-cols-5">
             <div>Válidos: {preview.counts.valid}</div>
@@ -241,7 +259,10 @@ export function AffiliateLinkBatch({ offers }: AffiliateLinkBatchProps) {
             <div>Link inválido: {preview.counts.invalidLinks}</div>
             <div>Já atualizados: {preview.counts.alreadyUpdated}</div>
           </div>
-          <div className="mt-4 overflow-x-auto">
+          <DataTableContainer
+            className="mt-4 shadow-none"
+            label="Preview da importação de links"
+          >
             <table className="w-full min-w-[720px] text-left text-sm">
               <thead className="border-b">
                 <tr>
@@ -253,7 +274,10 @@ export function AffiliateLinkBatch({ offers }: AffiliateLinkBatchProps) {
               </thead>
               <tbody>
                 {preview.items.map((item) => (
-                  <tr key={`${item.line}-${item.affiliateUrl}`} className="border-b">
+                  <tr
+                    key={`${item.line}-${item.affiliateUrl}`}
+                    className="border-b"
+                  >
                     <td className="px-3 py-2">{item.line}</td>
                     <td className="px-3 py-2">
                       {item.externalId ?? item.productUrl}
@@ -262,7 +286,10 @@ export function AffiliateLinkBatch({ offers }: AffiliateLinkBatchProps) {
                       {item.affiliateUrl}
                     </td>
                     <td className="px-3 py-2">
-                      <div>{previewLabel(item.status)}</div>
+                      <StatusBadge
+                        status={item.status}
+                        label={previewLabel(item.status)}
+                      />
                       <div className="text-xs text-[var(--muted-foreground)]">
                         {item.message}
                       </div>
@@ -271,10 +298,12 @@ export function AffiliateLinkBatch({ offers }: AffiliateLinkBatchProps) {
                 ))}
               </tbody>
             </table>
-          </div>
+          </DataTableContainer>
           <Button
             className="mt-4"
-            disabled={busy || preview.counts.valid === 0}
+            disabled={preview.counts.valid === 0}
+            loading={busy}
+            loadingLabel="Aplicando links…"
             onClick={confirm}
             type="button"
           >
@@ -284,12 +313,14 @@ export function AffiliateLinkBatch({ offers }: AffiliateLinkBatchProps) {
       ) : null}
 
       {result ? (
-        <section className="rounded-md border bg-emerald-50 p-4">
-          <h2 className="font-semibold">
-            {result.status === "QUEUED"
+        <Alert
+          tone={result.failed > 0 ? "warning" : "success"}
+          title={
+            result.status === "QUEUED"
               ? "Lote enfileirado para o worker"
-              : "Lote concluído"}
-          </h2>
+              : "Lote concluído"
+          }
+        >
           <div className="mt-2 grid gap-2 sm:grid-cols-3">
             <div>Atualizados: {result.updated}</div>
             <div>Ignorados: {result.ignored}</div>
@@ -298,7 +329,7 @@ export function AffiliateLinkBatch({ offers }: AffiliateLinkBatchProps) {
             <div>Rejeitados: {result.rejected}</div>
             <div>Ainda pendentes: {result.readyForAffiliateLink}</div>
           </div>
-        </section>
+        </Alert>
       ) : null}
     </div>
   );

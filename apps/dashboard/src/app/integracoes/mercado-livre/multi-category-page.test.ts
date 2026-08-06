@@ -19,4 +19,20 @@ describe("Mercado Livre multi-category dashboard", () => {
     expect(source).toContain("dateFilter");
     expect(source).not.toContain("dispatch-authorized");
   });
+
+  it("offers category addition in list, leaf detail and test result", () => {
+    expect(source).toContain("Adicionar categoria");
+    expect(source).toContain("Categoria adicionada");
+    expect(source).toContain("configuredCategoryIds.has(selectedCategory.id)");
+    expect(source).toContain("testedCategoryAlreadyConfigured");
+    expect(source).toContain("Voltar às categorias");
+    expect(source).toContain("Ver candidatos");
+  });
+
+  it("separates common workflows from diagnostics and advanced settings", () => {
+    expect(source).toContain("Seções da integração Mercado Livre");
+    expect(source).toContain("Configuração avançada da sessão");
+    expect(source).toContain("Opções avançadas");
+    expect(source).toContain("<DiagnosticsPanel");
+  });
 });

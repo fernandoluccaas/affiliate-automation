@@ -1,4 +1,12 @@
-import { Bot, CheckCircle2, Cpu, KeyRound, PlugZap, RefreshCw, Settings, XCircle } from "lucide-react";
+import {
+  Bot,
+  Cpu,
+  KeyRound,
+  PlugZap,
+  RefreshCw,
+  Settings,
+  ShoppingBag,
+} from "lucide-react";
 import {
   OllamaAiProvider,
   getOllamaIntegrationStatus,
@@ -9,6 +17,8 @@ import Link from "next/link";
 import { AdminShell } from "@/components/admin-shell";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Alert } from "@/components/ui/alert";
+import { StatusBadge } from "@/components/ui/status-badge";
 import {
   syncMercadoLivreNowAction,
   testMercadoLivreIntegrationAction,
@@ -27,30 +37,34 @@ function messageText(message?: string | string[]) {
   const value = Array.isArray(message) ? message[0] : message;
 
   if (value === "ollama-ok") return "Ollama respondeu com copy validada.";
-  if (value === "ollama-fallback") return "Teste local concluido com fallback deterministico.";
+  if (value === "ollama-fallback")
+    return "Teste local concluído com fallback determinístico.";
   if (value === "openai-ok") return "OpenAI respondeu com copy validada.";
-  if (value === "openai-fallback") return "Teste OpenAI concluido com fallback deterministico.";
+  if (value === "openai-fallback")
+    return "Teste OpenAI concluído com fallback determinístico.";
   if (value === "meli-connected") return "Mercado Livre conectado com sucesso.";
-  if (value === "meli-connect-failed") return "Falha ao concluir OAuth do Mercado Livre.";
-  if (value === "meli-missing-config") return "Configure as variaveis do app Mercado Livre no servidor.";
-  if (value === "meli-ok") return "Mercado Livre respondeu ao teste de integracao.";
-  if (value === "meli-not-connected") return "Mercado Livre ainda nao esta conectado.";
-  if (value === "meli-auth-error") return "Mercado Livre conectado, mas a autenticacao precisa de reconexao.";
-  if (value === "meli-api-unavailable") return "Mercado Livre conectado, mas a API nao respondeu ao teste.";
-  if (value === "meli-configuration-error") return "Configuracao servidor do Mercado Livre incompleta ou invalida.";
-  if (value === "meli-internal-error") return "Erro interno ao testar Mercado Livre. Consulte os logs do servidor.";
+  if (value === "meli-connect-failed")
+    return "Falha ao concluir OAuth do Mercado Livre.";
+  if (value === "meli-missing-config")
+    return "Configure as variáveis do app Mercado Livre no servidor.";
+  if (value === "meli-ok")
+    return "Mercado Livre respondeu ao teste de integração.";
+  if (value === "meli-not-connected")
+    return "Mercado Livre ainda não está conectado.";
+  if (value === "meli-auth-error")
+    return "Mercado Livre conectado, mas a autenticação precisa de reconexão.";
+  if (value === "meli-api-unavailable")
+    return "Mercado Livre conectado, mas a API não respondeu ao teste.";
+  if (value === "meli-configuration-error")
+    return "Configuração do servidor Mercado Livre incompleta ou inválida.";
+  if (value === "meli-internal-error")
+    return "Erro interno ao testar Mercado Livre. Consulte os logs do servidor.";
   return null;
 }
 
-function StatusIcon({ ok }: { ok: boolean }) {
-  return ok ? (
-    <CheckCircle2 aria-hidden="true" className="text-green-700" size={18} />
-  ) : (
-    <XCircle aria-hidden="true" className="text-red-700" size={18} />
-  );
-}
-
-export default async function IntegrationsPage({ searchParams }: IntegrationsPageProps) {
+export default async function IntegrationsPage({
+  searchParams,
+}: IntegrationsPageProps) {
   const params = await searchParams;
   const ollama = getOllamaIntegrationStatus();
   const ollamaHealth = await new OllamaAiProvider().healthCheck();
@@ -71,36 +85,58 @@ export default async function IntegrationsPage({ searchParams }: IntegrationsPag
         lastError: true,
       },
     }),
-    prisma.mercadoLivreDiscoveryConfig.findFirst({ orderBy: { updatedAt: "desc" } }),
+    prisma.mercadoLivreDiscoveryConfig.findFirst({
+      orderBy: { updatedAt: "desc" },
+    }),
   ]);
 
   return (
-    <AdminShell currentPath="/integracoes" title="Integracoes">
+    <AdminShell currentPath="/integracoes" title="Integrações">
       {message ? (
-        <div className="rounded-md border bg-white px-4 py-3 text-sm">{message}</div>
+        <Alert
+          tone={
+            message.toLocaleLowerCase("pt-BR").includes("falha") ||
+            message.toLocaleLowerCase("pt-BR").includes("erro")
+              ? "danger"
+              : "success"
+          }
+          live
+        >
+          {message}
+        </Alert>
       ) : null}
 
-      <div className="grid gap-4 lg:grid-cols-3">
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         <Card>
           <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Cpu aria-hidden="true" size={18} />
-              Ollama
-            </CardTitle>
+            <div className="flex items-start justify-between gap-3">
+              <CardTitle className="flex items-center gap-2">
+                <Cpu aria-hidden="true" size={18} />
+                Ollama
+              </CardTitle>
+              <StatusBadge
+                status={ollamaHealth.available ? "CONNECTED" : "DEGRADED"}
+                label={ollamaHealth.available ? "Disponível" : "Indisponível"}
+              />
+            </div>
+            <p className="text-sm text-[var(--foreground-secondary)]">
+              Geração local de textos com fallback determinístico.
+            </p>
           </CardHeader>
           <CardContent className="grid gap-4 text-sm">
             <div className="flex items-center justify-between">
               <span>Configurado</span>
               <span className="inline-flex items-center gap-2">
-                <StatusIcon ok={ollama.configured} />
-                {ollama.configured ? "sim" : "nao"}
+                <StatusBadge
+                  status={ollama.configured ? "ACTIVE" : "DISABLED"}
+                  label={ollama.configured ? "Configurado" : "Não configurado"}
+                />
               </span>
             </div>
             <div className="flex items-center justify-between">
               <span>Disponibilidade</span>
               <span className="inline-flex items-center gap-2">
-                <StatusIcon ok={ollamaHealth.available} />
-                {ollamaHealth.available ? "disponivel" : "indisponivel"}
+                {ollamaHealth.available ? "Disponível" : "Indisponível"}
               </span>
             </div>
             <div className="grid gap-1">
@@ -125,24 +161,50 @@ export default async function IntegrationsPage({ searchParams }: IntegrationsPag
 
         <Card>
           <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Bot aria-hidden="true" size={18} />
-              OpenAI
-            </CardTitle>
+            <div className="flex items-start justify-between gap-3">
+              <CardTitle className="flex items-center gap-2">
+                <ShoppingBag aria-hidden="true" size={18} />
+                Shopee
+              </CardTitle>
+              <StatusBadge status="DISABLED" label="Não configurada" />
+            </div>
+            <p className="text-sm text-[var(--foreground-secondary)]">
+              Espaço reservado para uma integração oficial futura.
+            </p>
+          </CardHeader>
+          <CardContent className="text-sm text-[var(--foreground-secondary)]">
+            Nenhuma credencial, importação ou chamada Shopee está ativa nesta
+            branch.
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <div className="flex items-start justify-between gap-3">
+              <CardTitle className="flex items-center gap-2">
+                <Bot aria-hidden="true" size={18} />
+                OpenAI
+              </CardTitle>
+              <StatusBadge
+                status={openAi.configured ? "ACTIVE" : "DISABLED"}
+                label={openAi.configured ? "Configurada" : "Desabilitada"}
+              />
+            </div>
+            <p className="text-sm text-[var(--foreground-secondary)]">
+              Provider opcional configurado exclusivamente no servidor.
+            </p>
           </CardHeader>
           <CardContent className="grid gap-4 text-sm">
             <div className="flex items-center justify-between">
               <span>Provider selecionado</span>
               <span className="inline-flex items-center gap-2">
-                <StatusIcon ok={openAi.selected} />
-                {openAi.selected ? "sim" : "nao"}
+                {openAi.selected ? "Sim" : "Não"}
               </span>
             </div>
             <div className="flex items-center justify-between">
               <span>Chave do servidor</span>
               <span className="inline-flex items-center gap-2">
-                <StatusIcon ok={openAi.configured} />
-                {openAi.configured ? "configurada" : "ausente"}
+                {openAi.configured ? "Configurada" : "Ausente"}
               </span>
             </div>
             <div className="grid gap-1">
@@ -150,7 +212,11 @@ export default async function IntegrationsPage({ searchParams }: IntegrationsPag
               <span>{openAi.model}</span>
             </div>
             <form action={testOpenAiCopyAction}>
-              <Button type="submit" variant="outline" disabled={!openAi.configured}>
+              <Button
+                type="submit"
+                variant="outline"
+                disabled={!openAi.configured}
+              >
                 Testar OpenAI
               </Button>
             </form>
@@ -159,46 +225,78 @@ export default async function IntegrationsPage({ searchParams }: IntegrationsPag
 
         <Card>
           <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <PlugZap aria-hidden="true" size={18} />
-              Mercado Livre
-            </CardTitle>
+            <div className="flex items-start justify-between gap-3">
+              <CardTitle className="flex items-center gap-2">
+                <PlugZap aria-hidden="true" size={18} />
+                Mercado Livre
+              </CardTitle>
+              <StatusBadge
+                status={mercadoLivreAccount?.status ?? "DISCONNECTED"}
+              />
+            </div>
+            <p className="text-sm text-[var(--foreground-secondary)]">
+              OAuth oficial, descoberta por categorias e links afiliados
+              autorizados.
+            </p>
           </CardHeader>
           <CardContent className="grid gap-4 text-sm">
             <div className="flex items-center justify-between">
               <span>Status</span>
-              <span className="inline-flex items-center gap-2">
-                <StatusIcon ok={mercadoLivreAccount?.status === "CONNECTED"} />
-                {mercadoLivreAccount?.status ?? "DISCONNECTED"}
-              </span>
+              <StatusBadge
+                status={mercadoLivreAccount?.status ?? "DISCONNECTED"}
+              />
             </div>
             <div className="grid gap-1">
-              <span className="text-[var(--muted-foreground)]">User ID</span>
+              <span className="text-[var(--muted-foreground)]">
+                ID da conta
+              </span>
               <span>{mercadoLivreAccount?.externalUserId ?? "-"}</span>
             </div>
             <div className="grid gap-1">
               <span className="text-[var(--muted-foreground)]">Site</span>
-              <span>{mercadoLivreAccount?.siteId ?? mercadoLivreConfig?.siteId ?? "MLB"}</span>
-            </div>
-            <div className="grid gap-1">
-              <span className="text-[var(--muted-foreground)]">Token expira em</span>
-              <span>{mercadoLivreAccount?.expiresAt ? formatDateTime(mercadoLivreAccount.expiresAt) : "-"}</span>
-            </div>
-            <div className="grid gap-1">
-              <span className="text-[var(--muted-foreground)]">Ultimo refresh</span>
               <span>
-                {mercadoLivreAccount?.lastRefreshAt ? formatDateTime(mercadoLivreAccount.lastRefreshAt) : "-"}
+                {mercadoLivreAccount?.siteId ??
+                  mercadoLivreConfig?.siteId ??
+                  "MLB"}
               </span>
             </div>
             <div className="grid gap-1">
-              <span className="text-[var(--muted-foreground)]">Ultima sincronizacao</span>
-              <span>{mercadoLivreAccount?.lastSyncAt ? formatDateTime(mercadoLivreAccount.lastSyncAt) : "-"}</span>
+              <span className="text-[var(--muted-foreground)]">
+                Token expira em
+              </span>
+              <span>
+                {mercadoLivreAccount?.expiresAt
+                  ? formatDateTime(mercadoLivreAccount.expiresAt)
+                  : "-"}
+              </span>
+            </div>
+            <div className="grid gap-1">
+              <span className="text-[var(--muted-foreground)]">
+                Última renovação
+              </span>
+              <span>
+                {mercadoLivreAccount?.lastRefreshAt
+                  ? formatDateTime(mercadoLivreAccount.lastRefreshAt)
+                  : "-"}
+              </span>
+            </div>
+            <div className="grid gap-1">
+              <span className="text-[var(--muted-foreground)]">
+                Última sincronização
+              </span>
+              <span>
+                {mercadoLivreAccount?.lastSyncAt
+                  ? formatDateTime(mercadoLivreAccount.lastSyncAt)
+                  : "-"}
+              </span>
             </div>
             {mercadoLivreAccount?.lastError ? (
-              <div className="grid gap-1 text-red-700">
-                <span>Ultimo erro</span>
+              <div className="grid gap-1 text-[var(--danger)]">
+                <span>Último erro</span>
                 <span>
-                  {mercadoLivreAccount.lastErrorAt ? `${formatDateTime(mercadoLivreAccount.lastErrorAt)} - ` : ""}
+                  {mercadoLivreAccount.lastErrorAt
+                    ? `${formatDateTime(mercadoLivreAccount.lastErrorAt)} - `
+                    : ""}
                   {mercadoLivreAccount.lastError}
                 </span>
               </div>
@@ -207,7 +305,9 @@ export default async function IntegrationsPage({ searchParams }: IntegrationsPag
               <Button asChild variant="outline">
                 <Link href="/api/integrations/mercadolivre/connect">
                   <PlugZap aria-hidden="true" size={16} />
-                  {mercadoLivreAccount?.status === "CONNECTED" ? "Reconectar" : "Conectar"}
+                  {mercadoLivreAccount?.status === "CONNECTED"
+                    ? "Reconectar"
+                    : "Conectar"}
                 </Link>
               </Button>
               <Button asChild variant="outline">
@@ -222,7 +322,11 @@ export default async function IntegrationsPage({ searchParams }: IntegrationsPag
                 </Button>
               </form>
               <form action={syncMercadoLivreNowAction}>
-                <Button type="submit" variant="outline" disabled={mercadoLivreAccount?.status !== "CONNECTED"}>
+                <Button
+                  type="submit"
+                  variant="outline"
+                  disabled={mercadoLivreAccount?.status !== "CONNECTED"}
+                >
                   <RefreshCw aria-hidden="true" size={16} />
                   Sincronizar
                 </Button>
@@ -239,7 +343,8 @@ export default async function IntegrationsPage({ searchParams }: IntegrationsPag
             </CardTitle>
           </CardHeader>
           <CardContent className="text-sm text-[var(--muted-foreground)]">
-            Credenciais sao lidas de variaveis de ambiente no servidor e nao aparecem no cliente.
+            Credenciais são lidas de variáveis de ambiente no servidor e nunca
+            aparecem no cliente.
           </CardContent>
         </Card>
       </div>

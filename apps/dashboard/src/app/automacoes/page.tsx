@@ -5,6 +5,10 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { updateWorkerPauseAction } from "@/lib/actions";
 import { formatDateTime } from "@/lib/format";
+import { Alert } from "@/components/ui/alert";
+import { StatusBadge } from "@/components/ui/status-badge";
+import { DataTableContainer } from "@/components/ui/table";
+import { TechnicalDetails } from "@/components/ui/page";
 import {
   WORKER_CONTROLS_KEY,
   WORKER_STATUS_KEY,
@@ -91,14 +95,21 @@ export default async function AutomationsPage() {
       : "-";
 
   return (
-    <AdminShell currentPath="/automacoes" title="Automacoes">
+    <AdminShell currentPath="/automacoes" title="Automações">
+      <Alert
+        tone={status.state === "ONLINE" ? "success" : "warning"}
+        title="Estado do worker"
+      >
+        O painel exibe o último heartbeat persistido. Controles de pausa não
+        iniciam o worker nem executam publicações.
+      </Alert>
       <div className="grid gap-4 md:grid-cols-3 xl:grid-cols-6">
         <Card>
           <CardHeader>
             <CardTitle className="text-sm">Worker</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-semibold">{status.state}</div>
+            <StatusBadge status={status.state} />
             <p className="text-xs text-[var(--muted-foreground)]">
               Heartbeat:{" "}
               {status.heartbeatAt
@@ -115,9 +126,10 @@ export default async function AutomationsPage() {
             <CardTitle className="text-sm">Mercado Livre</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-sm font-semibold">
-              {controls.discoveryPaused ? "PAUSADO" : "ATIVO"}
-            </div>
+            <StatusBadge
+              status={controls.discoveryPaused ? "DISABLED" : "ACTIVE"}
+              label={controls.discoveryPaused ? "Pausada" : "Ativa"}
+            />
             <p className="text-xs text-[var(--muted-foreground)]">
               Última sincronização:{" "}
               {mercadoLivreConfig?.lastRunAt
@@ -131,9 +143,10 @@ export default async function AutomationsPage() {
             <CardTitle className="text-sm">Telegram</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-sm font-semibold">
-              {controls.publicationPaused ? "PAUSADO" : "ATIVO"}
-            </div>
+            <StatusBadge
+              status={controls.publicationPaused ? "DISABLED" : "ACTIVE"}
+              label={controls.publicationPaused ? "Pausado" : "Ativo"}
+            />
             <p className="text-xs text-[var(--muted-foreground)]">
               Última publicação:{" "}
               {lastPublication?.publishedAt
@@ -285,18 +298,18 @@ export default async function AutomationsPage() {
 
       {runs.length === 0 ? (
         <EmptyState
-          title="Nenhuma automacao executada"
-          description="As execucoes do worker serao registradas aqui como AutomationRun."
+          title="Nenhuma automação executada"
+          description="As execuções do worker aparecerão aqui quando houver um ciclo registrado."
         />
       ) : (
-        <div className="overflow-x-auto rounded-md border bg-white">
+        <DataTableContainer label="Histórico de execuções das automações">
           <table className="w-full min-w-[760px] text-left text-sm">
             <thead className="border-b bg-[var(--muted)] text-xs uppercase text-[var(--muted-foreground)]">
               <tr>
                 <th className="px-4 py-3">Nome</th>
                 <th className="px-4 py-3">Status</th>
-                <th className="px-4 py-3">Inicio</th>
-                <th className="px-4 py-3">Duracao</th>
+                <th className="px-4 py-3">Início</th>
+                <th className="px-4 py-3">Duração</th>
                 <th className="px-4 py-3">Resultado</th>
                 <th className="px-4 py-3">Erro</th>
               </tr>
@@ -305,22 +318,30 @@ export default async function AutomationsPage() {
               {runs.map((run) => (
                 <tr key={run.id} className="border-b last:border-0">
                   <td className="px-4 py-3">{run.name}</td>
-                  <td className="px-4 py-3">{run.status}</td>
+                  <td className="px-4 py-3">
+                    <StatusBadge status={run.status} />
+                  </td>
                   <td className="px-4 py-3">{formatDateTime(run.startedAt)}</td>
                   <td className="px-4 py-3">
                     {duration(run.startedAt, run.finishedAt)}
                   </td>
                   <td className="max-w-[260px] px-4 py-3 text-xs">
-                    <pre className="whitespace-pre-wrap font-sans">
-                      {run.metrics ? JSON.stringify(run.metrics, null, 2) : "-"}
-                    </pre>
+                    {run.metrics ? (
+                      <TechnicalDetails summary="Ver métricas">
+                        <pre className="whitespace-pre-wrap text-xs">
+                          {JSON.stringify(run.metrics, null, 2)}
+                        </pre>
+                      </TechnicalDetails>
+                    ) : (
+                      "-"
+                    )}
                   </td>
                   <td className="px-4 py-3">{run.errorMessage ?? "-"}</td>
                 </tr>
               ))}
             </tbody>
           </table>
-        </div>
+        </DataTableContainer>
       )}
     </AdminShell>
   );
