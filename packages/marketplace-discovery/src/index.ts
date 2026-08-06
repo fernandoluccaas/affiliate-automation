@@ -38,6 +38,13 @@ import {
   createMercadoLivreAffiliateLinkProvider,
   type AffiliateLinkProvider,
 } from "./affiliate-link-provider";
+import {
+  normalizeMultiCategorySettings,
+  resolveMultiCategoryRuntimeConfig,
+  sanitizeMultiCategorySummary,
+  selectBalancedMultiCategoryOffers,
+  type MultiCategorySelectionResult,
+} from "./multi-category";
 
 export {
   ManualAffiliateLinkProvider,
@@ -63,6 +70,18 @@ export {
   type AffiliateLinkParseResult,
   type ApplyAffiliateLinksBatchResult,
 } from "./affiliate-links";
+export {
+  MULTI_CATEGORY_SELECTION_MODE,
+  normalizeMultiCategorySettings,
+  resolveMultiCategoryRuntimeConfig,
+  sanitizeMultiCategorySummary,
+  selectBalancedMultiCategoryOffers,
+  type MultiCategoryCategoryResult,
+  type MultiCategoryRuntimeConfig,
+  type MultiCategorySelectionCandidate,
+  type MultiCategorySelectionResult,
+  type MultiCategorySetting,
+} from "./multi-category";
 
 export type { MercadoLivreProductResolutionDiagnostics } from "@affiliate/marketplace-connectors";
 
@@ -79,7 +98,10 @@ export type MercadoLivreCategorySkipReason =
   | "CATEGORY_API_ERROR";
 
 export type MercadoLivreDiscoveryMetrics = {
+  categoriesRequested: number;
   categoriesProcessed: number;
+  categoriesSucceeded: number;
+  categoriesFailed: number;
   categoriesWithHighlights: number;
   categoriesSkipped: number;
   categorySkipReasons: Record<string, number>;
@@ -134,7 +156,18 @@ export type MercadoLivreDiscoveryMetrics = {
   ingestionFailed: number;
   rejected: number;
   errors: number;
+  candidatesValid: number;
+  candidatesRejected: number;
+  candidatesWithoutAffiliateLink: number;
+  selected: number;
+  quotaMet: number;
+  crossCategoryDuplicates: number;
+  linksGenerated: number;
+  linksReused: number;
+  scheduled: number;
+  skippedByChannelPolicy: number;
   candidateResolutionSkipReasons: Record<string, number>;
+  multiCategory?: ReturnType<typeof sanitizeMultiCategorySummary>;
 };
 
 export type MercadoLivreDiscoveryResult = {
@@ -145,6 +178,8 @@ export type MercadoLivreDiscoveryResult = {
   metrics: MercadoLivreDiscoveryMetrics;
   errorCode?: string;
   errorMessage?: string;
+  selectedOfferIds?: string[];
+  multiCategory?: MultiCategorySelectionResult;
 };
 
 export type MercadoLivreDiscoveryOptions = {
@@ -168,6 +203,7 @@ type DiscoveryDependencies = {
 
 export type MercadoLivreDiscoveredCandidate = MarketplaceOfferCandidate & {
   sourceCategoryId?: string;
+  sourceCategoryIds?: string[];
   bestSellerPosition?: number;
   affiliateFailure?: MercadoLivreAffiliateFailure | null;
 };
@@ -212,6 +248,11 @@ type AffiliateEnrichmentResult = {
   linkAttempted: boolean;
   linkGenerated: boolean;
   linkReused: boolean;
+};
+
+type IngestedAffiliateEnrichment = {
+  enrichment: AffiliateEnrichmentResult;
+  result: IngestOfferResult;
 };
 
 type CandidateResolutionObserver = {
@@ -300,20 +341,42 @@ function emitOperationalMetric(
   }
 }
 
-function startLockHeartbeat(lock: LockHandle, ttlMs: number) {
+export function startOwnedLockHeartbeat(
+  lock: LockHandle,
+  ttlMs: number,
+  intervalMs = Math.max(1_000, Math.floor(ttlMs / 3)),
+) {
+  let lost = false;
   if (lock.mode === "unavailable") {
-    return () => undefined;
+    lost = true;
+    return {
+      stop: () => undefined,
+      isLost: () => true,
+      assertOwned: () => {
+        throw new Error("DISCOVERY_LOCK_LOST");
+      },
+    };
   }
 
-  const interval = setInterval(
-    () => {
-      void lock.extend(ttlMs).catch(() => false);
-    },
-    Math.max(1_000, Math.floor(ttlMs / 3)),
-  );
+  const interval = setInterval(() => {
+    void lock
+      .extend(ttlMs)
+      .then((extended) => {
+        if (!extended) lost = true;
+      })
+      .catch(() => {
+        lost = true;
+      });
+  }, intervalMs);
   interval.unref();
 
-  return () => clearInterval(interval);
+  return {
+    stop: () => clearInterval(interval),
+    isLost: () => lost,
+    assertOwned: () => {
+      if (lost) throw new Error("DISCOVERY_LOCK_LOST");
+    },
+  };
 }
 
 function mergeAffiliateCookieSnapshots(
@@ -352,7 +415,10 @@ function mergeAffiliateCookieSnapshots(
 
 export function createMercadoLivreDiscoveryMetrics(): MercadoLivreDiscoveryMetrics {
   return {
+    categoriesRequested: 0,
     categoriesProcessed: 0,
+    categoriesSucceeded: 0,
+    categoriesFailed: 0,
     categoriesWithHighlights: 0,
     categoriesSkipped: 0,
     categorySkipReasons: {},
@@ -407,6 +473,16 @@ export function createMercadoLivreDiscoveryMetrics(): MercadoLivreDiscoveryMetri
     ingestionFailed: 0,
     rejected: 0,
     errors: 0,
+    candidatesValid: 0,
+    candidatesRejected: 0,
+    candidatesWithoutAffiliateLink: 0,
+    selected: 0,
+    quotaMet: 0,
+    crossCategoryDuplicates: 0,
+    linksGenerated: 0,
+    linksReused: 0,
+    scheduled: 0,
+    skippedByChannelPolicy: 0,
     candidateResolutionSkipReasons: {},
   };
 }
@@ -1578,8 +1654,8 @@ export async function diagnoseMercadoLivreProduct(
         )
       : null;
   const detailFailureCount =
-    (productItems.diagnostics.rejectionReasons
-      .PRODUCT_ITEM_DETAIL_HTTP_ERROR ?? 0) +
+    (productItems.diagnostics.rejectionReasons.PRODUCT_ITEM_DETAIL_HTTP_ERROR ??
+      0) +
     (productItems.diagnostics.rejectionReasons.PRODUCT_ITEM_DETAIL_NOT_FOUND ??
       0) +
     (productItems.diagnostics.rejectionReasons.PRODUCT_ITEM_SCHEMA_MISMATCH ??
@@ -1831,8 +1907,8 @@ export class MercadoLivreHighlightResolver {
       productItemById,
     );
     const detailFailureCount =
-      (productItemDiagnostics.rejectionReasons
-        .PRODUCT_ITEM_DETAIL_HTTP_ERROR ?? 0) +
+      (productItemDiagnostics.rejectionReasons.PRODUCT_ITEM_DETAIL_HTTP_ERROR ??
+        0) +
       (productItemDiagnostics.rejectionReasons.PRODUCT_ITEM_DETAIL_NOT_FOUND ??
         0) +
       (productItemDiagnostics.rejectionReasons.PRODUCT_ITEM_SCHEMA_MISMATCH ??
@@ -2044,6 +2120,7 @@ export async function discoverCandidatesFromLeafCategories(
     string,
     MercadoLivreResolvedHighlightCandidate
   >();
+  const sourceCategories = new Map<string, Set<string>>();
   const resolver = new MercadoLivreHighlightResolver(connector);
 
   for (const categoryId of categoryIds) {
@@ -2112,6 +2189,9 @@ export async function discoverCandidatesFromLeafCategories(
         metrics.resolvedItems += 1;
       }
       const candidateKey = `${result.candidate.kind}:${result.candidate.marketplaceExternalId}`;
+      const origins = sourceCategories.get(candidateKey) ?? new Set<string>();
+      origins.add(result.candidate.categoryId);
+      sourceCategories.set(candidateKey, origins);
       const existing = resolvedCandidates.get(candidateKey);
 
       if (!existing || result.candidate.position < existing.position) {
@@ -2151,6 +2231,11 @@ export async function discoverCandidatesFromLeafCategories(
       sourceHighlightId: source.sourceHighlightId,
       sourceHighlightType: source.sourceHighlightType,
       sourceCategoryId: source.categoryId,
+      sourceCategoryIds: [
+        ...(sourceCategories.get(
+          `${source.kind}:${source.marketplaceExternalId}`,
+        ) ?? [source.categoryId]),
+      ],
       bestSellerPosition: source.position,
       ...(source.resolvedProductId
         ? { resolvedProductId: source.resolvedProductId }
@@ -2171,6 +2256,11 @@ export async function discoverCandidatesFromLeafCategories(
           sourceHighlightId: source.sourceHighlightId,
           sourceHighlightType: source.sourceHighlightType,
           sourceCategoryId: source.categoryId,
+          sourceCategoryIds: [
+            ...(sourceCategories.get(
+              `${source.kind}:${source.marketplaceExternalId}`,
+            ) ?? [source.categoryId]),
+          ],
           bestSellerPosition: source.position,
           ...(source.resolvedProductId
             ? { resolvedProductId: source.resolvedProductId }
@@ -2402,6 +2492,11 @@ async function persistIngestionResultItem(
       ...(errorCode ? { errorCode } : {}),
       ...(errorMessage ? { errorMessage } : {}),
       metadata: {
+        sourceCategoryIds:
+          enrichment.candidate.sourceCategoryIds ??
+          (enrichment.candidate.sourceCategoryId
+            ? [enrichment.candidate.sourceCategoryId]
+            : []),
         resolutionStrategy: enrichment.candidate.resolutionStrategy ?? null,
         productUrlSource: enrichment.candidate.productUrlSource ?? null,
         candidateKind: enrichment.candidate.candidateKind ?? "ITEM",
@@ -2430,7 +2525,7 @@ async function ingestAffiliateEnrichments(
   now: Date,
   metrics: MercadoLivreDiscoveryMetrics,
 ) {
-  await mapWithConcurrency(
+  const results = await mapWithConcurrency(
     enrichments,
     dependencies.affiliateConcurrency,
     async (enrichment) => {
@@ -2460,6 +2555,7 @@ async function ingestAffiliateEnrichments(
           result,
           metrics,
         );
+        return { enrichment, result };
       } catch {
         metrics.errors += 1;
         metrics.ingestionFailed += 1;
@@ -2480,10 +2576,14 @@ async function ingestAffiliateEnrichments(
             errorCode: "INGESTION_FAILED",
             errorMessage: "Mercado Livre offer ingestion failed.",
             metadata: {
+              sourceCategoryIds:
+                enrichment.candidate.sourceCategoryIds ??
+                (enrichment.candidate.sourceCategoryId
+                  ? [enrichment.candidate.sourceCategoryId]
+                  : []),
               resolutionStrategy:
                 enrichment.candidate.resolutionStrategy ?? null,
-              productUrlSource:
-                enrichment.candidate.productUrlSource ?? null,
+              productUrlSource: enrichment.candidate.productUrlSource ?? null,
               candidateKind: enrichment.candidate.candidateKind ?? "ITEM",
               selectedItemId:
                 enrichment.candidate.selectedCatalogItemId ??
@@ -2496,9 +2596,93 @@ async function ingestAffiliateEnrichments(
             },
           },
         });
+        return null;
       }
     },
   );
+
+  return results.filter(
+    (entry): entry is IngestedAffiliateEnrichment => entry !== null,
+  );
+}
+
+function mergeCandidatesByProduct(
+  candidates: readonly MercadoLivreDiscoveredCandidate[],
+) {
+  const unique = new Map<string, MercadoLivreDiscoveredCandidate>();
+
+  for (const candidate of candidates) {
+    const existing = unique.get(candidate.externalProductId);
+    const sourceCategoryIds = [
+      ...new Set([
+        ...(existing?.sourceCategoryIds ??
+          (existing?.sourceCategoryId ? [existing.sourceCategoryId] : [])),
+        ...(candidate.sourceCategoryIds ??
+          (candidate.sourceCategoryId ? [candidate.sourceCategoryId] : [])),
+      ]),
+    ];
+    if (
+      !existing ||
+      (candidate.bestSellerPosition ?? Number.MAX_SAFE_INTEGER) <
+        (existing.bestSellerPosition ?? Number.MAX_SAFE_INTEGER)
+    ) {
+      unique.set(candidate.externalProductId, {
+        ...candidate,
+        sourceCategoryIds,
+      });
+    } else {
+      existing.sourceCategoryIds = sourceCategoryIds;
+    }
+  }
+
+  return [...unique.values()];
+}
+
+function selectIngestedMultiCategoryOffers(input: {
+  ingested: readonly IngestedAffiliateEnrichment[];
+  categoryIds: readonly string[];
+  categorySettings: unknown;
+  runtimeConfig: ReturnType<typeof resolveMultiCategoryRuntimeConfig>;
+}) {
+  const settings = normalizeMultiCategorySettings(
+    input.categoryIds,
+    input.categorySettings,
+  );
+  const candidates = input.ingested.flatMap(({ enrichment, result }) => {
+    if (!result.offerId || !result.productId) return [];
+    const candidate = enrichment.candidate;
+    const hasAffiliateLink = Boolean(enrichment.affiliateUrl);
+    const acceptedStatus = [
+      "READY_TO_PUBLISH",
+      "SCHEDULED",
+      "PUBLISHED",
+    ].includes(result.status);
+    return [
+      {
+        offerId: result.offerId,
+        productId: result.productId,
+        sourceCategoryIds:
+          candidate.sourceCategoryIds ??
+          (candidate.sourceCategoryId ? [candidate.sourceCategoryId] : []),
+        score: result.score ?? null,
+        bestSellerPosition: candidate.bestSellerPosition ?? null,
+        discountPercentage: result.discountPercentage ?? null,
+        completenessPercentage: result.scoreCompletenessPercentage ?? null,
+        eligible: acceptedStatus && hasAffiliateLink,
+        rejectionReason: hasAffiliateLink
+          ? acceptedStatus
+            ? null
+            : result.status
+          : "AFFILIATE_LINK_REQUIRED",
+      },
+    ];
+  });
+
+  return selectBalancedMultiCategoryOffers({
+    settings,
+    candidates,
+    config: input.runtimeConfig,
+  });
 }
 
 async function enrichCandidatesWithProvider(
@@ -2692,6 +2876,34 @@ export class MercadoLivreDiscoveryService {
       );
     }
 
+    const configuredCategoryIds = jsonStringArray(config.categoryIds);
+    const runtimeConfig = resolveMultiCategoryRuntimeConfig(process.env, {
+      enabled: config.multiCategoryEnabled,
+      minOffersPerCategory: config.multiCategoryMinOffersPerCategory,
+      maxOffersPerCategory: config.multiCategoryMaxOffersPerCategory,
+      maxTotalPerSession: config.multiCategoryMaxTotalPerSession,
+      selectionMode: config.multiCategorySelectionMode,
+      allowCategoryBackfill: config.multiCategoryAllowCategoryBackfill,
+    });
+    const categorySettings = normalizeMultiCategorySettings(
+      configuredCategoryIds,
+      config.multiCategorySettings,
+    );
+    const categoryIds = runtimeConfig.enabled
+      ? categorySettings
+          .filter((setting) => setting.enabled && setting.isLeaf !== false)
+          .map((setting) => setting.categoryId)
+      : configuredCategoryIds;
+    metrics.categoriesRequested = categoryIds.length;
+
+    if (runtimeConfig.enabled && categoryIds.length === 0) {
+      return skippedResult(
+        metrics,
+        "MULTI_CATEGORY_NO_VALID_CATEGORIES",
+        "Multi-category discovery has no enabled leaf category.",
+      );
+    }
+
     const account =
       await this.dependencies.database.marketplaceAccount.findFirst({
         where: {
@@ -2730,7 +2942,7 @@ export class MercadoLivreDiscoveryService {
     if (!lock.acquired) {
       return skippedResult(metrics, "DISCOVERY_ALREADY_RUNNING");
     }
-    const stopLockHeartbeat = startLockHeartbeat(lock, DISCOVERY_LOCK_TTL_MS);
+    const lockHeartbeat = startOwnedLockHeartbeat(lock, DISCOVERY_LOCK_TTL_MS);
 
     let runId: string | undefined;
     let importJobId: string | undefined;
@@ -2747,7 +2959,6 @@ export class MercadoLivreDiscoveryService {
         },
       });
       runId = run.id;
-      const categoryIds = jsonStringArray(config.categoryIds);
       const importJob = await this.dependencies.database.importJob.create({
         data: {
           marketplaceAccountId: account.id,
@@ -2801,12 +3012,13 @@ export class MercadoLivreDiscoveryService {
           },
         },
       );
-      const uniqueCandidates = new Map(
-        candidates.map((candidate) => [candidate.externalProductId, candidate]),
+      const uniqueCandidates = mergeCandidatesByProduct(candidates);
+      const selectedCandidates = uniqueCandidates.filter((candidate) =>
+        candidatePassesDiscoveryPolicies(candidate, config),
       );
-      const selectedCandidates = [...uniqueCandidates.values()].filter(
-        (candidate) => candidatePassesDiscoveryPolicies(candidate, config),
-      );
+      lockHeartbeat.assertOwned();
+      metrics.candidatesRejected +=
+        uniqueCandidates.length - selectedCandidates.length;
       const discoveryDurationMs = Math.max(
         0,
         this.dependencies.monotonicNow() - operationStartedAt,
@@ -2868,7 +3080,7 @@ export class MercadoLivreDiscoveryService {
               metrics,
             );
           } else {
-            const stopAffiliateLockHeartbeat = startLockHeartbeat(
+            const affiliateLockHeartbeat = startOwnedLockHeartbeat(
               affiliateSessionLock,
               DISCOVERY_LOCK_TTL_MS,
             );
@@ -2883,15 +3095,16 @@ export class MercadoLivreDiscoveryService {
                 metrics,
                 now,
               );
+              affiliateLockHeartbeat.assertOwned();
             } finally {
-              stopAffiliateLockHeartbeat();
+              affiliateLockHeartbeat.stop();
               await affiliateSessionLock.release();
             }
           }
         }
       }
 
-      await ingestAffiliateEnrichments(
+      const ingested = await ingestAffiliateEnrichments(
         enrichments,
         this.dependencies,
         importJob.id,
@@ -2899,13 +3112,51 @@ export class MercadoLivreDiscoveryService {
         now,
         metrics,
       );
+      lockHeartbeat.assertOwned();
+      let multiCategory: MultiCategorySelectionResult | undefined;
+      let selectedOfferIds: string[] | undefined;
+
+      if (runtimeConfig.enabled) {
+        multiCategory = selectIngestedMultiCategoryOffers({
+          ingested,
+          categoryIds,
+          categorySettings,
+          runtimeConfig,
+        });
+        selectedOfferIds = multiCategory.orderedOfferIds;
+        metrics.multiCategory = sanitizeMultiCategorySummary(multiCategory);
+        metrics.selected = multiCategory.selected.length;
+        metrics.quotaMet = multiCategory.quotaMet;
+        metrics.crossCategoryDuplicates = multiCategory.crossCategoryDuplicates;
+        metrics.candidatesValid = multiCategory.categories.reduce(
+          (total, category) => total + category.valid,
+          0,
+        );
+        metrics.candidatesRejected += multiCategory.categories.reduce(
+          (total, category) => total + category.rejected,
+          0,
+        );
+        metrics.candidatesWithoutAffiliateLink =
+          multiCategory.categories.reduce(
+            (total, category) => total + category.withoutAffiliateLink,
+            0,
+          );
+      }
+      metrics.linksGenerated = metrics.affiliateLinksGenerated;
+      metrics.linksReused = metrics.affiliateLinksReused;
+      metrics.categoriesSucceeded = metrics.categoriesWithHighlights;
+      metrics.categoriesFailed = metrics.categoriesSkipped;
 
       const hasPartialFailures =
         metrics.errors > 0 ||
         metrics.unresolvedCandidates > 0 ||
-        metrics.affiliateIneligible > 0;
+        metrics.affiliateIneligible > 0 ||
+        (multiCategory?.quotaNotMet ?? 0) > 0;
       const status = hasPartialFailures ? "PARTIAL" : "SUCCEEDED";
-      const issueCount = metrics.errors + metrics.unresolvedCandidates;
+      const issueCount =
+        metrics.errors +
+        metrics.unresolvedCandidates +
+        (multiCategory?.quotaNotMet ?? 0);
       const lastError =
         status === "PARTIAL"
           ? `Discovery completed with ${issueCount} item or operational issue(s).`
@@ -2961,6 +3212,8 @@ export class MercadoLivreDiscoveryService {
         importJobId: importJob.id,
         status,
         metrics,
+        ...(selectedOfferIds ? { selectedOfferIds } : {}),
+        ...(multiCategory ? { multiCategory } : {}),
       };
     } catch (error) {
       metrics.errors += 1;
@@ -3041,7 +3294,7 @@ export class MercadoLivreDiscoveryService {
         errorMessage,
       };
     } finally {
-      stopLockHeartbeat();
+      lockHeartbeat.stop();
       await lock.release();
     }
   }
@@ -3285,7 +3538,7 @@ export async function generatePendingMercadoLivreAffiliateLinks(
       errorMessage: "Pending affiliate link enrichment is already running.",
     };
   }
-  const stopLockHeartbeat = startLockHeartbeat(lock, DISCOVERY_LOCK_TTL_MS);
+  const lockHeartbeat = startOwnedLockHeartbeat(lock, DISCOVERY_LOCK_TTL_MS);
 
   const now = new Date();
   const metrics = createMercadoLivreDiscoveryMetrics();
@@ -3478,7 +3731,7 @@ export async function generatePendingMercadoLivreAffiliateLinks(
       errorMessage,
     };
   } finally {
-    stopLockHeartbeat();
+    lockHeartbeat.stop();
     await lock.release();
   }
 }
@@ -3551,9 +3804,7 @@ function emptyJobMetrics(): MercadoLivreJobMetrics {
 }
 
 export type MercadoLivreRefreshStrategy =
-  | "ITEM"
-  | "CATALOG_PRODUCT"
-  | "USER_PRODUCT";
+  "ITEM" | "CATALOG_PRODUCT" | "USER_PRODUCT";
 
 export function resolveMercadoLivreRefreshStrategy(input: {
   sourceHighlightType: string | null | undefined;
@@ -3693,8 +3944,8 @@ export async function refreshMercadoLivreOffers(
         const resolutionStrategy = resolutionStrategyFromStoredValue(
           currentOffer.resolutionStrategy,
         );
-        const refreshStrategy = refreshStrategyByOfferId.get(currentOffer.id) ??
-          "ITEM";
+        const refreshStrategy =
+          refreshStrategyByOfferId.get(currentOffer.id) ?? "ITEM";
 
         try {
           let candidate = candidateByExternalId.get(
@@ -3739,15 +3990,12 @@ export async function refreshMercadoLivreOffers(
               metrics.detailEnrichmentUnavailable += 1;
             }
 
-            const selectedSummary =
-              selectBestMercadoLivreCatalogProductSummary(
-                productItems.summaries,
-              );
+            const selectedSummary = selectBestMercadoLivreCatalogProductSummary(
+              productItems.summaries,
+            );
             if (!selectedSummary) {
               metrics.priceUnavailable += 1;
-              throw new Error(
-                "CATALOG_PRODUCT_COMMERCIAL_SUMMARY_UNAVAILABLE",
-              );
+              throw new Error("CATALOG_PRODUCT_COMMERCIAL_SUMMARY_UNAVAILABLE");
             }
 
             const productUrl = resolveMercadoLivreCatalogProductUrl({
@@ -3764,8 +4012,7 @@ export async function refreshMercadoLivreOffers(
 
             const selectedEnrichment =
               productItems.candidates.find(
-                (item) =>
-                  item.externalProductId === selectedSummary.itemId,
+                (item) => item.externalProductId === selectedSummary.itemId,
               ) ?? null;
             if (!selectedEnrichment) {
               metrics.priceFallbackUsed += 1;
@@ -3852,8 +4099,7 @@ export async function refreshMercadoLivreOffers(
         } catch (error) {
           metrics.failed += 1;
           const reason =
-            error instanceof Error &&
-            /^[A-Z][A-Z0-9_]+$/.test(error.message)
+            error instanceof Error && /^[A-Z][A-Z0-9_]+$/.test(error.message)
               ? error.message
               : `${refreshStrategy}_REFRESH_FAILED`;
           incrementMetricReason(metrics.errorReasons, reason);

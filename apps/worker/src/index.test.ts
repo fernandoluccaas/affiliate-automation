@@ -768,7 +768,9 @@ describe("createPublicationIdempotently", () => {
     expect(upsert).toHaveBeenCalledTimes(1);
     expect(upsert).toHaveBeenCalledWith(
       expect.objectContaining({
-        create: expect.objectContaining({ channelId: "channel-telegram-queue" }),
+        create: expect.objectContaining({
+          channelId: "channel-telegram-queue",
+        }),
       }),
     );
 
@@ -1527,6 +1529,53 @@ describe("continuous worker Redis coordination", () => {
 });
 
 describe("runWorkerCycle", () => {
+  it("forwards the balanced session order to the existing scheduler", async () => {
+    const actual = await import("@affiliate/database");
+    const now = new Date("2026-08-06T12:00:00.000Z");
+    Object.assign(actual.prisma, {
+      automationRun: {
+        create: vi.fn().mockResolvedValue({ id: "worker-run-balanced" }),
+        update: vi.fn().mockResolvedValue({}),
+      },
+      systemAlert: { create: vi.fn().mockResolvedValue({}) },
+    });
+    const schedule = vi.fn().mockResolvedValue(workerJobMetrics());
+
+    await runWorkerCycle(now, {
+      expireInvalidOffers: vi.fn().mockResolvedValue(workerJobMetrics()),
+      collectMercadoLivreCandidates: vi.fn().mockResolvedValue({
+        ok: true,
+        status: "SUCCEEDED",
+        importJobId: "import-balanced",
+        selectedOfferIds: ["offer-celulares", "offer-casa"],
+        metrics: createMercadoLivreDiscoveryMetrics(),
+      }),
+      processAffiliateLinkJobs: vi.fn().mockResolvedValue({
+        selected: 0,
+        processed: 0,
+        failed: 0,
+      }),
+      refreshMercadoLivreOffers: vi.fn().mockResolvedValue({
+        ...workerJobMetrics(),
+        selected: 0,
+        refreshed: 0,
+        unchanged: 0,
+        newVersions: 0,
+        notFound: 0,
+        affiliateUrlsPreserved: 0,
+        failures: [],
+      }),
+      scheduleReadyOffers: schedule,
+      retryFailedPublications: vi.fn().mockResolvedValue(workerJobMetrics()),
+      publishScheduledOffers: vi.fn().mockResolvedValue(workerJobMetrics()),
+    } as never);
+
+    expect(schedule).toHaveBeenCalledWith(now, {
+      planningRunId: "worker-run-balanced",
+      preferredOfferIds: ["offer-celulares", "offer-casa"],
+    });
+  });
+
   it("records a partial cycle and continues refresh, scheduling, retries and publishing after discovery fails", async () => {
     const actual = await import("@affiliate/database");
     const now = new Date("2026-07-28T20:00:00.000Z");

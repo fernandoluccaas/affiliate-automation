@@ -202,6 +202,12 @@ const mercadoLivreConfigSchema = z.object({
   minimumScore: z.coerce.number().int().min(0).max(100),
   maxCandidatesPerCategory: z.coerce.number().int().min(1).max(20),
   refreshIntervalMinutes: z.coerce.number().int().min(15),
+  multiCategoryEnabled: z.boolean(),
+  multiCategoryMinOffersPerCategory: z.coerce.number().int().min(0).max(2),
+  multiCategoryMaxOffersPerCategory: z.coerce.number().int().min(1).max(10),
+  multiCategoryMaxTotalPerSession: z.coerce.number().int().min(1).max(100),
+  multiCategorySelectionMode: z.literal("ROUND_ROBIN"),
+  multiCategoryAllowCategoryBackfill: z.boolean(),
 });
 
 const affiliateLinkSchema = z.object({
@@ -843,6 +849,21 @@ async function upsertMercadoLivreConfig(data: {
   minimumScore: number;
   maxCandidatesPerCategory: number;
   refreshIntervalMinutes: number;
+  multiCategoryEnabled?: boolean;
+  multiCategorySettings?: Array<{
+    categoryId: string;
+    name: string | null;
+    enabled: boolean;
+    priority: number;
+    minOffers: number | null;
+    maxOffers: number | null;
+    isLeaf: boolean;
+  }>;
+  multiCategoryMinOffersPerCategory?: number;
+  multiCategoryMaxOffersPerCategory?: number;
+  multiCategoryMaxTotalPerSession?: number;
+  multiCategorySelectionMode?: "ROUND_ROBIN";
+  multiCategoryAllowCategoryBackfill?: boolean;
 }) {
   const existing = await prisma.mercadoLivreDiscoveryConfig.findFirst({
     select: { id: true },
@@ -858,6 +879,17 @@ async function upsertMercadoLivreConfig(data: {
     minimumScore: data.minimumScore,
     maxCandidatesPerCategory: data.maxCandidatesPerCategory,
     refreshIntervalMinutes: data.refreshIntervalMinutes,
+    multiCategoryEnabled: data.multiCategoryEnabled ?? false,
+    multiCategorySettings: data.multiCategorySettings ?? [],
+    multiCategoryMinOffersPerCategory:
+      data.multiCategoryMinOffersPerCategory ?? 1,
+    multiCategoryMaxOffersPerCategory:
+      data.multiCategoryMaxOffersPerCategory ?? 2,
+    multiCategoryMaxTotalPerSession: data.multiCategoryMaxTotalPerSession ?? 12,
+    multiCategorySelectionMode:
+      data.multiCategorySelectionMode ?? "ROUND_ROBIN",
+    multiCategoryAllowCategoryBackfill:
+      data.multiCategoryAllowCategoryBackfill ?? false,
   };
 
   if (existing) {
@@ -996,6 +1028,17 @@ export async function saveMercadoLivreConfigAction(formData: FormData) {
     minimumScore: formData.get("minimumScore"),
     maxCandidatesPerCategory: formData.get("maxCandidatesPerCategory"),
     refreshIntervalMinutes: formData.get("refreshIntervalMinutes"),
+    multiCategoryEnabled: formData.get("multiCategoryEnabled") === "on",
+    multiCategoryMinOffersPerCategory:
+      formData.get("multiCategoryMinOffersPerCategory") ?? 1,
+    multiCategoryMaxOffersPerCategory:
+      formData.get("multiCategoryMaxOffersPerCategory") ?? 2,
+    multiCategoryMaxTotalPerSession:
+      formData.get("multiCategoryMaxTotalPerSession") ?? 12,
+    multiCategorySelectionMode:
+      formData.get("multiCategorySelectionMode")?.toString() ?? "ROUND_ROBIN",
+    multiCategoryAllowCategoryBackfill:
+      formData.get("multiCategoryAllowCategoryBackfill") === "on",
   });
 
   if (!parsed.success) {
@@ -1004,6 +1047,15 @@ export async function saveMercadoLivreConfigAction(formData: FormData) {
 
   const data = parsed.data;
   const categoryIds = stringList(data.categoryIds);
+  const categorySettings: Array<{
+    categoryId: string;
+    name: string | null;
+    enabled: boolean;
+    priority: number;
+    minOffers: number | null;
+    maxOffers: number | null;
+    isLeaf: boolean;
+  }> = [];
 
   if (categoryIds.length > 0) {
     let connector: MarketplaceConnector;
@@ -1028,6 +1080,21 @@ export async function saveMercadoLivreConfigAction(formData: FormData) {
           `/integracoes/mercado-livre?message=${validation.message}&categoryId=${encodeURIComponent(categoryId)}`,
         );
       }
+      const optionalInteger = (name: string) => {
+        const raw = formData.get(`${name}:${categoryId}`)?.toString().trim();
+        if (!raw) return null;
+        const value = Number(raw);
+        return Number.isInteger(value) ? value : null;
+      };
+      categorySettings.push({
+        categoryId: validation.category.id,
+        name: validation.category.name,
+        enabled: formData.get(`categoryEnabled:${categoryId}`) === "on",
+        priority: optionalInteger("categoryPriority") ?? 0,
+        minOffers: optionalInteger("categoryMin"),
+        maxOffers: optionalInteger("categoryMax"),
+        isLeaf: validation.category.children.length === 0,
+      });
     }
   }
 
@@ -1042,6 +1109,13 @@ export async function saveMercadoLivreConfigAction(formData: FormData) {
     minimumScore: data.minimumScore,
     maxCandidatesPerCategory: data.maxCandidatesPerCategory,
     refreshIntervalMinutes: data.refreshIntervalMinutes,
+    multiCategoryEnabled: data.multiCategoryEnabled,
+    multiCategorySettings: categorySettings,
+    multiCategoryMinOffersPerCategory: data.multiCategoryMinOffersPerCategory,
+    multiCategoryMaxOffersPerCategory: data.multiCategoryMaxOffersPerCategory,
+    multiCategoryMaxTotalPerSession: data.multiCategoryMaxTotalPerSession,
+    multiCategorySelectionMode: data.multiCategorySelectionMode,
+    multiCategoryAllowCategoryBackfill: data.multiCategoryAllowCategoryBackfill,
   });
 
   revalidatePath("/integracoes");
@@ -1103,6 +1177,40 @@ export async function addMercadoLivreCategoryAction(formData: FormData) {
     minimumScore: config?.minimumScore ?? 0,
     maxCandidatesPerCategory: config?.maxCandidatesPerCategory ?? 20,
     refreshIntervalMinutes: config?.refreshIntervalMinutes ?? 360,
+    multiCategoryEnabled: config?.multiCategoryEnabled ?? false,
+    multiCategorySettings: [
+      ...(Array.isArray(config?.multiCategorySettings)
+        ? (
+            config.multiCategorySettings as Array<{
+              categoryId: string;
+              name: string | null;
+              enabled: boolean;
+              priority: number;
+              minOffers: number | null;
+              maxOffers: number | null;
+              isLeaf: boolean;
+            }>
+          ).filter((entry) => entry.categoryId !== validation.category.id)
+        : []),
+      {
+        categoryId: validation.category.id,
+        name: validation.category.name,
+        enabled: true,
+        priority: 0,
+        minOffers: null,
+        maxOffers: null,
+        isLeaf: true,
+      },
+    ],
+    multiCategoryMinOffersPerCategory:
+      config?.multiCategoryMinOffersPerCategory ?? 1,
+    multiCategoryMaxOffersPerCategory:
+      config?.multiCategoryMaxOffersPerCategory ?? 2,
+    multiCategoryMaxTotalPerSession:
+      config?.multiCategoryMaxTotalPerSession ?? 12,
+    multiCategorySelectionMode: "ROUND_ROBIN",
+    multiCategoryAllowCategoryBackfill:
+      config?.multiCategoryAllowCategoryBackfill ?? false,
   });
 
   revalidatePath("/integracoes/mercado-livre");

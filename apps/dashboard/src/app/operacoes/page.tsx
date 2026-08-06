@@ -65,19 +65,41 @@ export default async function OperationsPage() {
           detail={`rate limiter ${status.tracking.rateLimiter} / redirect ${String(status.tracking.redirectAvailable)}`}
         />
         <StatusCard
+          title="Descoberta multicategoria"
+          value={status.multiCategoryDiscovery.enabled ? "ATIVA" : "DESATIVADA"}
+          detail={`${status.multiCategoryDiscovery.categoriesConfigured} categorias / ${status.multiCategoryDiscovery.selectionMode}`}
+        />
+        <StatusCard
+          title="Última sessão multicategoria"
+          value={status.multiCategoryDiscovery.lastSession?.status ?? "AUSENTE"}
+          detail={formatDateTime(
+            status.multiCategoryDiscovery.lastSession?.finishedAt ??
+              status.multiCategoryDiscovery.lastSession?.startedAt ??
+              null,
+          )}
+        />
+        <StatusCard
           title="Secret de fingerprint"
-          value={status.tracking.fingerprintSecretConfigured ? "CONFIGURADO" : "AUSENTE"}
+          value={
+            status.tracking.fingerprintSecretConfigured
+              ? "CONFIGURADO"
+              : "AUSENTE"
+          }
           detail="somente indicador booleano"
         />
         <StatusCard
           title="Última importação de conversões"
           value={status.tracking.lastConversionImport?.status ?? "AUSENTE"}
-          detail={formatDateTime(status.tracking.lastConversionImport?.createdAt ?? null)}
+          detail={formatDateTime(
+            status.tracking.lastConversionImport?.createdAt ?? null,
+          )}
         />
         <StatusCard
           title="Última importação de comissões"
           value={status.tracking.lastCommissionImport?.status ?? "AUSENTE"}
-          detail={formatDateTime(status.tracking.lastCommissionImport?.createdAt ?? null)}
+          detail={formatDateTime(
+            status.tracking.lastCommissionImport?.createdAt ?? null,
+          )}
         />
         <StatusCard
           title="Conversões não atribuídas"
@@ -97,7 +119,9 @@ export default async function OperationsPage() {
         <StatusCard
           title="Modo"
           value={status.worker.mode}
-          detail={status.worker.burnInActive ? "burn-in ativo" : "operação normal"}
+          detail={
+            status.worker.burnInActive ? "burn-in ativo" : "operação normal"
+          }
         />
         <StatusCard
           title="Liderança"
@@ -117,12 +141,20 @@ export default async function OperationsPage() {
         <StatusCard
           title="Burn-in atual"
           value={burnInSession?.state ?? "AUSENTE"}
-          detail={burnInSession ? `${burnInSession.source} / ${burnInSession.elapsedSeconds}s / sessão ${burnInSession.sessionId} / live ${String(burnInObservations?.liveObserved)} / ready ${String(burnInObservations?.readyObserved)}` : "nenhuma sessão manual"}
+          detail={
+            burnInSession
+              ? `${burnInSession.source} / ${burnInSession.elapsedSeconds}s / sessão ${burnInSession.sessionId} / live ${String(burnInObservations?.liveObserved)} / ready ${String(burnInObservations?.readyObserved)}`
+              : "nenhuma sessão manual"
+          }
         />
         <StatusCard
           title="Último burn-in concluído"
           value={burnInReport?.status ?? "AUSENTE"}
-          detail={burnInReport ? `${burnInReport.reportSource} / ${burnInReport.durationSeconds}s / locks ${burnInReport.residualLocks}` : "execute no terminal local"}
+          detail={
+            burnInReport
+              ? `${burnInReport.reportSource} / ${burnInReport.durationSeconds}s / locks ${burnInReport.residualLocks}`
+              : "execute no terminal local"
+          }
         />
         <StatusCard
           title="Última automação"
@@ -149,13 +181,19 @@ export default async function OperationsPage() {
         <h2 className="font-semibold">Processos supervisionados</h2>
         <div className="mt-3 grid gap-2 sm:grid-cols-2">
           {status.components.map((component) => (
-            <div key={component.component} className="rounded border p-3 text-sm">
+            <div
+              key={component.component}
+              className="rounded border p-3 text-sm"
+            >
               <strong>{component.component}</strong>: {component.status}
               <div className="mt-1 text-xs">
-                restarts {component.restartCount} / crashes consecutivos {component.consecutiveCrashes}
+                restarts {component.restartCount} / crashes consecutivos{" "}
+                {component.consecutiveCrashes}
               </div>
               {component.action ? (
-                <div className="mt-1 text-xs text-red-700">{component.action}</div>
+                <div className="mt-1 text-xs text-red-700">
+                  {component.action}
+                </div>
               ) : null}
             </div>
           ))}
@@ -168,10 +206,14 @@ export default async function OperationsPage() {
       <section className="rounded-md border bg-white p-4">
         <h2 className="font-semibold">Filas WhatsApp Web</h2>
         <p className="mt-1 text-xs text-[var(--muted-foreground)]">
-          Role horizontalmente quando necessário; os estados não são alterados por
-          esta página.
+          Role horizontalmente quando necessário; os estados não são alterados
+          por esta página.
         </p>
-        <div className="mt-3 overflow-x-auto" tabIndex={0} aria-label="Filas WhatsApp com rolagem horizontal">
+        <div
+          className="mt-3 overflow-x-auto"
+          tabIndex={0}
+          aria-label="Filas WhatsApp com rolagem horizontal"
+        >
           <table className="min-w-[760px] w-full text-left text-sm">
             <thead className="border-b bg-[var(--muted)]">
               <tr>
@@ -179,17 +221,23 @@ export default async function OperationsPage() {
                 <th className="px-3 py-2">Ativa</th>
                 <th className="px-3 py-2">Itens</th>
                 <th className="px-3 py-2">Entrega incerta</th>
-                <th className="sticky right-0 bg-[var(--muted)] px-3 py-2">Pausado</th>
+                <th className="sticky right-0 bg-[var(--muted)] px-3 py-2">
+                  Pausado
+                </th>
               </tr>
             </thead>
             <tbody>
               {status.whatsappQueues.map((queue) => (
                 <tr key={queue.channelId} className="border-b">
-                  <td className="px-3 py-2 font-mono text-xs">{queue.channelId.slice(0, 12)}</td>
+                  <td className="px-3 py-2 font-mono text-xs">
+                    {queue.channelId.slice(0, 12)}
+                  </td>
                   <td className="px-3 py-2">{queue.activeState ?? "-"}</td>
                   <td className="px-3 py-2">{queue.total}</td>
                   <td className="px-3 py-2">{queue.deliveryUncertain}</td>
-                  <td className="sticky right-0 bg-white px-3 py-2">{String(queue.paused)}</td>
+                  <td className="sticky right-0 bg-white px-3 py-2">
+                    {String(queue.paused)}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -204,7 +252,10 @@ export default async function OperationsPage() {
         ) : (
           <ul className="mt-3 grid gap-2 text-sm">
             {findings.map((finding, index) => (
-              <li key={`${finding.code}-${index}`} className="rounded border p-3">
+              <li
+                key={`${finding.code}-${index}`}
+                className="rounded border p-3"
+              >
                 <strong>{finding.severity}</strong> — {finding.code}
                 <div className="mt-1 text-xs">Ação: {finding.action}</div>
               </li>
@@ -216,13 +267,29 @@ export default async function OperationsPage() {
       <section className="rounded-md border bg-white p-4">
         <h2 className="font-semibold">Comandos locais somente leitura</h2>
         <div className="mt-3 grid gap-2">
-          {["npm run ops:preflight", "npm run ops:status", "npm run ops:audit-state", "npm run tracking:status", "npm run tracking:preflight", "npm run attribution:status", "npm run attribution:preflight", "npm run ops:backup-status", "npm run ops:burn-in:status", "npm run ops:burn-in:report"].map(
-            (command) => (
-              <code key={command} className="select-all rounded bg-slate-950 p-2 text-xs text-white">
-                {command}
-              </code>
-            ),
-          )}
+          {[
+            "npm run ops:preflight",
+            "npm run ops:status",
+            "npm run ops:audit-state",
+            "npm run discovery:multi-category:status",
+            "npm run discovery:multi-category:preflight",
+            "npm run discovery:multi-category:preview",
+            "npm run discovery:multi-category:run -- --dry-run",
+            "npm run tracking:status",
+            "npm run tracking:preflight",
+            "npm run attribution:status",
+            "npm run attribution:preflight",
+            "npm run ops:backup-status",
+            "npm run ops:burn-in:status",
+            "npm run ops:burn-in:report",
+          ].map((command) => (
+            <code
+              key={command}
+              className="select-all rounded bg-slate-950 p-2 text-xs text-white"
+            >
+              {command}
+            </code>
+          ))}
         </div>
       </section>
     </AdminShell>
