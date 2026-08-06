@@ -24,6 +24,16 @@ const pages = [
 const source = (path: string) =>
   readFileSync(resolve(process.cwd(), "src/app", path), "utf8");
 
+const asChildConsumerPages = [
+  "page.tsx",
+  "produtos/page.tsx",
+  "ofertas/page.tsx",
+  "ofertas/nova/offer-form.tsx",
+  "ofertas/affiliate-links/page.tsx",
+  "integracoes/page.tsx",
+  "integracoes/mercado-livre/page.tsx",
+];
+
 describe("dashboard page migration contract", () => {
   it.each(pages)("keeps %s inside the authenticated AdminShell", (page) => {
     expect(source(page)).toContain("<AdminShell");
@@ -40,6 +50,28 @@ describe("dashboard page migration contract", () => {
     expect(clientUi).not.toMatch(
       /playwright|chromium\.launch|dispatch-authorized|sendMessage\(/i,
     );
+  });
+
+  it("renders the dashboard Revisar ofertas action through a polymorphic link", () => {
+    const dashboard = source("page.tsx");
+    expect(dashboard).toMatch(
+      /<Button\s+asChild\s+variant="outline">\s*<Link\s+href="\/ofertas">Revisar ofertas<\/Link>\s*<\/Button>/,
+    );
+  });
+
+  it("keeps every Button asChild consumer composed with one Link or anchor", () => {
+    const consumers = asChildConsumerPages
+      .map((path) => source(path))
+      .join("\n");
+    const openings = consumers.match(/<Button\b(?=[^>]*\basChild\b)[^>]*>/g) ?? [];
+    const validCompositions =
+      consumers.match(
+        /<Button\b(?=[^>]*\basChild\b)[^>]*>\s*<(Link|a)\b[\s\S]*?<\/\1>\s*<\/Button>/g,
+      ) ?? [];
+
+    expect(openings.length).toBeGreaterThan(0);
+    expect(validCompositions).toHaveLength(openings.length);
+    expect(openings.every((opening) => !/\bloading\b/.test(opening))).toBe(true);
   });
 
   it("does not render the saved Mercado Livre cookie", () => {
