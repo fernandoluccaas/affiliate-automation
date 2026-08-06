@@ -80,7 +80,7 @@ Há três preferências: sistema, claro e escuro. A preferência é persistida e
 
 ## Componentes compartilhados
 
-- `Button`: variantes primary/default, secondary, outline, ghost, danger e link; tamanhos, loading e bloqueio de clique duplo. O componente Ã© uma fronteira cliente explÃ­cita para compatibilidade com React Server Components e Radix Slot. As variantes CSS ficam no mÃ³dulo puro `button-variants.ts`, que pode ser usado por Server Components sem criar handlers. Em `asChild`, o Ãºnico filho continua sendo o elemento interativo; loading e disabled usam `aria-busy`/`aria-disabled` e bloqueio no cliente sem envolver links em botÃµes.
+- `Button`: variantes primary/default, secondary, outline, ghost, danger e link; tamanhos, loading e bloqueio de clique duplo. O componente é uma fronteira cliente explícita para compatibilidade com React Server Components e Radix Slot. As variantes CSS ficam no módulo puro `button-variants.ts`, que pode ser usado por Server Components sem criar handlers. Em `asChild`, o único filho continua sendo o elemento interativo; loading e disabled usam `aria-busy`/`aria-disabled` e bloqueio no cliente sem envolver links em botões.
 - `Card`: cabeçalho, título, descrição e conteúdo consistentes.
 - `StatusBadge`: tradução e tom único para estados de integração, oferta, publicação, worker e alerta.
 - `Alert`: sucesso, informação, aviso e perigo com ícone e regiões live quando necessário.
@@ -134,3 +134,32 @@ Os testes consultam role, name, heading, status e alert. Não há snapshots de p
 - A página Mercado Livre ainda agrega muitos dados porque cada query e action existente foi preservada. As responsabilidades visuais foram separadas por subnavegação e componentes compartilhados; uma divisão adicional das queries exigiria uma refatoração de backend fora desta fase.
 - Tabelas operacionais com muitos campos continuam disponíveis para diagnóstico, mas agora têm scroll contido e detalhes recolhíveis. Não foram removidos campos.
 - O dashboard não executa dispatch WhatsApp, worker, supervisor, imports ou publicação. Os comandos mostrados são texto copiável e continuam sendo executados apenas no terminal local.
+
+## Interações locais do Mercado Livre
+
+A rota `/integracoes/mercado-livre` permanece um Server Component e entrega os
+dados iniciais como DTOs serializáveis. Quatro ilhas cliente pequenas cuidam das
+interações que precisam preservar o contexto visual:
+
+- o seletor hierárquico abre subcategorias, volta pelo histórico local, testa e
+  adiciona categorias folha sem mudar a URL;
+- o formulário de discovery salva a configuração sem recarregar a página e
+  mantém valores ainda não enviados;
+- a sessão afiliada salva, valida, atualiza tag, testa links e processa links
+  pendentes com feedback no próprio painel;
+- os diagnósticos de PRODUCT e o probe de categoria exibem resultados
+  sanitizados inline, sem transportar payloads pela query string;
+- a importação manual continua usando o serviço de discovery existente, mas o
+  resumo retorna ao botão sem redirect e sem recarregar a rota;
+- respostas fora de ordem são descartadas por uma sequência de requisição;
+- loading é localizado na ação em andamento, erros ficam junto ao componente e
+  sucessos são anunciados com regiões `aria-live`;
+- uma categoria adicionada atualiza também a tabela de configuração, sem
+  remontar a página;
+- as actions retornam unions tipadas de sucesso/erro e nunca serializam cookie,
+  CSRF, tokens ou outros segredos.
+
+O HTML mantém formulários progressivos dentro de `noscript` para ambientes sem
+JavaScript. OAuth, importações e diagnósticos avançados continuam separados;
+nenhuma regra de geração de `meli.la`, descoberta ou publicação foi movida para
+o cliente.

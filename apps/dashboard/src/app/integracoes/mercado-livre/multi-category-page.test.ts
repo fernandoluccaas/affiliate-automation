@@ -33,6 +33,6 @@ describe("Mercado Livre multi-category dashboard", () => {
     expect(source).toContain("Seções da integração Mercado Livre");
     expect(source).toContain("Configuração avançada da sessão");
     expect(source).toContain("Opções avançadas");
-    expect(source).toContain('id="diagnosticos"');
+    expect(source).toContain("<DiagnosticsPanel");
   });
 });
