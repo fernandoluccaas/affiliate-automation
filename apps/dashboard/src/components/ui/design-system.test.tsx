@@ -87,6 +87,23 @@ describe("dashboard design system", () => {
     expect(onClick).not.toHaveBeenCalled();
   });
 
+  it("keeps asChild disabled structurally valid and blocks activation", () => {
+    const onClick = vi.fn();
+    render(
+      <Button asChild disabled onClick={onClick}>
+        <Link href="/ofertas">Revisar ofertas</Link>
+      </Button>,
+    );
+    const link = screen.getByRole("link", { name: "Revisar ofertas" });
+    expect(link).toHaveAttribute("aria-disabled", "true");
+    expect(link.tagName).toBe("A");
+    expect(link.closest("button")).toBeNull();
+
+    const click = new MouseEvent("click", { bubbles: true, cancelable: true });
+    expect(link.dispatchEvent(click)).toBe(false);
+    expect(onClick).not.toHaveBeenCalled();
+  });
+
   it("exposes semantic button loading and alert feedback", () => {
     render(
       <>

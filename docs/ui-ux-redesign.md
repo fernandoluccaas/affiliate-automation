@@ -80,7 +80,7 @@ Há três preferências: sistema, claro e escuro. A preferência é persistida e
 
 ## Componentes compartilhados
 
-- `Button`: variantes primary/default, secondary, outline, ghost, danger e link; tamanhos, loading e bloqueio de clique duplo.
+- `Button`: variantes primary/default, secondary, outline, ghost, danger e link; tamanhos, loading e bloqueio de clique duplo. O componente Ã© uma fronteira cliente explÃ­cita para compatibilidade com React Server Components e Radix Slot. As variantes CSS ficam no mÃ³dulo puro `button-variants.ts`, que pode ser usado por Server Components sem criar handlers. Em `asChild`, o Ãºnico filho continua sendo o elemento interativo; loading e disabled usam `aria-busy`/`aria-disabled` e bloqueio no cliente sem envolver links em botÃµes.
 - `Card`: cabeçalho, título, descrição e conteúdo consistentes.
 - `StatusBadge`: tradução e tom único para estados de integração, oferta, publicação, worker e alerta.
 - `Alert`: sucesso, informação, aviso e perigo com ícone e regiões live quando necessário.

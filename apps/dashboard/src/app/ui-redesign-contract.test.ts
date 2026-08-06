@@ -24,6 +24,9 @@ const pages = [
 const source = (path: string) =>
   readFileSync(resolve(process.cwd(), "src/app", path), "utf8");
 
+const componentSource = (path: string) =>
+  readFileSync(resolve(process.cwd(), "src/components", path), "utf8");
+
 const asChildConsumerPages = [
   "page.tsx",
   "produtos/page.tsx",
@@ -62,6 +65,7 @@ describe("dashboard page migration contract", () => {
   it("keeps every Button asChild consumer composed with one Link or anchor", () => {
     const consumers = asChildConsumerPages
       .map((path) => source(path))
+      .concat(componentSource("empty-state.tsx"))
       .join("\n");
     const openings = consumers.match(/<Button\b(?=[^>]*\basChild\b)[^>]*>/g) ?? [];
     const validCompositions =
