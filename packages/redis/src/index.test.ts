@@ -4,6 +4,7 @@ import {
   OWNED_LOCK_EXTEND_SCRIPT,
   OWNED_LOCK_RELEASE_SCRIPT,
   acquireLock,
+  consumeFixedWindow,
   getRedisHealth,
   type AtomicRedisClient,
 } from "./index";
@@ -199,5 +200,26 @@ describe("redis abstraction", () => {
 
     await expect(lockA.extend(30_000)).resolves.toBe(false);
     expect(redis.state()).toEqual({ value: "owner-b", ttlMs: 9_000 });
+  });
+
+  it("increments a deterministic fixed window atomically", async () => {
+    let count = 0;
+    const client = {
+      eval: async () => {
+        count += 1;
+        return count;
+      },
+    };
+    const env = {
+      UPSTASH_REDIS_REST_URL: "https://test.upstash.invalid",
+      UPSTASH_REDIS_REST_TOKEN: "test-only",
+    };
+    await expect(consumeFixedWindow("rate:safe", 1, 60, { env, upstashClient: client })).resolves.toMatchObject({ available: true, allowed: true, count: 1 });
+    await expect(consumeFixedWindow("rate:safe", 1, 60, { env, upstashClient: client })).resolves.toMatchObject({ available: true, allowed: false, count: 2 });
+  });
+
+  it("fails the limiter closed when Redis or configuration is unavailable", async () => {
+    await expect(consumeFixedWindow("rate:safe", 30, 60, { env: {} })).resolves.toMatchObject({ available: false, allowed: false, errorCode: "REDIS_UNAVAILABLE" });
+    await expect(consumeFixedWindow("rate:safe", 0, 60, { env: {} })).resolves.toMatchObject({ available: false, allowed: false, errorCode: "INVALID_RATE_LIMIT_CONFIGURATION" });
   });
 });

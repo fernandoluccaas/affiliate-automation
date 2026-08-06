@@ -1,0 +1,2 @@
+externalEventId;externalOrderId;occurredAt;amount;currency;percentage;status;conversionExternalEventId
+fixture-generic-commission-001;fixture-generic-order-001;02/08/2026 09:00:00;9,99;BRL;10,0;ADJUSTED;fixture-generic-conv-001

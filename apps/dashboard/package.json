@@ -22,6 +22,7 @@
     "@affiliate/redis": "0.1.0",
     "@affiliate/scoring": "0.1.0",
     "@affiliate/shared": "0.1.0",
+    "@affiliate/tracking": "0.1.0",
     "@affiliate/validation": "0.1.0",
     "@hookform/resolvers": "^5.1.1",
     "@prisma/client": "^6.12.0",

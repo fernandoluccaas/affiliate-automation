@@ -1,0 +1,2 @@
+externalEventId;externalOrderId;occurredAt;amount;currency;offerReference
+fixture-generic-conv-001;fixture-generic-order-001;01/08/2026 14:30:00;99,90;BRL;FIXTURE-PRODUCT-001

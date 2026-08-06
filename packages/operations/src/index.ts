@@ -23,6 +23,11 @@ import {
 } from "@affiliate/database";
 import { getRedisHealth } from "@affiliate/redis";
 import {
+  collectTrackingOperationalState,
+  trackingConfiguration,
+  trackingPreflight,
+} from "@affiliate/tracking";
+import {
   DEFAULT_WORKER_STALE_AFTER_MS,
   resolveWorkerHealthStatus,
 } from "@affiliate/shared";
@@ -848,6 +853,25 @@ export async function collectOperationalStatus(
     database = "ERROR";
   }
   const redis = await getRedisHealth();
+  const tracking = await trackingPreflight(process.env, {
+    redisHealth: async () => ({
+      status: redis.status,
+      mode: redis.mode,
+    }),
+  });
+  const trackingOperations =
+    database === "OK"
+      ? await collectTrackingOperationalState(client, now)
+      : {
+          available: false,
+          lastConversionImport: null,
+          lastCommissionImport: null,
+          unattributedConversions: 0,
+          orphanCommissions: 0,
+          abandonedImports: 0,
+          failedImports: 0,
+          duplicateImports: 0,
+        };
   const workerSetting =
     database === "OK"
       ? await client.systemSetting.findUnique({
@@ -950,6 +974,15 @@ export async function collectOperationalStatus(
     status,
     database,
     redis: redis.status === "ok" ? "OK" : "ERROR",
+    tracking: {
+      enabled: tracking.enabled,
+      state: tracking.state,
+      rateLimiter: tracking.redis,
+      fingerprintSecretConfigured: tracking.fingerprintSecretConfigured,
+      readyForWrites: tracking.readyForTrackingWrites,
+      redirectAvailable: tracking.redirectAvailable,
+      ...trackingOperations,
+    },
     migrations: {
       status: appliedMigrations === expectedMigrations ? "UP_TO_DATE" : "PENDING",
       expected: expectedMigrations,
@@ -1081,7 +1114,7 @@ export async function collectStateAudit(
     burnInActive:
       workerRecord.mode === "BURN_IN" && workerRecord.state === "ONLINE",
   });
-  return auditOperationalSnapshot({
+  const findings = auditOperationalSnapshot({
     now,
     heartbeat: worker?.value,
     heartbeatUpdatedAt: worker?.updatedAt ?? null,
@@ -1094,6 +1127,51 @@ export async function collectStateAudit(
     pendingAttempts: attempts,
     workerContext,
   });
+  const tracking = trackingConfiguration(process.env);
+  const trackingOperations = await collectTrackingOperationalState(client, now);
+  if (tracking.enabled && !tracking.fingerprintSecretConfigured) {
+    findings.push({
+      code: "TRACKING_FINGERPRINT_SECRET_MISSING",
+      severity: "WARNING",
+      action: "CONFIGURE_TRACKING_FINGERPRINT_SECRET",
+    });
+  }
+  if (trackingOperations.unattributedConversions > 0) {
+    findings.push({
+      code: "CONVERSIONS_UNATTRIBUTED",
+      severity: "HUMAN_REVIEW_REQUIRED",
+      action: "REVIEW_ATTRIBUTION_REPORT",
+    });
+  }
+  if (trackingOperations.orphanCommissions > 0) {
+    findings.push({
+      code: "COMMISSIONS_ORPHANED",
+      severity: "HUMAN_REVIEW_REQUIRED",
+      action: "REVIEW_COMMISSION_REPORT",
+    });
+  }
+  if (trackingOperations.abandonedImports > 0) {
+    findings.push({
+      code: "FINANCIAL_IMPORT_ABANDONED",
+      severity: "WARNING",
+      action: "REVIEW_FINANCIAL_IMPORT_LOCKS_AND_JOBS",
+    });
+  }
+  if (trackingOperations.failedImports > 0) {
+    findings.push({
+      code: "FINANCIAL_IMPORT_FAILED",
+      severity: "WARNING",
+      action: "REVIEW_SANITIZED_IMPORT_ERRORS",
+    });
+  }
+  if (trackingOperations.duplicateImports > 0) {
+    findings.push({
+      code: "FINANCIAL_IMPORT_DUPLICATE",
+      severity: "INFO",
+      action: "NO_AUTOMATIC_ACTION_REQUIRED",
+    });
+  }
+  return findings;
 }
 
 function fingerprintRows(rows: unknown[]) {

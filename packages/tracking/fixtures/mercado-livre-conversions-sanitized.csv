@@ -1,0 +1,3 @@
+externalEventId,externalOrderId,externalItemId,occurredAt,amount,currency,affiliateSlug,offerReference,attributionWindowHours
+fixture-ml-conv-001,fixture-order-001,fixture-item-001,2026-08-01T12:00:00-03:00,149.90,BRL,fixture-ml-link,MLB-FICTITIOUS-001,168
+fixture-ml-conv-002,fixture-order-001,fixture-item-002,2026-08-01T12:01:00-03:00,39.90,BRL,,,168
