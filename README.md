@@ -163,6 +163,25 @@ Only `affiliateUrl` plus one identifier is required. A preview separates valid, 
 
 Affiliate URLs must be absolute HTTPS URLs without embedded credentials. Mercado Livre accepts only `meli.la`, `mercadolivre.com.br`, `mercadolibre.com` and legitimate subdomains. The original URL and affiliate URL remain separate.
 
+## Tracking and attribution
+
+The hardened `/go/[slug]` route validates marketplace destinations before a
+redirect, applies atomic Redis rate limits and short-window deduplication, and
+stores only a temporary HMAC fingerprint, referer hostname, and coarse
+user-agent category. A valid redirect remains available when tracking is
+degraded; unreliable clicks are not written or retried.
+
+Manual canonical CSV inspection and dry-run are available for conversions and
+commissions. Confirmed financial imports are disabled by default, require an
+explicit flag plus Redis, and use checksum/event idempotency and transactional
+ImportJob auditing. The authenticated `/resultados` page is read-only and keeps
+currencies separate. Shopee report support remains
+`WAITING_FOR_OFFICIAL_REPORT`; no report columns or APIs are invented.
+
+See [Tracking, attribution and financial reports](docs/tracking-attribution.md)
+for privacy details, canonical columns, commands, locks, rollback, Sub IDs,
+retention, analytics, and troubleshooting.
+
 The worker processes queued `AFFILIATE_LINK_BATCH` jobs and isolates expiration, discovery, refresh, scheduling, retries and publication as independent stages. A failed discovery produces `PARTIAL` while refresh and ready publications continue. Refresh records `selected`, `refreshed`, `unchanged`, `newVersions`, `notFound`, `failed` and `affiliateUrlsPreserved`; it never replaces an existing affiliate URL with `null`.
 
 Mercado Livre publications use `DIRECT_AFFILIATE_LINK`. A missing or invalid affiliate URL prevents scheduling and publication; there is no fallback to the original URL.

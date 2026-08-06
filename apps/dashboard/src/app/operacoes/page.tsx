@@ -60,6 +60,36 @@ export default async function OperationsPage() {
         <StatusCard title="PostgreSQL" value={status.database} />
         <StatusCard title="Redis" value={status.redis} />
         <StatusCard
+          title="Tracking"
+          value={status.tracking.state}
+          detail={`rate limiter ${status.tracking.rateLimiter} / redirect ${String(status.tracking.redirectAvailable)}`}
+        />
+        <StatusCard
+          title="Secret de fingerprint"
+          value={status.tracking.fingerprintSecretConfigured ? "CONFIGURADO" : "AUSENTE"}
+          detail="somente indicador booleano"
+        />
+        <StatusCard
+          title="Última importação de conversões"
+          value={status.tracking.lastConversionImport?.status ?? "AUSENTE"}
+          detail={formatDateTime(status.tracking.lastConversionImport?.createdAt ?? null)}
+        />
+        <StatusCard
+          title="Última importação de comissões"
+          value={status.tracking.lastCommissionImport?.status ?? "AUSENTE"}
+          detail={formatDateTime(status.tracking.lastCommissionImport?.createdAt ?? null)}
+        />
+        <StatusCard
+          title="Conversões não atribuídas"
+          value={String(status.tracking.unattributedConversions)}
+          detail="revisão manual pelo relatório"
+        />
+        <StatusCard
+          title="Comissões órfãs"
+          value={String(status.tracking.orphanCommissions)}
+          detail={`imports abandonados ${status.tracking.abandonedImports}`}
+        />
+        <StatusCard
           title="Worker"
           value={status.worker.state}
           detail={`heartbeat ${formatDateTime(status.worker.lastHeartbeatAt)}`}
@@ -186,7 +216,7 @@ export default async function OperationsPage() {
       <section className="rounded-md border bg-white p-4">
         <h2 className="font-semibold">Comandos locais somente leitura</h2>
         <div className="mt-3 grid gap-2">
-          {["npm run ops:preflight", "npm run ops:status", "npm run ops:audit-state", "npm run ops:backup-status", "npm run ops:burn-in:status", "npm run ops:burn-in:report"].map(
+          {["npm run ops:preflight", "npm run ops:status", "npm run ops:audit-state", "npm run tracking:status", "npm run tracking:preflight", "npm run attribution:status", "npm run attribution:preflight", "npm run ops:backup-status", "npm run ops:burn-in:status", "npm run ops:burn-in:report"].map(
             (command) => (
               <code key={command} className="select-all rounded bg-slate-950 p-2 text-xs text-white">
                 {command}

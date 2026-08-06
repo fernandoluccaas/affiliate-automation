@@ -17,12 +17,22 @@ export async function GET() {
         workerState: status.worker.state,
         lastHeartbeatAt: status.worker.lastHeartbeatAt,
         humanActionRequired: status.workerContext.humanActionRequired,
+        tracking: {
+          enabled: status.tracking.enabled,
+          state: status.tracking.state,
+          rateLimiter: status.tracking.rateLimiter,
+          fingerprintSecretConfigured:
+            status.tracking.fingerprintSecretConfigured,
+          readyForWrites: status.tracking.readyForWrites,
+          redirectAvailable: status.tracking.redirectAvailable,
+        },
         checks: {
           database: status.database,
           redis: status.redis,
           migrations: status.migrations.status,
           build: status.build,
           worker: status.worker.state,
+          tracking: status.tracking.state,
         },
       },
       { status: status.status === "NOT_READY" ? 503 : 200 },

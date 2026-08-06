@@ -6,6 +6,8 @@ export const OWNED_LOCK_EXTEND_SCRIPT =
   "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('pexpire', KEYS[1], ARGV[2]) else return 0 end";
 export const OWNED_LOCK_RELEASE_SCRIPT =
   "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end";
+export const FIXED_WINDOW_INCREMENT_SCRIPT =
+  "local current = redis.call('incr', KEYS[1]); if current == 1 then redis.call('pexpire', KEYS[1], ARGV[1]) end; return current";
 
 export type AtomicRedisClient = {
   set(
@@ -42,6 +44,16 @@ export type LockHandle = {
   failureReason?: "REDIS_UNAVAILABLE" | "LOCK_ALREADY_HELD";
   extend(ttlMs: number): Promise<boolean>;
   release(): Promise<void>;
+};
+
+export type FixedWindowRateLimitResult = {
+  available: boolean;
+  allowed: boolean;
+  count: number;
+  limit: number;
+  retryAfterSeconds: number;
+  mode: RedisMode;
+  errorCode?: "REDIS_UNAVAILABLE" | "INVALID_RATE_LIMIT_CONFIGURATION";
 };
 
 type RedisConfig =
@@ -304,6 +316,84 @@ export async function acquireLock(
     };
   } catch {
     return unavailableLock(key, token, "redis-url", requireRedis);
+  }
+}
+
+export async function consumeFixedWindow(
+  key: string,
+  limit: number,
+  windowSeconds: number,
+  options: {
+    env?: NodeJS.ProcessEnv;
+    upstashClient?: Pick<AtomicRedisClient, "eval">;
+  } = {},
+): Promise<FixedWindowRateLimitResult> {
+  const env = options.env ?? process.env;
+  const config = getRedisConfig(env);
+  if (
+    !Number.isSafeInteger(limit) ||
+    limit <= 0 ||
+    !Number.isSafeInteger(windowSeconds) ||
+    windowSeconds <= 0
+  ) {
+    return {
+      available: false,
+      allowed: false,
+      count: 0,
+      limit,
+      retryAfterSeconds: 0,
+      mode: config.mode,
+      errorCode: "INVALID_RATE_LIMIT_CONFIGURATION",
+    };
+  }
+  if (config.mode === "unavailable") {
+    return {
+      available: false,
+      allowed: false,
+      count: 0,
+      limit,
+      retryAfterSeconds: windowSeconds,
+      mode: config.mode,
+      errorCode: "REDIS_UNAVAILABLE",
+    };
+  }
+  const ttlMs = windowSeconds * 1_000;
+  try {
+    let count: number;
+    if (config.mode === "upstash") {
+      const redis = options.upstashClient ?? new Redis({ url: config.url, token: config.token });
+      count = Number(
+        await redis.eval(FIXED_WINDOW_INCREMENT_SCRIPT, [key], [ttlMs]),
+      );
+    } else {
+      const reply = await redisUrlCommand(config.url, [
+        "EVAL",
+        FIXED_WINDOW_INCREMENT_SCRIPT,
+        1,
+        key,
+        ttlMs,
+      ]);
+      count = reply.startsWith(":") ? Number(reply.slice(1).trim()) : Number.NaN;
+    }
+    if (!Number.isSafeInteger(count) || count <= 0) throw new Error("INVALID_REDIS_REPLY");
+    return {
+      available: true,
+      allowed: count <= limit,
+      count,
+      limit,
+      retryAfterSeconds: windowSeconds,
+      mode: config.mode,
+    };
+  } catch {
+    return {
+      available: false,
+      allowed: false,
+      count: 0,
+      limit,
+      retryAfterSeconds: windowSeconds,
+      mode: config.mode,
+      errorCode: "REDIS_UNAVAILABLE",
+    };
   }
 }
 

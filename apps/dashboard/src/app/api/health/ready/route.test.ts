@@ -15,6 +15,14 @@ describe("dashboard readiness", () => {
       migrations: { status: "UP_TO_DATE" },
       build: "AVAILABLE",
       worker: { state: "ONLINE" },
+      tracking: {
+        enabled: true,
+        state: "CONFIGURED",
+        rateLimiter: "AVAILABLE",
+        fingerprintSecretConfigured: true,
+        readyForWrites: true,
+        redirectAvailable: true,
+      },
       workerContext: { humanActionRequired: true },
     });
     const { GET } = await import("./route");
@@ -33,6 +41,14 @@ describe("dashboard readiness", () => {
       migrations: { status: "PENDING" },
       build: "AVAILABLE",
       worker: { state: "ONLINE" },
+      tracking: {
+        enabled: true,
+        state: "CONFIGURED",
+        rateLimiter: "AVAILABLE",
+        fingerprintSecretConfigured: true,
+        readyForWrites: true,
+        redirectAvailable: true,
+      },
       workerContext: { humanActionRequired: true },
     });
     const { GET } = await import("./route");
@@ -62,6 +78,14 @@ describe("dashboard readiness", () => {
         lastHeartbeatAt: "2026-08-05T11:59:59.000Z",
       },
       workerContext: { humanActionRequired: false },
+      tracking: {
+        enabled: true,
+        state: "CONFIGURED",
+        rateLimiter: "AVAILABLE",
+        fingerprintSecretConfigured: true,
+        readyForWrites: true,
+        redirectAvailable: true,
+      },
     });
     const { GET } = await import("./route");
     const response = await GET();
@@ -73,6 +97,11 @@ describe("dashboard readiness", () => {
       blockedCycles: 4,
       workerState: "ONLINE",
       lastHeartbeatAt: "2026-08-05T11:59:59.000Z",
+      tracking: {
+        state: "CONFIGURED",
+        fingerprintSecretConfigured: true,
+        readyForWrites: true,
+      },
     });
     expect(JSON.stringify(body)).not.toMatch(/\bpid\b|postgresql:\/\/|redis:\/\//i);
   });
