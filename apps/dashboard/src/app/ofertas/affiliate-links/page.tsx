@@ -4,6 +4,7 @@ import { prisma } from "@affiliate/database";
 import { AdminShell } from "@/components/admin-shell";
 import { EmptyState } from "@/components/empty-state";
 import { Button } from "@/components/ui/button";
+import { Alert } from "@/components/ui/alert";
 import { AffiliateLinkBatch } from "./affiliate-link-batch";
 
 export const dynamic = "force-dynamic";
@@ -39,10 +40,7 @@ export default async function AffiliateLinksPage() {
   });
   const offers = products
     .flatMap((product) => product.offers)
-    .filter(
-      (offer) =>
-        offer.status === "READY_FOR_AFFILIATE_LINK",
-    )
+    .filter((offer) => offer.status === "READY_FOR_AFFILIATE_LINK")
     .map((offer) => ({
       ...offer,
       currentPrice: offer.currentPrice.toString(),
@@ -62,15 +60,14 @@ export default async function AffiliateLinksPage() {
         </span>
       </div>
 
-      <div className="rounded-md border bg-[var(--background)] px-4 py-3 text-sm">
-        <div className="font-medium">Links gerados no Portal oficial</div>
-        <p className="mt-1 text-[var(--muted-foreground)]">
+      <Alert tone="info" title="Links gerados no Portal oficial">
+        <p>
           O sistema mantém a URL original separada e nunca a usa como link de
           afiliado. Gere o link no Portal do Mercado Livre e use um dos três
           métodos abaixo. Toda alteração passa pelo versionamento, validação e
           score normais.
         </p>
-      </div>
+      </Alert>
 
       {offers.length === 0 ? (
         <EmptyState

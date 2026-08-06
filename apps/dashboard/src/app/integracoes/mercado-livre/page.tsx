@@ -4,7 +4,6 @@ import { prisma, type Prisma } from "@affiliate/database";
 import {
   createMercadoLivreConnector,
   parseMercadoLivreAffiliateTags,
-  sanitizeMercadoLivreAffiliateErrorMessage,
   type MercadoLivreCategory,
 } from "@affiliate/marketplace-connectors";
 import {
@@ -20,6 +19,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { Alert } from "@/components/ui/alert";
+import { StatusBadge } from "@/components/ui/status-badge";
+import { PageTabs } from "@/components/ui/tabs";
 import {
   addMercadoLivreCategoryAction,
   diagnoseMercadoLivreProductAction,
@@ -39,6 +41,21 @@ import {
   testMercadoLivreAffiliateSessionAction,
 } from "@/lib/mercadolivre-affiliate-actions";
 import { MercadoLivreImportButton } from "./mercado-livre-import-button";
+import {
+  affiliateSessionStatusLabel,
+  importJobStatusLabel,
+  jsonStringArray,
+  lastRunMetrics,
+  lastRunObjectMetrics,
+  messageText,
+  multiCategoryRunSummary,
+  probeCause,
+  probeSample,
+  productProbeRejectionReasons,
+  productProbeSamples,
+  sanitizedImportError,
+  single,
+} from "./mercado-livre-view-model";
 
 export const dynamic = "force-dynamic";
 
@@ -47,304 +64,6 @@ type MercadoLivrePageProps = {
 };
 
 type SearchParamRecord = Record<string, string | string[] | undefined>;
-
-function messageText(message?: string | string[]) {
-  const value = Array.isArray(message) ? message[0] : message;
-
-  if (value === "config-saved") return "Configuracao salva.";
-  if (value === "config-invalid") return "Revise os campos da configuracao.";
-  if (value === "category-added") return "Categoria folha adicionada.";
-  if (value === "category-invalid") return "Informe um ID de categoria valido.";
-  if (value === "category-not-found")
-    return "Categoria nao encontrada no Mercado Livre.";
-  if (value === "category-api-error")
-    return "Nao foi possivel consultar a categoria no Mercado Livre.";
-  if (value === "category-not-leaf") {
-    return "Esta categoria possui subcategorias. Selecione uma categoria mais especifica para usar o ranking de mais vendidos.";
-  }
-  if (value === "category-tested") return "Teste de categoria concluido.";
-  if (value === "sync-ok")
-    return "Importação dos mais vendidos concluída. Consulte as métricas reais da última execução.";
-  if (value === "sync-partial")
-    return "Importação concluída parcialmente. Consulte as métricas e alertas.";
-  if (value === "sync-already-running")
-    return "Ja existe uma sincronizacao Mercado Livre em andamento.";
-  if (value === "sync-source-disabled")
-    return "Discovery por highlights esta desabilitado.";
-  if (value === "sync-failed")
-    return "A importação falhou. Veja os alertas antes de tentar novamente.";
-  if (value === "category-search-tested")
-    return "Probe de busca da categoria concluido.";
-  if (value === "product-diagnosed") return "Diagnostico de PRODUCT concluido.";
-  if (value === "product-diagnostic-invalid")
-    return "Informe um PRODUCT ID valido no formato MLB seguido de numeros.";
-  if (value === "product-diagnostic-error")
-    return "Nao foi possivel diagnosticar o PRODUCT na API oficial.";
-  if (value === "product-pdp-affiliate-tested")
-    return "O Portal de Afiliados aceitou a PDP resolvida do catalogo.";
-  if (value === "product-pdp-url-unavailable")
-    return "Nao foi possivel resolver uma PDP oficial ou canonica segura; nenhum link foi solicitado.";
-  if (value === "product-pdp-affiliate-unsupported")
-    return "O Portal de Afiliados nao aceitou o permalink oficial da PDP.";
-  if (value === "product-pdp-affiliate-error")
-    return "Nao foi possivel testar o link afiliado da PDP.";
-  if (value === "affiliate-session-saved")
-    return "Sessão de afiliado salva e validada.";
-  if (value === "affiliate-session-tested")
-    return "Conexão com o Portal de Afiliados validada.";
-  if (value === "affiliate-session-cleared")
-    return "Sessão de afiliado removida.";
-  if (value === "affiliate-tag-selected") return "Tag de afiliado atualizada.";
-  if (value === "affiliate-test-link-generated")
-    return "Link meli.la de teste gerado pelo Portal de Afiliados.";
-  if (value === "affiliate-links-generated")
-    return "Geração dos links pendentes concluída.";
-  if (value === "affiliate-links-partial")
-    return "Alguns links foram gerados; os demais continuam pendentes.";
-  if (value === "affiliate-links-none")
-    return "Não há ofertas pendentes para gerar links.";
-  if (value === "affiliate-not-authorized")
-    return "Seu perfil não tem permissão para alterar esta integração.";
-  if (value === "affiliate-session-invalid")
-    return "Revise o cookie, o link de referência e a tag informados.";
-  if (value === "affiliate-session-expired")
-    return "O cookie do Portal de Afiliados expirou. Substitua-o para continuar.";
-  if (value === "affiliate-session-error")
-    return "Não foi possível validar a sessão de afiliado.";
-  return null;
-}
-
-function affiliateSessionStatusLabel(status?: string | null) {
-  if (status === "VALIDATING") return "Validando";
-  if (status === "CONNECTED") return "Conectado";
-  if (status === "EXPIRED") return "Cookie expirado";
-  if (status === "ERROR") return "Erro";
-  return "Não configurado";
-}
-
-function jsonStringArray(value: unknown) {
-  return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === "string")
-    : [];
-}
-
-function lastRunMetrics(value: unknown) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return [];
-  }
-
-  return Object.entries(value as Record<string, unknown>).filter(
-    ([, item]) => typeof item === "number",
-  );
-}
-
-function lastRunObjectMetrics(value: unknown) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return [];
-  }
-
-  return Object.entries(value as Record<string, unknown>)
-    .filter(
-      ([, item]) => item && typeof item === "object" && !Array.isArray(item),
-    )
-    .map(
-      ([key, item]) =>
-        [
-          key,
-          Object.entries(item as Record<string, unknown>).filter(
-            ([, count]) => typeof count === "number",
-          ),
-        ] as const,
-    )
-    .filter(([, entries]) => entries.length > 0);
-}
-
-function multiCategoryRunSummary(value: unknown) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const multiCategory = (value as Record<string, unknown>).multiCategory;
-  if (
-    !multiCategory ||
-    typeof multiCategory !== "object" ||
-    Array.isArray(multiCategory)
-  ) {
-    return null;
-  }
-  const record = multiCategory as Record<string, unknown>;
-  const categories = Array.isArray(record.categories)
-    ? record.categories.flatMap((entry) => {
-        if (!entry || typeof entry !== "object" || Array.isArray(entry))
-          return [];
-        const category = entry as Record<string, unknown>;
-        return typeof category.categoryId === "string"
-          ? [
-              {
-                categoryId: category.categoryId,
-                requested: Number(category.requested ?? 0),
-                valid: Number(category.valid ?? 0),
-                rejected: Number(category.rejected ?? 0),
-                selected: Number(category.selected ?? 0),
-                quotaMet: category.quotaMet === true,
-                reason:
-                  typeof category.reason === "string" ? category.reason : null,
-              },
-            ]
-          : [];
-      })
-    : [];
-  const distribution = Array.isArray(record.distribution)
-    ? record.distribution.flatMap((entry) => {
-        if (!entry || typeof entry !== "object" || Array.isArray(entry))
-          return [];
-        const item = entry as Record<string, unknown>;
-        return typeof item.categoryId === "string"
-          ? [
-              {
-                position: Number(item.position ?? 0),
-                categoryId: item.categoryId,
-              },
-            ]
-          : [];
-      })
-    : [];
-  return {
-    categories,
-    distribution,
-    crossCategoryDuplicates: Number(record.crossCategoryDuplicates ?? 0),
-    quotaNotMet: Number(record.quotaNotMet ?? 0),
-  };
-}
-
-function importJobStatusLabel(status: string) {
-  if (status === "QUEUED") return "Na fila";
-  if (status === "RUNNING") return "Em execução";
-  if (status === "SUCCEEDED") return "Concluída";
-  if (status === "SUCCEEDED_WITH_ERRORS") return "Concluída com erros";
-  if (status === "FAILED") return "Falhou";
-  return status;
-}
-
-function sanitizedImportError(value: string | null) {
-  if (!value) return "-";
-
-  return sanitizeMercadoLivreAffiliateErrorMessage(value);
-}
-
-function single(value: string | string[] | undefined) {
-  return Array.isArray(value) ? value[0] : value;
-}
-
-function probeSample(value: string | string[] | undefined) {
-  const raw = single(value);
-
-  if (!raw) return [];
-
-  try {
-    const parsed = JSON.parse(raw);
-
-    return Array.isArray(parsed)
-      ? parsed
-          .filter(
-            (item): item is { itemId: string; title?: string } =>
-              item &&
-              typeof item === "object" &&
-              typeof (item as { itemId?: unknown }).itemId === "string",
-          )
-          .slice(0, 5)
-      : [];
-  } catch {
-    return [];
-  }
-}
-
-function probeCause(value: string | string[] | undefined) {
-  const raw = single(value);
-
-  if (!raw) return "-";
-
-  try {
-    const parsed = JSON.parse(raw);
-
-    if (!Array.isArray(parsed)) return "-";
-
-    const entries = parsed.flatMap((item) => {
-      if (!item || typeof item !== "object" || Array.isArray(item)) {
-        return [];
-      }
-
-      const cause = item as Record<string, unknown>;
-      const parts = [
-        cause.code,
-        cause.message,
-        cause.type,
-        cause.department,
-        cause.causeId,
-      ].filter((part): part is string => typeof part === "string" && !!part);
-
-      return parts.length > 0 ? [parts.join(": ")] : [];
-    });
-
-    return entries.length > 0 ? entries.join(" | ") : "-";
-  } catch {
-    return "-";
-  }
-}
-
-function productProbeRejectionReasons(value: string | string[] | undefined) {
-  const raw = single(value);
-
-  if (!raw) return [];
-
-  try {
-    const parsed = JSON.parse(raw);
-
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return [];
-    }
-
-    return Object.entries(parsed as Record<string, unknown>).filter(
-      (entry): entry is [string, number] =>
-        typeof entry[1] === "number" && entry[1] > 0,
-    );
-  } catch {
-    return [];
-  }
-}
-
-type ProductProbeSample = {
-  itemId: string;
-  summaryFieldsPresent: string[];
-  hydrationHttpStatus?: number;
-  hydratedStatus?: string;
-  hydratedCondition?: string;
-  hydratedAvailableQuantity?: number;
-  hydratedChannels?: string[];
-  hasPermalink?: boolean;
-  hasPrice?: boolean;
-  rejectedReason?: string;
-};
-
-function productProbeSamples(value: string | string[] | undefined) {
-  const raw = single(value);
-
-  if (!raw) return [];
-
-  try {
-    const parsed = JSON.parse(raw);
-
-    if (!Array.isArray(parsed)) return [];
-
-    return parsed
-      .filter(
-        (item): item is ProductProbeSample =>
-          item &&
-          typeof item === "object" &&
-          typeof (item as { itemId?: unknown }).itemId === "string",
-      )
-      .slice(0, 3);
-  } catch {
-    return [];
-  }
-}
 
 function CategorySearchAttempt({
   label,
@@ -377,7 +96,7 @@ function CategorySearchAttempt({
       <div className="text-sm font-medium">{label}</div>
       <dl className="grid gap-2">
         <Result
-          label="Modo de autenticacao"
+          label="Modo de autenticação"
           value={
             authenticationMode === "BEARER_TOKEN"
               ? "Bearer token (token oculto)"
@@ -424,7 +143,7 @@ function CategorySearchAttempt({
           value={single(result[`${prefix}BlockedBy`]) || "-"}
         />
         <Result
-          label="Classificacao do 403"
+          label="Classificação do 403"
           value={single(result[`${prefix}ForbiddenClassification`]) || "-"}
         />
       </dl>
@@ -434,7 +153,10 @@ function CategorySearchAttempt({
             Amostra
           </div>
           {sample.map((item) => (
-            <div key={item.itemId} className="rounded-md border bg-white p-2">
+            <div
+              key={item.itemId}
+              className="rounded-md border bg-[var(--surface)] p-2"
+            >
               <div className="text-xs font-medium">{item.itemId}</div>
               {item.title ? (
                 <div className="text-xs text-[var(--muted-foreground)]">
@@ -724,6 +446,7 @@ export default async function MercadoLivreIntegrationPage({
         })),
       )
     : categoryIds.map((categoryId) => ({ id: categoryId, details: null }));
+  const configuredCategoryIds = new Set(categoryIds);
   const testResult =
     single(params?.message) === "category-tested" ? params : null;
   const categorySearchResult =
@@ -742,14 +465,19 @@ export default async function MercadoLivreIntegrationPage({
   const generatedAffiliateUrl = single(params?.generatedAffiliateUrl);
   const affiliateEndpointMode = single(params?.affiliateEndpointMode);
   const generatedAt = single(params?.generatedAt);
+  const testedCategoryId = single(testResult?.categoryId);
+  const testedCategoryIsLeaf = single(testResult?.categoryLeaf) === "true";
+  const testedCategoryAlreadyConfigured = Boolean(
+    testedCategoryId && configuredCategoryIds.has(testedCategoryId),
+  );
 
   return (
-    <AdminShell currentPath="/integracoes" title="Mercado Livre">
+    <AdminShell currentPath="/integracoes/mercado-livre" title="Mercado Livre">
       <div className="flex flex-wrap gap-2">
         <Button asChild variant="outline">
           <Link href="/integracoes">
             <ArrowLeft aria-hidden="true" size={16} />
-            Integracoes
+            Integrações
           </Link>
         </Button>
         <Button asChild variant="outline">
@@ -765,13 +493,34 @@ export default async function MercadoLivreIntegrationPage({
       </div>
 
       {message ? (
-        <div className="rounded-md border bg-white px-4 py-3 text-sm">
+        <Alert
+          tone={
+            /falha|erro|inválid|expir/i.test(message)
+              ? "danger"
+              : /aten|pendente/i.test(message)
+                ? "warning"
+                : "success"
+          }
+          live
+        >
           {message}
-        </div>
+        </Alert>
       ) : null}
 
+      <PageTabs
+        label="Seções da integração Mercado Livre"
+        items={[
+          { label: "Visão geral", href: "#visao-geral", active: true },
+          { label: "Descoberta", href: "#descoberta" },
+          { label: "Categorias", href: "#categorias" },
+          { label: "Links afiliados", href: "#links-afiliados" },
+          { label: "Histórico", href: "#historico" },
+          { label: "Diagnósticos", href: "#diagnosticos" },
+        ]}
+      />
+
       {showAffiliateSession ? (
-        <Card>
+        <Card id="links-afiliados" className="scroll-mt-24">
           <CardHeader>
             <CardTitle>Sessão de afiliado Mercado Livre</CardTitle>
             <div className="grid gap-2 text-sm text-[var(--muted-foreground)] md:grid-cols-2">
@@ -844,93 +593,98 @@ export default async function MercadoLivreIntegrationPage({
               </div>
             ) : null}
 
-            <form
-              action={saveMercadoLivreAffiliateSessionAction}
-              className="grid gap-4"
-            >
-              <div className="grid gap-4 lg:grid-cols-2">
-                <Field label="Link de afiliado de referência">
-                  <Input
-                    name="sampleAffiliateLink"
-                    type="url"
+            <details className="rounded-[var(--radius-md)] border bg-[var(--background)] px-4">
+              <summary className="cursor-pointer font-semibold">
+                Configuração avançada da sessão
+              </summary>
+              <form
+                action={saveMercadoLivreAffiliateSessionAction}
+                className="grid gap-4 border-t py-4"
+              >
+                <div className="grid gap-4 lg:grid-cols-2">
+                  <Field label="Link de afiliado de referência">
+                    <Input
+                      name="sampleAffiliateLink"
+                      type="url"
+                      defaultValue=""
+                      placeholder="https://meli.la/..."
+                      autoComplete="off"
+                    />
+                    <p className="text-xs text-[var(--muted-foreground)]">
+                      Usado apenas para validar o fluxo da sua conta. O sistema
+                      não fabrica links a partir desta referência.
+                    </p>
+                  </Field>
+
+                  <Field label="Tag de afiliado">
+                    <Select
+                      name="affiliateTag"
+                      defaultValue={selectedAffiliateTag}
+                    >
+                      <option value="">Selecionar automaticamente</option>
+                      {selectedAffiliateTag &&
+                      !affiliateTags.some(
+                        (tag) => tag.value === selectedAffiliateTag,
+                      ) ? (
+                        <option value={selectedAffiliateTag}>
+                          {selectedAffiliateTag}
+                        </option>
+                      ) : null}
+                      {affiliateTags.map((tag) => (
+                        <option key={tag.value} value={tag.value}>
+                          {tag.label}
+                          {tag.isDefault ? " (padrão)" : ""}
+                        </option>
+                      ))}
+                    </Select>
+                    <p className="text-xs text-[var(--muted-foreground)]">
+                      Depois da primeira validação, todas as tags encontradas
+                      ficam disponíveis aqui.
+                    </p>
+                  </Field>
+                </div>
+
+                <Field label="Cookie completo do Mercado Livre">
+                  <Textarea
+                    name="cookie"
                     defaultValue=""
-                    placeholder="https://meli.la/..."
+                    placeholder={
+                      affiliateSessionConfigured
+                        ? "Cookie configurado. Cole aqui somente para substituir."
+                        : "cookie1=valor1; cookie2=valor2"
+                    }
                     autoComplete="off"
+                    spellCheck={false}
+                    rows={5}
                   />
                   <p className="text-xs text-[var(--muted-foreground)]">
-                    Usado apenas para validar o fluxo da sua conta. O sistema
-                    não fabrica links a partir desta referência.
+                    O valor salvo nunca é exibido. Deixe vazio para preservar o
+                    cookie atual; cole um novo valor para substituí-lo.
                   </p>
                 </Field>
 
-                <Field label="Tag de afiliado">
-                  <Select
-                    name="affiliateTag"
-                    defaultValue={selectedAffiliateTag}
+                <div className="flex flex-wrap gap-2">
+                  <Button type="submit" disabled={!account}>
+                    Salvar e testar
+                  </Button>
+                  <Button
+                    type="submit"
+                    variant="outline"
+                    formAction={selectMercadoLivreAffiliateTagAction}
+                    disabled={!account || affiliateTags.length === 0}
                   >
-                    <option value="">Selecionar automaticamente</option>
-                    {selectedAffiliateTag &&
-                    !affiliateTags.some(
-                      (tag) => tag.value === selectedAffiliateTag,
-                    ) ? (
-                      <option value={selectedAffiliateTag}>
-                        {selectedAffiliateTag}
-                      </option>
-                    ) : null}
-                    {affiliateTags.map((tag) => (
-                      <option key={tag.value} value={tag.value}>
-                        {tag.label}
-                        {tag.isDefault ? " (padrão)" : ""}
-                      </option>
-                    ))}
-                  </Select>
-                  <p className="text-xs text-[var(--muted-foreground)]">
-                    Depois da primeira validação, todas as tags encontradas
-                    ficam disponíveis aqui.
-                  </p>
-                </Field>
-              </div>
-
-              <Field label="Cookie completo do Mercado Livre">
-                <Textarea
-                  name="cookie"
-                  defaultValue=""
-                  placeholder={
-                    affiliateSessionConfigured
-                      ? "Cookie configurado. Cole aqui somente para substituir."
-                      : "cookie1=valor1; cookie2=valor2"
-                  }
-                  autoComplete="off"
-                  spellCheck={false}
-                  rows={5}
-                />
-                <p className="text-xs text-[var(--muted-foreground)]">
-                  O valor salvo nunca é exibido. Deixe vazio para preservar o
-                  cookie atual; cole um novo valor para substituí-lo.
-                </p>
-              </Field>
-
-              <div className="flex flex-wrap gap-2">
-                <Button type="submit" disabled={!account}>
-                  Salvar e testar
-                </Button>
-                <Button
-                  type="submit"
-                  variant="outline"
-                  formAction={selectMercadoLivreAffiliateTagAction}
-                  disabled={!account || affiliateTags.length === 0}
-                >
-                  Atualizar tag
-                </Button>
-              </div>
-            </form>
+                    Atualizar tag
+                  </Button>
+                </div>
+              </form>
+            </details>
 
             <form
               action={generateMercadoLivreAffiliateTestLinkAction}
               className="grid gap-4 border-t pt-4"
             >
               <div className="grid gap-4 lg:grid-cols-2">
-                <Field label="URL publica do produto para teste">
+                <Field label="URL pública do produto para teste">
                   <Input
                     name="productUrl"
                     type="url"
@@ -978,7 +732,7 @@ export default async function MercadoLivreIntegrationPage({
                 </p>
                 <p>Modo: {affiliateEndpointMode ?? "stripe_v2"}</p>
                 <p>
-                  Horario:{" "}
+                  Horário:{" "}
                   {generatedAt ? formatDateTime(new Date(generatedAt)) : "-"}
                 </p>
               </div>
@@ -1036,7 +790,7 @@ export default async function MercadoLivreIntegrationPage({
         </Card>
       )}
 
-      <Card>
+      <Card id="visao-geral" className="scroll-mt-24">
         <CardHeader>
           <CardTitle>Fluxo de importação dos mais vendidos</CardTitle>
         </CardHeader>
@@ -1053,7 +807,7 @@ export default async function MercadoLivreIntegrationPage({
               [
                 "4",
                 "Gerar ou importar links",
-                "A sessao conectada gera meli.la; o lote manual permanece como fallback.",
+                "A sessão conectada gera meli.la; o lote manual permanece como fallback.",
               ],
             ].map(([step, title, description]) => (
               <li
@@ -1102,7 +856,7 @@ export default async function MercadoLivreIntegrationPage({
       </Card>
 
       <div className="grid gap-4 lg:grid-cols-[1.5fr_1fr]">
-        <Card>
+        <Card id="descoberta" className="scroll-mt-24">
           <CardHeader>
             <CardTitle>Discovery</CardTitle>
           </CardHeader>
@@ -1114,7 +868,7 @@ export default async function MercadoLivreIntegrationPage({
                   type="checkbox"
                   defaultChecked={config?.enabled ?? false}
                 />
-                Integracao ativa
+                Integração ativa
               </label>
               <label className="flex items-center gap-2 text-sm">
                 <input
@@ -1140,7 +894,7 @@ export default async function MercadoLivreIntegrationPage({
                     defaultValue={config?.siteId ?? account?.siteId ?? "MLB"}
                   />
                 </Field>
-                <Field label="Maximo por categoria">
+                <Field label="Máximo por categoria">
                   <Input
                     name="maxCandidatesPerCategory"
                     type="number"
@@ -1149,14 +903,14 @@ export default async function MercadoLivreIntegrationPage({
                     defaultValue={config?.maxCandidatesPerCategory ?? 20}
                   />
                 </Field>
-                <Field label="Preco minimo">
+                <Field label="Preço mínimo">
                   <Input
                     name="minimumPrice"
                     inputMode="decimal"
                     defaultValue={config?.minimumPrice?.toString() ?? ""}
                   />
                 </Field>
-                <Field label="Preco maximo">
+                <Field label="Preço máximo">
                   <Input
                     name="maximumPrice"
                     inputMode="decimal"
@@ -1243,21 +997,30 @@ export default async function MercadoLivreIntegrationPage({
                 Permitir backfill controlado entre categorias
               </label>
 
-              <Field label="Categorias">
-                <Textarea
-                  name="categoryIds"
-                  defaultValue={categoryIds.join(", ")}
-                  placeholder="MLB123456, MLB654321"
-                />
-                <p className="text-xs text-[var(--muted-foreground)]">
-                  Opcional para ajuste manual. Ao salvar, cada ID e validado no
-                  Mercado Livre. Para ranking de mais vendidos, use categorias
-                  folha.
-                </p>
-              </Field>
+              <details className="rounded-md border bg-[var(--background)] px-4">
+                <summary className="cursor-pointer font-medium">
+                  Opções avançadas
+                </summary>
+                <div className="border-t py-4">
+                  <Field label="IDs de categorias">
+                    <Textarea
+                      name="categoryIds"
+                      defaultValue={categoryIds.join(", ")}
+                      placeholder="MLB123456, MLB654321"
+                    />
+                    <p className="text-xs text-[var(--muted-foreground)]">
+                      Ajuste manual opcional. Ao salvar, cada ID é validado no
+                      Mercado Livre. Prefira o navegador de categorias abaixo.
+                    </p>
+                  </Field>
+                </div>
+              </details>
 
               {configuredCategories.length > 0 ? (
-                <div className="overflow-x-auto rounded-md border">
+                <div
+                  id="categorias-configuradas"
+                  className="scroll-mt-24 overflow-x-auto rounded-md border"
+                >
                   <table className="w-full text-left text-sm">
                     <thead className="bg-[var(--muted)]">
                       <tr>
@@ -1335,21 +1098,21 @@ export default async function MercadoLivreIntegrationPage({
 
               <Button type="submit">
                 <Save aria-hidden="true" size={16} />
-                Salvar configuracao
+                Salvar configuração
               </Button>
             </form>
           </CardContent>
         </Card>
 
-        <Card>
+        <Card id="diagnosticos" className="scroll-mt-24">
           <CardHeader>
             <CardTitle>Diagnosticar PRODUCT</CardTitle>
           </CardHeader>
           <CardContent className="grid gap-4 text-sm">
             <p className="text-[var(--muted-foreground)]">
               Consulta o PRODUCT, interpreta os product items resumidos e
-              hidrata os ITEM IDs pela API oficial. Este probe nao gera meli.la,
-              nao ingere ofertas e nao cria jobs.
+              hidrata os ITEM IDs pela API oficial. Este probe não gera meli.la,
+              não ingere ofertas e não cria jobs.
             </p>
             <form
               action={diagnoseMercadoLivreProductAction}
@@ -1395,21 +1158,21 @@ export default async function MercadoLivreIntegrationPage({
                     label="API permalink"
                     value={
                       single(productProbeResult.productPermalink) ||
-                      "indisponivel"
+                      "indisponível"
                     }
                   />
                   <Result
                     label="PDP resolvida"
                     value={
                       single(productProbeResult.resolvedProductUrl) ||
-                      "indisponivel"
+                      "indisponível"
                     }
                   />
                   <Result
                     label="PDP source"
                     value={
                       single(productProbeResult.productUrlSource) ||
-                      "indisponivel"
+                      "indisponível"
                     }
                   />
                   <Result
@@ -1445,7 +1208,7 @@ export default async function MercadoLivreIntegrationPage({
                     }
                   />
                   <Result
-                    label="IDs unicos para hidratacao"
+                    label="IDs únicos para hidratação"
                     value={
                       single(productProbeResult.productItemsUniqueIds) ?? "0"
                     }
@@ -1504,7 +1267,7 @@ export default async function MercadoLivreIntegrationPage({
                     label="Enrichment"
                     value={
                       single(productProbeResult.detailEnrichmentStatus) ||
-                      "indisponivel"
+                      "indisponível"
                     }
                   />
                   <Result
@@ -1565,7 +1328,7 @@ export default async function MercadoLivreIntegrationPage({
                       {productProbeDiagnosticSamples.map((sample) => (
                         <dl
                           key={`${sample.itemId}-${sample.rejectedReason ?? "accepted"}`}
-                          className="grid gap-1 rounded-md border bg-white p-3"
+                          className="grid gap-1 rounded-md border bg-[var(--surface)] p-3"
                         >
                           <Result label="ITEM" value={sample.itemId} />
                           <Result
@@ -1648,7 +1411,7 @@ export default async function MercadoLivreIntegrationPage({
           </CardContent>
         </Card>
 
-        <Card>
+        <Card id="historico" className="scroll-mt-24">
           <CardHeader>
             <CardTitle>Última importação</CardTitle>
           </CardHeader>
@@ -1657,7 +1420,10 @@ export default async function MercadoLivreIntegrationPage({
               <span className="text-[var(--muted-foreground)]">Conta</span>
               <span>{account?.status ?? "DISCONNECTED"}</span>
             </div>
-            <form method="get" className="grid gap-2 rounded-md border p-3 sm:grid-cols-2">
+            <form
+              method="get"
+              className="grid gap-2 rounded-md border p-3 sm:grid-cols-2"
+            >
               <Field label="Sessão">
                 <Input
                   name="sessionFilter"
@@ -1687,10 +1453,16 @@ export default async function MercadoLivreIntegrationPage({
                 </Select>
               </Field>
               <Field label="Data inicial">
-                <Input name="dateFilter" type="date" defaultValue={dateFilter ?? ""} />
+                <Input
+                  name="dateFilter"
+                  type="date"
+                  defaultValue={dateFilter ?? ""}
+                />
               </Field>
               <div className="flex items-end">
-                <Button type="submit" variant="outline">Filtrar sessão</Button>
+                <Button type="submit" variant="outline">
+                  Filtrar sessão
+                </Button>
               </div>
             </form>
             {latestImportJob ? (
@@ -1900,7 +1672,7 @@ export default async function MercadoLivreIntegrationPage({
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[1.5fr_1fr]">
-        <Card>
+        <Card id="categorias" className="scroll-mt-24">
           <CardHeader>
             <CardTitle>Seletor de categorias</CardTitle>
           </CardHeader>
@@ -1947,10 +1719,55 @@ export default async function MercadoLivreIntegrationPage({
                 ) : null}
 
                 {categoryRows.length === 0 ? (
-                  <EmptyState
-                    title="Categoria folha"
-                    description="Esta categoria nao possui subcategorias. Ela pode ser adicionada para discovery por ranking quando houver highlights disponiveis."
-                  />
+                  selectedCategory && selectedCategory.children.length === 0 ? (
+                    <div className="grid gap-4 rounded-[var(--radius-lg)] border border-[var(--border-strong)] bg-[var(--primary-subtle)] p-5">
+                      <div>
+                        <StatusBadge status="ACTIVE" label="Categoria folha" />
+                        <h3 className="mt-3 text-lg font-semibold">
+                          {selectedCategory.name}
+                        </h3>
+                        <p className="mt-1 text-sm text-[var(--foreground-secondary)]">
+                          Esta categoria pode ser usada na descoberta por
+                          ranking quando houver destaques disponíveis.
+                        </p>
+                        <p className="mt-2 font-mono text-xs text-[var(--muted-foreground)]">
+                          {selectedCategory.id}
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {configuredCategoryIds.has(selectedCategory.id) ? (
+                          <>
+                            <StatusBadge
+                              status="SUCCEEDED"
+                              label="Categoria adicionada"
+                            />
+                            <Button asChild variant="outline">
+                              <a href="#categorias-configuradas">
+                                Configurar ou desativar
+                              </a>
+                            </Button>
+                          </>
+                        ) : (
+                          <form action={addMercadoLivreCategoryAction}>
+                            <input
+                              name="categoryId"
+                              type="hidden"
+                              value={selectedCategory.id}
+                            />
+                            <Button type="submit">
+                              <Plus aria-hidden="true" size={16} />
+                              Adicionar categoria
+                            </Button>
+                          </form>
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    <EmptyState
+                      title="Nenhuma subcategoria disponível"
+                      description="Volte ao nível anterior para escolher outra categoria oficial do Mercado Livre."
+                    />
+                  )
                 ) : (
                   <div className="grid gap-3">
                     {categoryRows.map(({ summary, details }) => {
@@ -1959,7 +1776,7 @@ export default async function MercadoLivreIntegrationPage({
                       return (
                         <div
                           key={summary.id}
-                          className="grid gap-3 rounded-md border bg-white p-4 md:grid-cols-[1fr_auto]"
+                          className="grid gap-3 rounded-md border bg-[var(--surface)] p-4 md:grid-cols-[1fr_auto]"
                         >
                           <div>
                             <div className="flex flex-wrap items-center gap-2">
@@ -1979,17 +1796,31 @@ export default async function MercadoLivreIntegrationPage({
                           </div>
                           <div className="flex flex-wrap items-center gap-2">
                             {isLeaf ? (
-                              <form action={addMercadoLivreCategoryAction}>
-                                <input
-                                  name="categoryId"
-                                  type="hidden"
-                                  value={summary.id}
-                                />
-                                <Button type="submit" variant="outline">
-                                  <Plus aria-hidden="true" size={16} />
-                                  Adicionar
-                                </Button>
-                              </form>
+                              configuredCategoryIds.has(summary.id) ? (
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <StatusBadge
+                                    status="SUCCEEDED"
+                                    label="Categoria adicionada"
+                                  />
+                                  <Button asChild variant="outline" size="sm">
+                                    <a href="#categorias-configuradas">
+                                      Configurar
+                                    </a>
+                                  </Button>
+                                </div>
+                              ) : (
+                                <form action={addMercadoLivreCategoryAction}>
+                                  <input
+                                    name="categoryId"
+                                    type="hidden"
+                                    value={summary.id}
+                                  />
+                                  <Button type="submit">
+                                    <Plus aria-hidden="true" size={16} />
+                                    Adicionar categoria
+                                  </Button>
+                                </form>
+                              )
                             ) : (
                               <Button asChild variant="outline">
                                 <Link
@@ -2042,101 +1873,134 @@ export default async function MercadoLivreIntegrationPage({
             </form>
 
             {testResult ? (
-              <dl className="grid gap-2 rounded-md border bg-[var(--background)] p-3">
-                <Result
-                  label="Nome"
-                  value={single(testResult.categoryName) ?? "-"}
-                />
-                <Result
-                  label="ID"
-                  value={single(testResult.categoryId) ?? "-"}
-                />
-                <Result
-                  label="Caminho"
-                  value={single(testResult.categoryPath) ?? "-"}
-                />
-                <Result
-                  label="Categoria folha"
-                  value={
-                    single(testResult.categoryLeaf) === "true" ? "sim" : "nao"
-                  }
-                />
-                <Result
-                  label="Subcategorias"
-                  value={single(testResult.categoryChildrenCount) ?? "0"}
-                />
-                <Result
-                  label="Highlights disponiveis"
-                  value={
-                    single(testResult.highlightsAvailable) === "true"
-                      ? "sim"
-                      : "nao"
-                  }
-                />
-                <Result
-                  label="Candidatos encontrados"
-                  value={single(testResult.candidatesFound) ?? "0"}
-                />
-                <Result
-                  label="ITEM"
-                  value={single(testResult.highlightItemCount) ?? "0"}
-                />
-                <Result
-                  label="PRODUCT"
-                  value={single(testResult.highlightProductCount) ?? "0"}
-                />
-                <Result
-                  label="USER_PRODUCT"
-                  value={single(testResult.highlightUserProductCount) ?? "0"}
-                />
-                <Result
-                  label="Tipo desconhecido"
-                  value={single(testResult.highlightUnknownTypeCount) ?? "0"}
-                />
-                <Result
-                  label="PRODUCTS encontrados"
-                  value={single(testResult.highlightProductCount) ?? "0"}
-                />
-                <Result
-                  label="Com winner direto"
-                  value={single(testResult.productResolvedDirectly) ?? "0"}
-                />
-                <Result
-                  label="Produtos pai"
-                  value={single(testResult.productParentCount) ?? "0"}
-                />
-                <Result
-                  label="Resolvidos via filho"
-                  value={single(testResult.productResolvedViaChild) ?? "0"}
-                />
-                <Result
-                  label="Terminais sem winner"
-                  value={single(testResult.productLeafWithoutWinner) ?? "0"}
-                />
-                <Result
-                  label="Pais sem filho resolvivel"
-                  value={
-                    single(testResult.productParentWithoutResolvableChild) ??
-                    "0"
-                  }
-                />
-                <Result
-                  label="Resolvidos para item"
-                  value={single(testResult.resolvedItemCandidates) ?? "0"}
-                />
-                <Result
-                  label="Nao resolvidos"
-                  value={single(testResult.unresolvedCandidates) ?? "0"}
-                />
-                <Result
-                  label="Motivos de descarte"
-                  value={single(testResult.resolutionReasons) || "-"}
-                />
-                <Result
-                  label="Motivo highlights"
-                  value={single(testResult.highlightsReason) ?? "-"}
-                />
-              </dl>
+              <div
+                id="category-test-results"
+                className="grid scroll-mt-24 gap-3"
+              >
+                <dl className="grid gap-2 rounded-md border bg-[var(--background)] p-3">
+                  <Result
+                    label="Nome"
+                    value={single(testResult.categoryName) ?? "-"}
+                  />
+                  <Result
+                    label="ID"
+                    value={single(testResult.categoryId) ?? "-"}
+                  />
+                  <Result
+                    label="Caminho"
+                    value={single(testResult.categoryPath) ?? "-"}
+                  />
+                  <Result
+                    label="Categoria folha"
+                    value={
+                      single(testResult.categoryLeaf) === "true" ? "sim" : "nao"
+                    }
+                  />
+                  <Result
+                    label="Subcategorias"
+                    value={single(testResult.categoryChildrenCount) ?? "0"}
+                  />
+                  <Result
+                    label="Highlights disponiveis"
+                    value={
+                      single(testResult.highlightsAvailable) === "true"
+                        ? "sim"
+                        : "nao"
+                    }
+                  />
+                  <Result
+                    label="Candidatos encontrados"
+                    value={single(testResult.candidatesFound) ?? "0"}
+                  />
+                  <Result
+                    label="ITEM"
+                    value={single(testResult.highlightItemCount) ?? "0"}
+                  />
+                  <Result
+                    label="PRODUCT"
+                    value={single(testResult.highlightProductCount) ?? "0"}
+                  />
+                  <Result
+                    label="USER_PRODUCT"
+                    value={single(testResult.highlightUserProductCount) ?? "0"}
+                  />
+                  <Result
+                    label="Tipo desconhecido"
+                    value={single(testResult.highlightUnknownTypeCount) ?? "0"}
+                  />
+                  <Result
+                    label="PRODUCTS encontrados"
+                    value={single(testResult.highlightProductCount) ?? "0"}
+                  />
+                  <Result
+                    label="Com winner direto"
+                    value={single(testResult.productResolvedDirectly) ?? "0"}
+                  />
+                  <Result
+                    label="Produtos pai"
+                    value={single(testResult.productParentCount) ?? "0"}
+                  />
+                  <Result
+                    label="Resolvidos via filho"
+                    value={single(testResult.productResolvedViaChild) ?? "0"}
+                  />
+                  <Result
+                    label="Terminais sem winner"
+                    value={single(testResult.productLeafWithoutWinner) ?? "0"}
+                  />
+                  <Result
+                    label="Pais sem filho resolvivel"
+                    value={
+                      single(testResult.productParentWithoutResolvableChild) ??
+                      "0"
+                    }
+                  />
+                  <Result
+                    label="Resolvidos para item"
+                    value={single(testResult.resolvedItemCandidates) ?? "0"}
+                  />
+                  <Result
+                    label="Nao resolvidos"
+                    value={single(testResult.unresolvedCandidates) ?? "0"}
+                  />
+                  <Result
+                    label="Motivos de descarte"
+                    value={single(testResult.resolutionReasons) || "-"}
+                  />
+                  <Result
+                    label="Motivo highlights"
+                    value={single(testResult.highlightsReason) ?? "-"}
+                  />
+                </dl>
+                <div className="flex flex-wrap gap-2">
+                  {testedCategoryIsLeaf && testedCategoryId ? (
+                    testedCategoryAlreadyConfigured ? (
+                      <StatusBadge
+                        status="SUCCEEDED"
+                        label="Categoria adicionada"
+                      />
+                    ) : (
+                      <form action={addMercadoLivreCategoryAction}>
+                        <input
+                          name="categoryId"
+                          type="hidden"
+                          value={testedCategoryId}
+                        />
+                        <Button type="submit">
+                          <Plus aria-hidden="true" size={16} />
+                          Adicionar categoria
+                        </Button>
+                      </form>
+                    )
+                  ) : null}
+                  <Button asChild variant="outline">
+                    <a href="#categorias">Voltar às categorias</a>
+                  </Button>
+                  <Button asChild variant="outline">
+                    <a href="#diagnosticos">Ver candidatos</a>
+                  </Button>
+                </div>
+              </div>
             ) : null}
 
             <div className="grid gap-2">
@@ -2150,7 +2014,7 @@ export default async function MercadoLivreIntegrationPage({
                   {configuredCategories.map((category) => (
                     <div
                       key={category.id}
-                      className="rounded-md border bg-white p-3"
+                      className="rounded-md border bg-[var(--surface)] p-3"
                     >
                       <div className="font-medium">
                         {category.details?.name ?? category.id}
@@ -2206,7 +2070,7 @@ export default async function MercadoLivreIntegrationPage({
                 </form>
 
                 {categorySearchResult ? (
-                  <div className="grid gap-3 rounded-md border bg-white p-3">
+                  <div className="grid gap-3 rounded-md border bg-[var(--surface)] p-3">
                     <dl className="grid gap-2">
                       <Result
                         label="Categoria"

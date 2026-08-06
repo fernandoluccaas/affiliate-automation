@@ -9,6 +9,7 @@ import { EmptyState } from "@/components/empty-state";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
+import { MetricCard, MetricGrid } from "@/components/ui/page";
 import {
   ASSISTED_GROUP_INTRO,
   groupDisplayNameFromSnapshot,
@@ -97,41 +98,68 @@ export default async function AssistedPublicationsPage({
     statusCounts.find((item) => item.status === status)?._count._all ?? 0;
 
   return (
-    <AdminShell currentPath="/publicacoes-assistidas" title="Publicacoes assistidas">
+    <AdminShell currentPath="/publicacoes-assistidas" title="Fila WhatsApp">
       <p className="text-sm text-[var(--muted-foreground)]">
         {ASSISTED_GROUP_INTRO}
       </p>
-      <form className="grid gap-3 rounded-md border bg-white p-4 md:grid-cols-5">
+      <form
+        aria-label="Filtros da fila WhatsApp"
+        className="grid gap-3 rounded-[var(--radius-lg)] border bg-[var(--surface)] p-4 shadow-[var(--shadow-sm)] md:grid-cols-5"
+      >
         <Select name="groupId" defaultValue={groupId} aria-label="Grupo">
           <option value="">Todos os grupos</option>
           {groups.map((group) => (
             <option key={group.id} value={group.id}>
-              {groupDisplayNameFromSnapshot(null, group.configuration, group.name)}
+              {groupDisplayNameFromSnapshot(
+                null,
+                group.configuration,
+                group.name,
+              )}
             </option>
           ))}
         </Select>
         <Select name="status" defaultValue={statusValue} aria-label="Status">
           <option value="ALL">Todos os status</option>
           {filterStatuses.map((item) => (
-            <option key={item} value={item}>{item}</option>
+            <option key={item} value={item}>
+              {item}
+            </option>
           ))}
         </Select>
-        <Select name="marketplace" defaultValue={marketplaceValue} aria-label="Marketplace">
+        <Select
+          name="marketplace"
+          defaultValue={marketplaceValue}
+          aria-label="Marketplace"
+        >
           <option value="">Todos os marketplaces</option>
           <option value="MERCADO_LIVRE">Mercado Livre</option>
           <option value="SHOPEE">Shopee</option>
         </Select>
-        <Input name="date" type="date" defaultValue={dateValue} aria-label="Data" />
+        <Input
+          name="date"
+          type="date"
+          defaultValue={dateValue}
+          aria-label="Data"
+        />
         <Button type="submit">Filtrar</Button>
       </form>
-      <div className="grid gap-3 sm:grid-cols-4">
-        <Metric label="Preparadas" value={count("AWAITING_MANUAL_PUBLICATION")} />
+      <MetricGrid>
+        <Metric
+          label="Preparadas"
+          value={count("AWAITING_MANUAL_PUBLICATION")}
+        />
         <Metric label="Confirmadas" value={count("PUBLISHED")} />
         <Metric label="Ignoradas" value={count("CANCELLED")} />
-        <Metric label="Falhas" value={count("PUBLICATION_FAILED") + count("FAILED")} />
-      </div>
+        <Metric
+          label="Falhas"
+          value={count("PUBLICATION_FAILED") + count("FAILED")}
+        />
+      </MetricGrid>
       {publications.length === 0 ? (
-        <EmptyState title="Nenhuma publicacao encontrada" description="O worker preparara novas pendencias conforme as regras e limites de cada grupo." />
+        <EmptyState
+          title="Nenhuma publicação encontrada"
+          description="O worker preparará novas pendências conforme as regras e os limites de cada grupo. Ajuste os filtros para consultar outros estados."
+        />
       ) : (
         <div className="grid gap-4">
           {publications.map((publication) => {
@@ -148,13 +176,24 @@ export default async function AssistedPublicationsPage({
                 groupDisplayName={groupDisplayName}
                 status={publication.status}
                 marketplace={publication.marketplaceSnapshot}
-                headline={message.split(/\r?\n/).find(Boolean) ?? publication.offerTitleSnapshot}
+                headline={
+                  message.split(/\r?\n/).find(Boolean) ??
+                  publication.offerTitleSnapshot
+                }
                 title={publication.offerTitleSnapshot}
-                price={new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(Number(publication.currentPriceSnapshot))}
+                price={new Intl.NumberFormat("pt-BR", {
+                  style: "currency",
+                  currency: "BRL",
+                }).format(Number(publication.currentPriceSnapshot))}
                 message={message}
-                affiliateUrl={publication.affiliateUrlSnapshot ?? publication.trackingUrlSnapshot}
+                affiliateUrl={
+                  publication.affiliateUrlSnapshot ??
+                  publication.trackingUrlSnapshot
+                }
                 hasImage={Boolean(publication.imageUrlSnapshot)}
-                preparedAt={publication.scheduledAt.toLocaleString("pt-BR", { timeZone: "America/Fortaleza" })}
+                preparedAt={publication.scheduledAt.toLocaleString("pt-BR", {
+                  timeZone: "America/Fortaleza",
+                })}
               />
             );
           })}
@@ -165,10 +204,5 @@ export default async function AssistedPublicationsPage({
 }
 
 function Metric({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="rounded-md border bg-white p-3">
-      <p className="text-xs text-[var(--muted-foreground)]">{label}</p>
-      <p className="text-2xl font-semibold">{value}</p>
-    </div>
-  );
+  return <MetricCard label={label} value={value} />;
 }

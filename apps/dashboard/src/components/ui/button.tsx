@@ -1,20 +1,32 @@
 import * as React from "react";
 import { Slot } from "@radix-ui/react-slot";
 import { cva, type VariantProps } from "class-variance-authority";
+import { LoaderCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-const buttonVariants = cva(
-  "inline-flex h-10 items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] disabled:pointer-events-none disabled:opacity-50",
+export const buttonVariants = cva(
+  "inline-flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-[var(--radius-md)] px-4 py-2 text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--background)] disabled:pointer-events-none disabled:opacity-50",
   {
     variants: {
       variant: {
-        default: "bg-[var(--primary)] text-[var(--primary-foreground)] hover:opacity-90",
-        outline: "border bg-transparent hover:bg-[var(--muted)]",
-        ghost: "hover:bg-[var(--muted)]",
+        default:
+          "bg-[var(--primary)] text-[var(--primary-foreground)] hover:bg-[var(--primary-hover)]",
+        primary:
+          "bg-[var(--primary)] text-[var(--primary-foreground)] hover:bg-[var(--primary-hover)]",
+        secondary:
+          "bg-[var(--primary-subtle)] text-[var(--primary)] hover:bg-[color-mix(in_srgb,var(--primary-subtle)_75%,var(--border))]",
+        outline:
+          "border border-[var(--border-strong)] bg-[var(--surface)] text-[var(--foreground)] hover:bg-[var(--muted)]",
+        ghost:
+          "text-[var(--foreground-secondary)] hover:bg-[var(--muted)] hover:text-[var(--foreground)]",
+        danger: "bg-[var(--danger)] text-white hover:brightness-90",
+        link: "min-h-0 rounded-sm px-1 py-0 text-[var(--primary)] underline-offset-4 hover:underline",
       },
       size: {
-        default: "h-10 px-4",
-        icon: "h-10 w-10 px-0",
+        default: "min-h-11 px-4",
+        sm: "min-h-9 px-3 text-xs",
+        lg: "min-h-12 px-5",
+        icon: "size-11 px-0",
       },
     },
     defaultVariants: {
@@ -25,12 +37,43 @@ const buttonVariants = cva(
 );
 
 export interface ButtonProps
-  extends React.ButtonHTMLAttributes<HTMLButtonElement>,
+  extends
+    React.ButtonHTMLAttributes<HTMLButtonElement>,
     VariantProps<typeof buttonVariants> {
   asChild?: boolean;
+  loading?: boolean;
+  loadingLabel?: string;
 }
 
-export function Button({ className, variant, size, asChild = false, ...props }: ButtonProps) {
-  const Comp = asChild ? Slot : "button";
-  return <Comp className={cn(buttonVariants({ variant, size, className }))} {...props} />;
-}
+export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
+  function Button(
+    {
+      className,
+      variant,
+      size,
+      asChild = false,
+      loading = false,
+      loadingLabel,
+      children,
+      disabled,
+      ...props
+    },
+    ref,
+  ) {
+    const Comp = asChild ? Slot : "button";
+    return (
+      <Comp
+        ref={ref}
+        className={cn(buttonVariants({ variant, size, className }))}
+        disabled={!asChild ? disabled || loading : undefined}
+        aria-busy={loading || undefined}
+        {...props}
+      >
+        {loading ? (
+          <LoaderCircle aria-hidden="true" className="animate-spin" size={17} />
+        ) : null}
+        {loading && loadingLabel ? loadingLabel : children}
+      </Comp>
+    );
+  },
+);

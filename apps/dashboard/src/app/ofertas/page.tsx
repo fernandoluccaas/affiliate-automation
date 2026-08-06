@@ -6,7 +6,10 @@ import { marketplaces, offerStatuses, stockStatuses } from "@affiliate/shared";
 import { AdminShell } from "@/components/admin-shell";
 import { EmptyState } from "@/components/empty-state";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
+import { StatusBadge } from "@/components/ui/status-badge";
+import { DataTableContainer, Pagination } from "@/components/ui/table";
 import { formatCurrency, formatDateTime, formatPercentage } from "@/lib/format";
 import { CopyAffiliateLinkButton } from "./copy-affiliate-link-button";
 
@@ -136,7 +139,10 @@ export default async function OffersPage({ searchParams }: OffersPageProps) {
         </div>
       }
     >
-      <form className="grid gap-3 rounded-md border bg-white p-4 md:grid-cols-[1fr_1fr_1fr_1fr_1fr_auto]">
+      <form
+        aria-label="Filtros de ofertas"
+        className="grid gap-3 rounded-[var(--radius-lg)] border bg-[var(--surface)] p-4 shadow-[var(--shadow-sm)] md:grid-cols-2 xl:grid-cols-[1fr_1fr_1fr_1fr_1fr_auto]"
+      >
         <Select
           name="marketplace"
           defaultValue={marketplace ?? ""}
@@ -161,11 +167,11 @@ export default async function OffersPage({ searchParams }: OffersPageProps) {
             </option>
           ))}
         </Select>
-        <input
+        <Input
           name="category"
           defaultValue={category ?? ""}
           placeholder="Categoria"
-          className="h-10 rounded-md border bg-white px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+          aria-label="Categoria"
         />
         <Select
           name="affiliateEligibility"
@@ -196,17 +202,17 @@ export default async function OffersPage({ searchParams }: OffersPageProps) {
           actionLabel="Cadastrar oferta"
         />
       ) : (
-        <div className="overflow-x-auto rounded-md border bg-white">
+        <DataTableContainer label="Lista de ofertas com rolagem horizontal">
           <table className="w-full min-w-[1380px] border-collapse text-left text-sm">
             <thead className="border-b bg-[var(--muted)] text-xs uppercase text-[var(--muted-foreground)]">
               <tr>
-                <th className="px-4 py-3 font-semibold">Titulo</th>
+                <th className="px-4 py-3 font-semibold">Título</th>
                 <th className="px-4 py-3 font-semibold">Marketplace</th>
                 <th className="px-4 py-3 font-semibold">ID externo</th>
-                <th className="px-4 py-3 font-semibold">Versao</th>
+                <th className="px-4 py-3 font-semibold">Versão</th>
                 <th className="px-4 py-3 font-semibold">Categoria</th>
                 <th className="px-4 py-3 font-semibold">Origem ranking</th>
-                <th className="px-4 py-3 font-semibold">Precos</th>
+                <th className="px-4 py-3 font-semibold">Preços</th>
                 <th className="px-4 py-3 font-semibold">Desconto</th>
                 <th className="px-4 py-3 font-semibold">Score</th>
                 <th className="px-4 py-3 font-semibold">Afiliado</th>
@@ -275,7 +281,7 @@ export default async function OffersPage({ searchParams }: OffersPageProps) {
                     <div className="text-xs text-[var(--muted-foreground)]">
                       {offer.originalPrice
                         ? `De ${formatCurrency(offer.originalPrice)}`
-                        : "Preco original indisponivel"}
+                        : "Preço original indisponível"}
                     </div>
                   </td>
                   <td className="px-4 py-3">
@@ -326,42 +332,42 @@ export default async function OffersPage({ searchParams }: OffersPageProps) {
                     {formatDateTime(offer.collectedAt)}
                   </td>
                   <td className="px-4 py-3">
-                    <span className="rounded-md border bg-[var(--background)] px-2 py-1 text-xs font-medium">
-                      {offer.status}
-                    </span>
+                    <StatusBadge status={offer.status} />
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
-        </div>
+        </DataTableContainer>
       )}
 
-      <div className="flex items-center justify-between text-sm text-[var(--muted-foreground)]">
-        <span>
-          Pagina {page} de {totalPages} - {total} oferta{total === 1 ? "" : "s"}
-        </span>
-        <div className="flex gap-2">
-          {page <= 1 ? (
-            <Button variant="outline" disabled>
-              Anterior
-            </Button>
-          ) : (
-            <Button asChild variant="outline">
-              <Link href={buildPageHref(queryParams, page - 1)}>Anterior</Link>
-            </Button>
-          )}
-          {page >= totalPages ? (
-            <Button variant="outline" disabled>
-              Proxima
-            </Button>
-          ) : (
-            <Button asChild variant="outline">
-              <Link href={buildPageHref(queryParams, page + 1)}>Proxima</Link>
-            </Button>
-          )}
-        </div>
-      </div>
+      <Pagination
+        summary={
+          <>
+            Página {page} de {totalPages} — {total} oferta
+            {total === 1 ? "" : "s"}
+          </>
+        }
+      >
+        {page <= 1 ? (
+          <Button variant="outline" disabled>
+            Anterior
+          </Button>
+        ) : (
+          <Button asChild variant="outline">
+            <Link href={buildPageHref(queryParams, page - 1)}>Anterior</Link>
+          </Button>
+        )}
+        {page >= totalPages ? (
+          <Button variant="outline" disabled>
+            Próxima
+          </Button>
+        ) : (
+          <Button asChild variant="outline">
+            <Link href={buildPageHref(queryParams, page + 1)}>Próxima</Link>
+          </Button>
+        )}
+      </Pagination>
     </AdminShell>
   );
 }

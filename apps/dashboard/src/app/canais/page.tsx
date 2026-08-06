@@ -5,6 +5,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
+import { Alert } from "@/components/ui/alert";
+import { StatusBadge } from "@/components/ui/status-badge";
 import {
   createChannelAction,
   confirmWhatsAppWebOwnershipAction,
@@ -25,7 +27,7 @@ type ChannelsPageProps = {
 
 const channelTypes = [
   { value: "TELEGRAM", label: "Telegram", disabled: false },
-  { value: "MANUAL_EXPORT", label: "Exportacao manual", disabled: false },
+  { value: "MANUAL_EXPORT", label: "Exportação manual", disabled: false },
   { value: "WHATSAPP_GROUPS", label: "Grupo do WhatsApp", disabled: false },
   {
     value: "WHATSAPP_CHANNEL",
@@ -34,12 +36,12 @@ const channelTypes = [
   },
   {
     value: "WHATSAPP_CLOUD_API",
-    label: "WhatsApp Cloud API indisponivel",
+    label: "WhatsApp Cloud API indisponível",
     disabled: true,
   },
   {
     value: "WHATSAPP_GROUPS_API",
-    label: "WhatsApp Groups API indisponivel",
+    label: "WhatsApp Groups API indisponível",
     disabled: true,
   },
 ];
@@ -85,21 +87,21 @@ function messageText(message?: string | string[]) {
   if (value === "updated") return "Canal atualizado.";
   if (value === "enabled") return "Canal ativado.";
   if (value === "disabled") return "Canal desativado.";
-  if (value === "telegram-ok") return "Integracao Telegram validada.";
+  if (value === "telegram-ok") return "Integração Telegram validada.";
   if (value === "telegram-failed") return "Falha ao validar Telegram.";
   if (value === "legacy-converted")
-    return "Registro legado convertido para Grupo do WhatsApp sem alterar seu historico.";
+    return "Registro legado convertido para Grupo do WhatsApp sem alterar seu histórico.";
   if (value === "web-ownership-confirmed")
-    return "Propriedade/autorizacao do grupo confirmada.";
+    return "Propriedade e autorização do grupo confirmadas.";
   if (value === "web-enabled")
     return "Modo Web experimental ativado para o grupo.";
   if (value === "web-disabled")
     return "Modo Web experimental desativado; fallback assistido restaurado.";
   if (value === "web-paused")
-    return "Automacao Web pausada somente para este grupo.";
-  if (value === "web-resumed") return "Automacao Web retomada para este grupo.";
+    return "Automação Web pausada somente para este grupo.";
+  if (value === "web-resumed") return "Automação Web retomada para este grupo.";
   if (value === "web-invalidated")
-    return "Autorizacao Web invalidada e modo assistido restaurado.";
+    return "Autorização Web invalidada e modo assistido restaurado.";
   return null;
 }
 
@@ -116,36 +118,46 @@ export default async function ChannelsPage({
   return (
     <AdminShell currentPath="/canais" title="Canais">
       {message ? (
-        <div className="rounded-md border bg-white px-4 py-3 text-sm">
+        <Alert tone={message.includes("Falha") ? "danger" : "success"} live>
           {message}
-        </div>
+        </Alert>
       ) : null}
 
-      <section className="rounded-md border bg-white p-4">
-        <h2 className="text-base font-semibold">Novo canal</h2>
+      <section className="rounded-[var(--radius-lg)] border bg-[var(--surface)] p-5 shadow-[var(--shadow-sm)]">
+        <h2 className="text-lg font-semibold">Novo canal</h2>
+        <p className="mt-1 text-sm text-[var(--foreground-secondary)]">
+          Defina o destino e as políticas de publicação. Nenhum teste é
+          executado ao criar o canal.
+        </p>
         <ChannelForm action={createChannelAction} submitLabel="Criar canal" />
       </section>
 
       {channels.length === 0 ? (
         <EmptyState
           title="Nenhum canal configurado"
-          description="Crie um canal Telegram ou de exportacao manual para permitir o agendamento automatico."
+          description="Crie um canal Telegram, um grupo WhatsApp assistido ou uma exportação manual para permitir o planejamento."
         />
       ) : (
         <div className="grid gap-4">
           {channels.map((channel) => (
             <section
               key={channel.id}
-              className="rounded-md border bg-white p-4"
+              className="rounded-[var(--radius-lg)] border bg-[var(--surface)] p-5 shadow-[var(--shadow-sm)]"
             >
               <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <h2 className="font-semibold">{channel.name}</h2>
                   <p className="text-sm text-[var(--muted-foreground)]">
-                    {channel.type} - {channel.enabled ? "ativo" : "inativo"} -{" "}
-                    {channel._count.publications} publicacao
-                    {channel._count.publications === 1 ? "" : "es"}
+                    {channel.type} · {channel._count.publications}{" "}
+                    {channel._count.publications === 1
+                      ? "publicação"
+                      : "publicações"}
                   </p>
+                  <div className="mt-2">
+                    <StatusBadge
+                      status={channel.enabled ? "ACTIVE" : "DISABLED"}
+                    />
+                  </div>
                 </div>
                 <div className="flex gap-2">
                   <form action={toggleChannelAction}>
@@ -170,7 +182,7 @@ export default async function ChannelsPage({
                 </div>
               </div>
               {channel.type === "WHATSAPP_CHANNEL" ? (
-                <div className="grid gap-3 rounded-md border border-amber-300 bg-amber-50 p-4 text-sm">
+                <div className="grid gap-3 rounded-md border border-amber-300 bg-[var(--warning-subtle)] p-4 text-sm">
                   <p>
                     Este registro usa o tipo legado WHATSAPP_CHANNEL. Converta-o
                     explicitamente para Grupo do WhatsApp; o ID, as publicacoes
@@ -342,7 +354,7 @@ function ChannelForm({
         />
       </label>
       <label className="grid gap-2">
-        <Label>Inicio permitido</Label>
+        <Label>Início permitido</Label>
         <Input
           name="allowedStartTime"
           type="time"
@@ -444,11 +456,11 @@ function ChannelForm({
           defaultValue={channel?.webProfileKey ?? "principal"}
         />
         <span className="text-xs text-[var(--muted-foreground)]">
-          Somente letras, numeros, hifen e underscore; nenhum path e exibido.
+          Somente letras, números, hífen e underscore; nenhum caminho é exibido.
         </span>
       </label>
       <label className="grid gap-2">
-        <Label>Maximo de pendencias assistidas</Label>
+        <Label>Máximo de pendências assistidas</Label>
         <Input
           name="maxPendingPublications"
           type="number"
@@ -462,11 +474,11 @@ function ChannelForm({
         </span>
       </label>
       <label className="grid gap-2 md:col-span-3">
-        <Label>Cabecalho personalizado</Label>
+        <Label>Cabeçalho personalizado</Label>
         <Input name="customHeader" defaultValue={channel?.customHeader ?? ""} />
       </label>
       <label className="grid gap-2 md:col-span-3">
-        <Label>Rodape personalizado</Label>
+        <Label>Rodapé personalizado</Label>
         <Input name="customFooter" defaultValue={channel?.customFooter ?? ""} />
       </label>
       <label className="flex items-end gap-2 pb-2 text-sm font-medium">
@@ -504,7 +516,7 @@ function WhatsAppWebStatus({
   const lastError = configText(configuration, "webLastError") || "Nenhum";
 
   return (
-    <div className="mt-4 grid gap-3 rounded-md border border-amber-300 bg-amber-50 p-4 text-sm">
+    <div className="mt-4 grid gap-3 rounded-md border border-amber-300 bg-[var(--warning-subtle)] p-4 text-sm">
       <p className="font-semibold">WhatsApp Groups Web experimental</p>
       <div className="grid gap-1 md:grid-cols-2">
         <p>Web experimental: {enabled ? "ATIVADO" : "DESATIVADO"}</p>
@@ -512,18 +524,18 @@ function WhatsAppWebStatus({
         <p>
           Perfil: {configText(configuration, "webProfileKey") || "principal"}
         </p>
-        <p>Sessao: {session}</p>
+        <p>Sessão: {session}</p>
         <p>Grupo: {group}</p>
         <p>Dry run: {dryRun}</p>
         <p>
-          Ultima tentativa:{" "}
+          Última tentativa:{" "}
           {configText(configuration, "webLastAttemptAt") || "Nunca"}
         </p>
         <p>
-          Ultimo sucesso:{" "}
+          Último sucesso:{" "}
           {configText(configuration, "webLastSuccessAt") || "Nunca"}
         </p>
-        <p>Ultimo erro/rootCause: {lastError}</p>
+        <p>Último erro e causa-raiz: {lastError}</p>
         <p>
           Pausa:{" "}
           {paused
@@ -532,7 +544,7 @@ function WhatsAppWebStatus({
         </p>
       </div>
       <p>
-        Login, health, localizacao e dry run sao executados apenas pelos
+        Login, health, localização e dry run são executados apenas pelos
         comandos locais documentados; o dashboard nunca abre Chromium nem recebe
         QR, cookies ou storage.
       </p>
@@ -572,7 +584,7 @@ function WhatsAppWebStatus({
         <form action={invalidateWhatsAppWebAuthorizationAction}>
           <input type="hidden" name="id" value={channelId} />
           <Button type="submit" variant="outline">
-            Invalidar autorizacao Web
+            Invalidar autorização Web
           </Button>
         </form>
       </div>

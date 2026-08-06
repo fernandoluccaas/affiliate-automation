@@ -9,16 +9,21 @@ import {
 } from "@affiliate/operations";
 import { AdminShell } from "@/components/admin-shell";
 import { formatDateTime } from "@/lib/format";
+import { Alert } from "@/components/ui/alert";
+import { StatusBadge } from "@/components/ui/status-badge";
+import { CopyButton } from "@/components/ui/copy-button";
 
 export const dynamic = "force-dynamic";
 
 function StatusCard(props: { title: string; value: string; detail?: string }) {
   return (
-    <div className="rounded-md border bg-white p-4">
+    <article className="rounded-[var(--radius-lg)] border bg-[var(--surface)] p-4 shadow-[var(--shadow-sm)]">
       <h2 className="text-sm text-[var(--muted-foreground)]">{props.title}</h2>
-      <p className="mt-2 text-xl font-semibold">{props.value}</p>
+      <div className="mt-2">
+        <StatusBadge status={props.value} />
+      </div>
       {props.detail ? <p className="mt-1 text-xs">{props.detail}</p> : null}
-    </div>
+    </article>
   );
 }
 
@@ -45,10 +50,10 @@ export default async function OperationsPage() {
 
   return (
     <AdminShell currentPath="/operacoes" title="Operações locais">
-      <p className="rounded-md border border-blue-200 bg-blue-50 p-3 text-sm">
+      <Alert tone="info" title="Console somente leitura">
         Painel somente leitura. Processos, backups, tarefas e dispatch continuam
         disponíveis exclusivamente no terminal local.
-      </p>
+      </Alert>
 
       <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatusCard title="Aplicação" value={status.status} />
@@ -177,21 +182,24 @@ export default async function OperationsPage() {
         />
       </section>
 
-      <section className="rounded-md border bg-white p-4">
-        <h2 className="font-semibold">Processos supervisionados</h2>
+      <section className="rounded-[var(--radius-lg)] border bg-[var(--surface)] p-5 shadow-[var(--shadow-sm)]">
+        <h2 className="text-lg font-semibold">Processos supervisionados</h2>
         <div className="mt-3 grid gap-2 sm:grid-cols-2">
           {status.components.map((component) => (
             <div
               key={component.component}
               className="rounded border p-3 text-sm"
             >
-              <strong>{component.component}</strong>: {component.status}
+              <div className="flex items-center justify-between gap-3">
+                <strong>{component.component}</strong>
+                <StatusBadge status={component.status} />
+              </div>
               <div className="mt-1 text-xs">
                 restarts {component.restartCount} / crashes consecutivos{" "}
                 {component.consecutiveCrashes}
               </div>
               {component.action ? (
-                <div className="mt-1 text-xs text-red-700">
+                <div className="mt-1 text-xs text-[var(--danger)]">
                   {component.action}
                 </div>
               ) : null}
@@ -203,8 +211,8 @@ export default async function OperationsPage() {
         </div>
       </section>
 
-      <section className="rounded-md border bg-white p-4">
-        <h2 className="font-semibold">Filas WhatsApp Web</h2>
+      <section className="rounded-[var(--radius-lg)] border bg-[var(--surface)] p-5 shadow-[var(--shadow-sm)]">
+        <h2 className="text-lg font-semibold">Filas WhatsApp Web</h2>
         <p className="mt-1 text-xs text-[var(--muted-foreground)]">
           Role horizontalmente quando necessário; os estados não são alterados
           por esta página.
@@ -235,7 +243,7 @@ export default async function OperationsPage() {
                   <td className="px-3 py-2">{queue.activeState ?? "-"}</td>
                   <td className="px-3 py-2">{queue.total}</td>
                   <td className="px-3 py-2">{queue.deliveryUncertain}</td>
-                  <td className="sticky right-0 bg-white px-3 py-2">
+                  <td className="sticky right-0 bg-[var(--surface)] px-3 py-2">
                     {String(queue.paused)}
                   </td>
                 </tr>
@@ -245,8 +253,8 @@ export default async function OperationsPage() {
         </div>
       </section>
 
-      <section className="rounded-md border bg-white p-4">
-        <h2 className="font-semibold">Auditoria de estado</h2>
+      <section className="rounded-[var(--radius-lg)] border bg-[var(--surface)] p-5 shadow-[var(--shadow-sm)]">
+        <h2 className="text-lg font-semibold">Auditoria de estado</h2>
         {findings.length === 0 ? (
           <p className="mt-2 text-sm">Nenhum achado operacional.</p>
         ) : (
@@ -256,7 +264,10 @@ export default async function OperationsPage() {
                 key={`${finding.code}-${index}`}
                 className="rounded border p-3"
               >
-                <strong>{finding.severity}</strong> — {finding.code}
+                <div className="flex flex-wrap items-center gap-2">
+                  <StatusBadge status={finding.severity} />
+                  <strong>{finding.code}</strong>
+                </div>
                 <div className="mt-1 text-xs">Ação: {finding.action}</div>
               </li>
             ))}
@@ -264,8 +275,14 @@ export default async function OperationsPage() {
         )}
       </section>
 
-      <section className="rounded-md border bg-white p-4">
-        <h2 className="font-semibold">Comandos locais somente leitura</h2>
+      <section className="rounded-[var(--radius-lg)] border bg-[var(--surface)] p-5 shadow-[var(--shadow-sm)]">
+        <h2 className="text-lg font-semibold">
+          Comandos locais somente leitura
+        </h2>
+        <p className="mt-1 text-sm text-[var(--foreground-secondary)]">
+          Copiar um comando não o executa. Revise o efeito antes de usá-lo no
+          terminal local.
+        </p>
         <div className="mt-3 grid gap-2">
           {[
             "npm run ops:preflight",
@@ -283,12 +300,15 @@ export default async function OperationsPage() {
             "npm run ops:burn-in:status",
             "npm run ops:burn-in:report",
           ].map((command) => (
-            <code
+            <div
               key={command}
-              className="select-all rounded bg-slate-950 p-2 text-xs text-white"
+              className="flex items-center gap-2 rounded-md bg-[#081018] p-2 text-white"
             >
-              {command}
-            </code>
+              <code className="min-w-0 flex-1 select-all overflow-x-auto text-xs">
+                {command}
+              </code>
+              <CopyButton value={command} label="Copiar comando" />
+            </div>
           ))}
         </div>
       </section>
