@@ -518,14 +518,14 @@ function compactPlanningDecisions(decisions: PublicationPlanningDecision[]) {
           ? 95
           : decision.planningResult === "ACTIVE_PUBLICATION_EXISTS"
             ? 92
-        : decision.planningResult === "BLOCKED_BY_DELIVERY_UNCERTAIN"
-          ? 90
-          : decision.planningResult === "ALREADY_EXISTS"
-            ? 80
-            : decision.planningResult === "BLOCKED_BY_CHANNEL_PAUSE" ||
-                decision.planningResult === "BLOCKED_BY_DISABLED_CHANNEL"
-              ? 70
-              : 10;
+            : decision.planningResult === "BLOCKED_BY_DELIVERY_UNCERTAIN"
+              ? 90
+              : decision.planningResult === "ALREADY_EXISTS"
+                ? 80
+                : decision.planningResult === "BLOCKED_BY_CHANNEL_PAUSE" ||
+                    decision.planningResult === "BLOCKED_BY_DISABLED_CHANNEL"
+                  ? 70
+                  : 10;
     return planningPriority + executionPriority;
   };
 
@@ -857,10 +857,11 @@ export async function createPublicationIdempotently(
 
 export async function scheduleReadyOffers(
   now = new Date(),
-  options: { planningRunId?: string } = {},
+  options: { planningRunId?: string; preferredOfferIds?: string[] } = {},
 ) {
   const metrics = emptyMetrics();
-  const [offers, channels] = await Promise.all([
+  const preferredOfferIds = [...new Set(options.preferredOfferIds ?? [])];
+  const [fallbackOffers, preferredOffers, channels] = await Promise.all([
     prisma.offer.findMany({
       where: {
         status: { in: ["READY_TO_PUBLISH", "SCHEDULED", "PUBLISHED"] },
@@ -869,10 +870,36 @@ export async function scheduleReadyOffers(
       take: 50,
       include: { affiliateLinks: true },
     }),
+    preferredOfferIds.length > 0
+      ? prisma.offer.findMany({
+          where: {
+            id: { in: preferredOfferIds },
+            status: { in: ["READY_TO_PUBLISH", "SCHEDULED", "PUBLISHED"] },
+          },
+          include: { affiliateLinks: true },
+        })
+      : Promise.resolve([]),
     prisma.channel.findMany({ orderBy: { createdAt: "asc" } }),
   ]);
+  const offers = [
+    ...new Map(
+      [...preferredOffers, ...fallbackOffers].map((offer) => [offer.id, offer]),
+    ).values(),
+  ];
   metrics.readyOffersFound = offers.length;
-  const prioritizedOffers = [...offers].sort(compareReadyOfferPriority);
+  const preferredOrder = new Map(
+    preferredOfferIds.map((offerId, index) => [offerId, index]),
+  );
+  const prioritizedOffers = [...offers].sort((left, right) => {
+    const leftOrder = preferredOrder.get(left.id);
+    const rightOrder = preferredOrder.get(right.id);
+    if (leftOrder !== undefined || rightOrder !== undefined) {
+      if (leftOrder === undefined) return 1;
+      if (rightOrder === undefined) return -1;
+      if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+    }
+    return compareReadyOfferPriority(left, right);
+  });
   const scheduledChannelIds = new Set<string>();
   const selectedOfferIds = new Set<string>();
   const whatsappQueues = new Map<
@@ -1112,7 +1139,11 @@ export async function scheduleReadyOffers(
           await prisma.$transaction(async (tx) => {
             if (webExperimental) {
               await lockWhatsAppWebChannelForUpdate(tx, channel.id);
-              const queue = await getWhatsAppWebQueueStatus(tx, channel.id, now);
+              const queue = await getWhatsAppWebQueueStatus(
+                tx,
+                channel.id,
+                now,
+              );
               activePublicationId = queue.activePublicationId;
               if (activePublicationId) return;
             }
@@ -1780,9 +1811,33 @@ export async function runWorkerCycle(
   if (refresh) metrics.refresh = refresh;
 
   const scheduled = await runStage("schedule", () =>
-    dependencies.scheduleReadyOffers(now, { planningRunId: run.id }),
+    dependencies.scheduleReadyOffers(now, {
+      planningRunId: run.id,
+      ...(discovery?.selectedOfferIds
+        ? { preferredOfferIds: discovery.selectedOfferIds }
+        : {}),
+    }),
   );
-  if (scheduled) mergeMetrics(metrics, scheduled);
+  if (scheduled) {
+    mergeMetrics(metrics, scheduled);
+    if (discovery?.importJobId) {
+      const skippedByChannelPolicy = Object.values(
+        scheduled.skipReasons ?? {},
+      ).reduce((total, count) => total + count, 0);
+      await prisma.importJob
+        ?.update({
+          where: { id: discovery.importJobId },
+          data: {
+            summary: {
+              ...discovery.metrics,
+              scheduled: scheduled.scheduled,
+              skippedByChannelPolicy,
+            },
+          },
+        })
+        .catch(() => undefined);
+    }
+  }
 
   const retried = await runStage(
     "retry",

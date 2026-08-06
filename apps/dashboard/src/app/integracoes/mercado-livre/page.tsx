@@ -1,12 +1,17 @@
 import { ArrowLeft, Plus, Save, Search } from "lucide-react";
 import Link from "next/link";
-import { prisma } from "@affiliate/database";
+import { prisma, type Prisma } from "@affiliate/database";
 import {
   createMercadoLivreConnector,
   parseMercadoLivreAffiliateTags,
   sanitizeMercadoLivreAffiliateErrorMessage,
   type MercadoLivreCategory,
 } from "@affiliate/marketplace-connectors";
+import {
+  normalizeMultiCategorySettings,
+  resolveMultiCategoryRuntimeConfig,
+  selectBalancedMultiCategoryOffers,
+} from "@affiliate/marketplace-discovery";
 import { AdminShell } from "@/components/admin-shell";
 import { EmptyState } from "@/components/empty-state";
 import { Button } from "@/components/ui/button";
@@ -152,6 +157,61 @@ function lastRunObjectMetrics(value: unknown) {
         ] as const,
     )
     .filter(([, entries]) => entries.length > 0);
+}
+
+function multiCategoryRunSummary(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const multiCategory = (value as Record<string, unknown>).multiCategory;
+  if (
+    !multiCategory ||
+    typeof multiCategory !== "object" ||
+    Array.isArray(multiCategory)
+  ) {
+    return null;
+  }
+  const record = multiCategory as Record<string, unknown>;
+  const categories = Array.isArray(record.categories)
+    ? record.categories.flatMap((entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry))
+          return [];
+        const category = entry as Record<string, unknown>;
+        return typeof category.categoryId === "string"
+          ? [
+              {
+                categoryId: category.categoryId,
+                requested: Number(category.requested ?? 0),
+                valid: Number(category.valid ?? 0),
+                rejected: Number(category.rejected ?? 0),
+                selected: Number(category.selected ?? 0),
+                quotaMet: category.quotaMet === true,
+                reason:
+                  typeof category.reason === "string" ? category.reason : null,
+              },
+            ]
+          : [];
+      })
+    : [];
+  const distribution = Array.isArray(record.distribution)
+    ? record.distribution.flatMap((entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry))
+          return [];
+        const item = entry as Record<string, unknown>;
+        return typeof item.categoryId === "string"
+          ? [
+              {
+                position: Number(item.position ?? 0),
+                categoryId: item.categoryId,
+              },
+            ]
+          : [];
+      })
+    : [];
+  return {
+    categories,
+    distribution,
+    crossCategoryDuplicates: Number(record.crossCategoryDuplicates ?? 0),
+    quotaNotMet: Number(record.quotaNotMet ?? 0),
+  };
 }
 
 function importJobStatusLabel(status: string) {
@@ -417,6 +477,28 @@ export default async function MercadoLivreIntegrationPage({
   const params = await searchParams;
   const message = messageText(params?.message);
   const selectedCategoryId = single(params?.categoryId);
+  const sessionFilter = single(params?.sessionFilter);
+  const categoryFilter = single(params?.categoryFilter);
+  const statusFilter = single(params?.statusFilter);
+  const dateFilter = single(params?.dateFilter);
+  const importJobWhere: Prisma.ImportJobWhereInput = {
+    marketplace: "MERCADO_LIVRE",
+    ...(sessionFilter ? { id: sessionFilter } : {}),
+    ...(categoryFilter ? { categoryId: categoryFilter } : {}),
+    ...([
+      "QUEUED",
+      "RUNNING",
+      "SUCCEEDED",
+      "SUCCEEDED_WITH_ERRORS",
+      "FAILED",
+      "DUPLICATE",
+    ].includes(statusFilter ?? "")
+      ? { status: statusFilter as Prisma.EnumImportJobStatusFilter }
+      : {}),
+    ...(dateFilter && !Number.isNaN(Date.parse(`${dateFilter}T00:00:00Z`))
+      ? { createdAt: { gte: new Date(`${dateFilter}T00:00:00Z`) } }
+      : {}),
+  };
   const [account, config, latestImportJob] = await Promise.all([
     prisma.marketplaceAccount.findFirst({
       where: { marketplace: "MERCADO_LIVRE", enabled: true },
@@ -451,10 +533,17 @@ export default async function MercadoLivreIntegrationPage({
         refreshIntervalMinutes: true,
         lastRunAt: true,
         lastRunSummary: true,
+        multiCategoryEnabled: true,
+        multiCategorySettings: true,
+        multiCategoryMinOffersPerCategory: true,
+        multiCategoryMaxOffersPerCategory: true,
+        multiCategoryMaxTotalPerSession: true,
+        multiCategorySelectionMode: true,
+        multiCategoryAllowCategoryBackfill: true,
       },
     }),
     prisma.importJob.findFirst({
-      where: { marketplace: "MERCADO_LIVRE" },
+      where: importJobWhere,
       orderBy: { createdAt: "desc" },
       select: {
         categoryId: true,
@@ -473,6 +562,7 @@ export default async function MercadoLivreIntegrationPage({
         startedAt: true,
         finishedAt: true,
         errorMessage: true,
+        summary: true,
         createdAt: true,
         items: {
           where: { status: { not: "SUCCEEDED" } },
@@ -506,8 +596,90 @@ export default async function MercadoLivreIntegrationPage({
   const affiliateLastCookieUpdateAt =
     affiliateSession?.lastCookieUpdateAt ?? null;
   const categoryIds = jsonStringArray(config?.categoryIds);
+  const multiCategorySettings = normalizeMultiCategorySettings(
+    categoryIds,
+    config?.multiCategorySettings,
+  );
+  const multiCategorySettingsById = new Map(
+    multiCategorySettings.map((setting) => [setting.categoryId, setting]),
+  );
+  const multiCategoryRuntime = resolveMultiCategoryRuntimeConfig(process.env, {
+    enabled: config?.multiCategoryEnabled ?? false,
+    minOffersPerCategory: config?.multiCategoryMinOffersPerCategory ?? 1,
+    maxOffersPerCategory: config?.multiCategoryMaxOffersPerCategory ?? 2,
+    maxTotalPerSession: config?.multiCategoryMaxTotalPerSession ?? 12,
+    selectionMode: config?.multiCategorySelectionMode ?? "ROUND_ROBIN",
+    allowCategoryBackfill: config?.multiCategoryAllowCategoryBackfill ?? false,
+  });
+  const previewOffers =
+    categoryIds.length > 0
+      ? await prisma.offer.findMany({
+          where: {
+            marketplace: "MERCADO_LIVRE",
+            sourceCategoryId: { in: categoryIds },
+            status: {
+              in: [
+                "READY_TO_PUBLISH",
+                "READY_FOR_AFFILIATE_LINK",
+                "SCHEDULED",
+                "PUBLISHED",
+              ],
+            },
+          },
+          orderBy: { collectedAt: "desc" },
+          take: 200,
+          select: {
+            id: true,
+            productId: true,
+            externalProductId: true,
+            sourceCategoryId: true,
+            score: true,
+            bestSellerPosition: true,
+            discountPercentage: true,
+            scoreCompletenessPercentage: true,
+            affiliateUrl: true,
+            status: true,
+          },
+        })
+      : [];
+  const previewSelection = selectBalancedMultiCategoryOffers({
+    settings: multiCategorySettings,
+    config: multiCategoryRuntime,
+    candidates: previewOffers.flatMap((offer) =>
+      offer.sourceCategoryId
+        ? [
+            {
+              offerId: offer.id,
+              productId: offer.productId ?? offer.externalProductId,
+              sourceCategoryIds: [offer.sourceCategoryId],
+              score: offer.score,
+              bestSellerPosition: offer.bestSellerPosition,
+              discountPercentage:
+                offer.discountPercentage === null
+                  ? null
+                  : Number(offer.discountPercentage),
+              completenessPercentage:
+                offer.scoreCompletenessPercentage === null
+                  ? null
+                  : Number(offer.scoreCompletenessPercentage),
+              eligible:
+                Boolean(offer.affiliateUrl) &&
+                ["READY_TO_PUBLISH", "SCHEDULED", "PUBLISHED"].includes(
+                  offer.status,
+                ),
+              rejectionReason: offer.affiliateUrl
+                ? offer.status
+                : "AFFILIATE_LINK_REQUIRED",
+            },
+          ]
+        : [],
+    ),
+  });
   const metrics = lastRunMetrics(config?.lastRunSummary);
   const metricGroups = lastRunObjectMetrics(config?.lastRunSummary);
+  const multiCategorySummary =
+    multiCategoryRunSummary(latestImportJob?.summary) ??
+    multiCategoryRunSummary(config?.lastRunSummary);
   const importJobMetrics = latestImportJob
     ? [
         ["Encontrados", latestImportJob.totalFound],
@@ -901,6 +1073,34 @@ export default async function MercadoLivreIntegrationPage({
         </CardContent>
       </Card>
 
+      <Card>
+        <CardHeader>
+          <CardTitle>Preview multicategoria somente leitura</CardTitle>
+        </CardHeader>
+        <CardContent className="grid gap-3 text-sm">
+          <p className="text-[var(--muted-foreground)]">
+            Usa as ofertas atuais para estimar a próxima distribuição. Não cria
+            Publication, não envia mensagens e não chama integrações externas.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <span className="rounded border px-2 py-1">
+              {previewOffers.length} candidatas
+            </span>
+            <span className="rounded border px-2 py-1">
+              {previewSelection.selected.length} selecionadas
+            </span>
+            <span className="rounded border px-2 py-1">
+              {previewSelection.quotaNotMet} cotas não atendidas
+            </span>
+          </div>
+          <div className="text-xs">
+            {previewSelection.selected
+              .map((offer, index) => `${index + 1}. ${offer.primaryCategoryId}`)
+              .join(" → ") || "Nenhuma oferta elegível no estado atual."}
+          </div>
+        </CardContent>
+      </Card>
+
       <div className="grid gap-4 lg:grid-cols-[1.5fr_1fr]">
         <Card>
           <CardHeader>
@@ -923,6 +1123,14 @@ export default async function MercadoLivreIntegrationPage({
                   defaultChecked={config?.bestSellersEnabled ?? true}
                 />
                 Usar ranking oficial de mais vendidos
+              </label>
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  name="multiCategoryEnabled"
+                  type="checkbox"
+                  defaultChecked={config?.multiCategoryEnabled ?? false}
+                />
+                Habilitar seleção multicategoria balanceada
               </label>
 
               <div className="grid gap-4 md:grid-cols-2">
@@ -981,7 +1189,59 @@ export default async function MercadoLivreIntegrationPage({
                     defaultValue={config?.refreshIntervalMinutes ?? 360}
                   />
                 </Field>
+                <Field label="Mínimo de ofertas por categoria">
+                  <Input
+                    name="multiCategoryMinOffersPerCategory"
+                    type="number"
+                    min={0}
+                    max={2}
+                    defaultValue={
+                      config?.multiCategoryMinOffersPerCategory ?? 1
+                    }
+                  />
+                </Field>
+                <Field label="Máximo de ofertas por categoria">
+                  <Input
+                    name="multiCategoryMaxOffersPerCategory"
+                    type="number"
+                    min={1}
+                    max={10}
+                    defaultValue={
+                      config?.multiCategoryMaxOffersPerCategory ?? 2
+                    }
+                  />
+                </Field>
+                <Field label="Máximo total por sessão">
+                  <Input
+                    name="multiCategoryMaxTotalPerSession"
+                    type="number"
+                    min={1}
+                    max={100}
+                    defaultValue={config?.multiCategoryMaxTotalPerSession ?? 12}
+                  />
+                </Field>
+                <Field label="Modo de seleção">
+                  <Select
+                    name="multiCategorySelectionMode"
+                    defaultValue={
+                      config?.multiCategorySelectionMode ?? "ROUND_ROBIN"
+                    }
+                  >
+                    <option value="ROUND_ROBIN">Round robin</option>
+                  </Select>
+                </Field>
               </div>
+
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  name="multiCategoryAllowCategoryBackfill"
+                  type="checkbox"
+                  defaultChecked={
+                    config?.multiCategoryAllowCategoryBackfill ?? false
+                  }
+                />
+                Permitir backfill controlado entre categorias
+              </label>
 
               <Field label="Categorias">
                 <Textarea
@@ -995,6 +1255,83 @@ export default async function MercadoLivreIntegrationPage({
                   folha.
                 </p>
               </Field>
+
+              {configuredCategories.length > 0 ? (
+                <div className="overflow-x-auto rounded-md border">
+                  <table className="w-full text-left text-sm">
+                    <thead className="bg-[var(--muted)]">
+                      <tr>
+                        <th className="p-2">Ativa</th>
+                        <th className="p-2">Categoria oficial</th>
+                        <th className="p-2">Prioridade</th>
+                        <th className="p-2">Mínimo</th>
+                        <th className="p-2">Máximo</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {configuredCategories.map((category) => {
+                        const setting = multiCategorySettingsById.get(
+                          category.id,
+                        );
+                        return (
+                          <tr key={category.id} className="border-t">
+                            <td className="p-2">
+                              <input
+                                aria-label={`Habilitar ${category.id}`}
+                                name={`categoryEnabled:${category.id}`}
+                                type="checkbox"
+                                defaultChecked={setting?.enabled ?? true}
+                              />
+                            </td>
+                            <td className="p-2">
+                              <span className="font-medium">
+                                {category.details?.name ??
+                                  setting?.name ??
+                                  category.id}
+                              </span>
+                              <span className="block text-xs text-[var(--muted-foreground)]">
+                                {category.id} · categoria folha
+                              </span>
+                            </td>
+                            <td className="p-2">
+                              <Input
+                                aria-label={`Prioridade ${category.id}`}
+                                name={`categoryPriority:${category.id}`}
+                                type="number"
+                                min={-100}
+                                max={100}
+                                defaultValue={setting?.priority ?? 0}
+                              />
+                            </td>
+                            <td className="p-2">
+                              <Input
+                                aria-label={`Mínimo ${category.id}`}
+                                name={`categoryMin:${category.id}`}
+                                type="number"
+                                min={0}
+                                max={2}
+                                defaultValue={setting?.minOffers ?? ""}
+                                placeholder="global"
+                              />
+                            </td>
+                            <td className="p-2">
+                              <Input
+                                aria-label={`Máximo ${category.id}`}
+                                name={`categoryMax:${category.id}`}
+                                type="number"
+                                min={1}
+                                max={10}
+                                defaultValue={setting?.maxOffers ?? ""}
+                                placeholder="global"
+                              />
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ) : null}
 
               <Button type="submit">
                 <Save aria-hidden="true" size={16} />
@@ -1320,6 +1657,42 @@ export default async function MercadoLivreIntegrationPage({
               <span className="text-[var(--muted-foreground)]">Conta</span>
               <span>{account?.status ?? "DISCONNECTED"}</span>
             </div>
+            <form method="get" className="grid gap-2 rounded-md border p-3 sm:grid-cols-2">
+              <Field label="Sessão">
+                <Input
+                  name="sessionFilter"
+                  defaultValue={sessionFilter ?? ""}
+                  placeholder="ID do ImportJob"
+                />
+              </Field>
+              <Field label="Categoria">
+                <Input
+                  name="categoryFilter"
+                  defaultValue={categoryFilter ?? ""}
+                  placeholder="ID oficial"
+                />
+              </Field>
+              <Field label="Marketplace">
+                <Select name="marketplaceFilter" defaultValue="MERCADO_LIVRE">
+                  <option value="MERCADO_LIVRE">Mercado Livre</option>
+                </Select>
+              </Field>
+              <Field label="Status">
+                <Select name="statusFilter" defaultValue={statusFilter ?? ""}>
+                  <option value="">Todos</option>
+                  <option value="RUNNING">Em execução</option>
+                  <option value="SUCCEEDED">Concluída</option>
+                  <option value="SUCCEEDED_WITH_ERRORS">Parcial</option>
+                  <option value="FAILED">Falhou</option>
+                </Select>
+              </Field>
+              <Field label="Data inicial">
+                <Input name="dateFilter" type="date" defaultValue={dateFilter ?? ""} />
+              </Field>
+              <div className="flex items-end">
+                <Button type="submit" variant="outline">Filtrar sessão</Button>
+              </div>
+            </form>
             {latestImportJob ? (
               <>
                 <dl className="grid gap-3 sm:grid-cols-3">
@@ -1479,6 +1852,47 @@ export default async function MercadoLivreIntegrationPage({
                     </dl>
                   </div>
                 ))}
+                {multiCategorySummary ? (
+                  <div className="grid gap-3 rounded-md border bg-[var(--background)] p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-medium">Sessão multicategoria</span>
+                      <span className="text-xs text-[var(--muted-foreground)]">
+                        {multiCategorySummary.crossCategoryDuplicates}{" "}
+                        duplicados · {multiCategorySummary.quotaNotMet} cotas
+                        não atendidas
+                      </span>
+                    </div>
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      {multiCategorySummary.categories.map((category) => (
+                        <div
+                          key={category.categoryId}
+                          className="rounded border p-2 text-xs"
+                        >
+                          <div className="font-medium">
+                            {category.categoryId}
+                          </div>
+                          <div>
+                            {category.valid} válidas · {category.rejected}{" "}
+                            rejeitadas · {category.selected} selecionadas
+                          </div>
+                          {!category.quotaMet ? (
+                            <div className="text-[var(--destructive)]">
+                              {category.reason ?? "CATEGORY_QUOTA_NOT_MET"}
+                            </div>
+                          ) : null}
+                        </div>
+                      ))}
+                    </div>
+                    <div className="text-xs text-[var(--muted-foreground)]">
+                      Distribuição:{" "}
+                      {multiCategorySummary.distribution
+                        .map(
+                          (entry) => `${entry.position}. ${entry.categoryId}`,
+                        )
+                        .join(" → ") || "nenhuma oferta selecionada"}
+                    </div>
+                  </div>
+                ) : null}
               </div>
             )}
           </CardContent>

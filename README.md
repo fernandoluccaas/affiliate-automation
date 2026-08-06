@@ -124,6 +124,12 @@ The worker sends confirmed offer facts to the selected provider using structured
 
 ## Mercado Livre
 
+### Descoberta multicategoria balanceada
+
+A descoberta oficial pode processar várias categorias-folha na mesma sessão, aplicar cotas por categoria, deduplicar produtos e entregar ao scheduler uma ordem round robin. O recurso é desativado por padrão e preserva a geração/reutilização automática de links reais `meli.la`; sem uma sessão afiliada válida, a oferta permanece `READY_FOR_AFFILIATE_LINK` e nunca usa a URL original como fallback.
+
+Use `npm run discovery:multi-category:status`, `preflight`, `preview` e `npm run discovery:multi-category:run -- --dry-run` para inspeção sem chamadas externas ou escrita. A execução real exige `--confirm-discovery`. Configuração, quotas, backfill, canais, auditoria e troubleshooting estão em [docs/multi-category-discovery.md](docs/multi-category-discovery.md).
+
 Phase 3A adds an official Mercado Livre connector. Configure the app credentials only on the server:
 
 ```env

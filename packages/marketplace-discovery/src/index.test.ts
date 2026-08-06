@@ -394,8 +394,7 @@ describe("diagnoseMercadoLivreProduct", () => {
       diagnoseMercadoLivreProduct(marketplace, "MLB62081577"),
     ).resolves.toMatchObject({
       productPermalink: null,
-      resolvedProductUrl:
-        "https://www.mercadolivre.com.br/p/MLB62081577",
+      resolvedProductUrl: "https://www.mercadolivre.com.br/p/MLB62081577",
       productUrlSource: "CANONICAL_CATALOG_PDP",
       selectedItemId: "MLB4827891325",
       selectedSellerId: "37175967",
@@ -678,8 +677,7 @@ describe("MercadoLivreHighlightResolver", () => {
           resolutionStrategy: "PRODUCT_CATALOG_CANONICAL_PDP",
           offerCandidate: {
             externalProductId: "MLB62081577",
-            productUrl:
-              "https://www.mercadolivre.com.br/p/MLB62081577",
+            productUrl: "https://www.mercadolivre.com.br/p/MLB62081577",
             currentPrice: 1429,
             stockStatus: "UNKNOWN",
             candidateKind: "CATALOG_PRODUCT",
@@ -1130,6 +1128,62 @@ describe("candidate collection metrics", () => {
       resolvedCatalogProductsViaSummary: 1,
       resolvedItems: 0,
     });
+  });
+
+  it("preserves every source category when the same item crosses categories", async () => {
+    const marketplace = connector({
+      getCategory: vi.fn().mockImplementation((categoryId: string) =>
+        Promise.resolve({
+          id: categoryId,
+          name: categoryId,
+          pathFromRoot: [],
+          children: [],
+        }),
+      ),
+      getBestSellers: vi.fn().mockImplementation((categoryId: string) =>
+        Promise.resolve([
+          {
+            id: "MLB-SHARED",
+            position: categoryId === "CATEGORY_CASA" ? 2 : 1,
+            type: "ITEM",
+            rawType: "ITEM",
+            categoryId,
+          },
+        ]),
+      ),
+      getItemsWithDiagnostics: vi.fn().mockResolvedValue({
+        candidates: [
+          {
+            marketplace: "MERCADO_LIVRE",
+            externalProductId: "MLB-SHARED",
+            title: "Produto fictício",
+            productUrl: "https://produto.example/MLB-SHARED",
+            currentPrice: 100,
+          },
+        ],
+        diagnostics: {
+          itemsFetched: 1,
+          priceApiFetched: 1,
+          priceFallbackUsed: 0,
+          priceUnavailable: 0,
+        },
+      }),
+    });
+
+    const candidates = await discoverCandidatesFromLeafCategories(
+      marketplace,
+      ["CATEGORY_CELULARES", "CATEGORY_CASA"],
+      2,
+      createMercadoLivreDiscoveryMetrics(),
+    );
+
+    expect(candidates).toEqual([
+      expect.objectContaining({
+        sourceCategoryId: "CATEGORY_CELULARES",
+        sourceCategoryIds: ["CATEGORY_CELULARES", "CATEGORY_CASA"],
+        bestSellerPosition: 1,
+      }),
+    ]);
   });
 });
 
@@ -2442,9 +2496,9 @@ describe("refreshMercadoLivreOffers", () => {
     const getProduct = vi.fn();
     const result = await refreshMercadoLivreOffers(new Date(), {
       database: database as never,
-      createConnector: vi.fn().mockResolvedValue(
-        connector({ getItemsWithDiagnostics, getProduct }),
-      ),
+      createConnector: vi
+        .fn()
+        .mockResolvedValue(connector({ getItemsWithDiagnostics, getProduct })),
       ingest: vi.fn().mockResolvedValue(
         readyIngestResult("MLB1234567890", {
           productCreated: false,
@@ -2623,12 +2677,14 @@ describe("refreshMercadoLivreOffers", () => {
               pictureUrls: ["https://http2.mlstatic.com/product.jpg"],
             }),
           ),
-          getProductItems: vi.fn().mockResolvedValue(
-            productItemsResolution(
-              [{ itemId: "MLB1234567890", price: 89.9 }],
-              [],
+          getProductItems: vi
+            .fn()
+            .mockResolvedValue(
+              productItemsResolution(
+                [{ itemId: "MLB1234567890", price: 89.9 }],
+                [],
+              ),
             ),
-          ),
         }),
       ),
       ingest: ingest as never,
@@ -2653,9 +2709,11 @@ describe("refreshMercadoLivreOffers", () => {
     const ingest = vi.fn();
     const result = await refreshMercadoLivreOffers(new Date(), {
       database: database as never,
-      createConnector: vi.fn().mockResolvedValue(
-        connector({ getProduct: vi.fn().mockResolvedValue(null) }),
-      ),
+      createConnector: vi
+        .fn()
+        .mockResolvedValue(
+          connector({ getProduct: vi.fn().mockResolvedValue(null) }),
+        ),
       ingest: ingest as never,
     });
 

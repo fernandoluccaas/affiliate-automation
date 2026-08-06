@@ -1,0 +1,21 @@
+{
+  "categories": [
+    "CATEGORY_CELULARES",
+    "CATEGORY_CASA",
+    "CATEGORY_MODA",
+    "CATEGORY_RELOGIOS",
+    "CATEGORY_AUTOMOTIVO",
+    "CATEGORY_ELETRODOMESTICOS"
+  ],
+  "offers": [
+    { "offerId": "offer-celulares-1", "categoryId": "CATEGORY_CELULARES" },
+    { "offerId": "offer-casa-1", "categoryId": "CATEGORY_CASA" },
+    { "offerId": "offer-moda-1", "categoryId": "CATEGORY_MODA" },
+    { "offerId": "offer-relogios-1", "categoryId": "CATEGORY_RELOGIOS" },
+    { "offerId": "offer-automotivo-1", "categoryId": "CATEGORY_AUTOMOTIVO" },
+    {
+      "offerId": "offer-eletrodomesticos-1",
+      "categoryId": "CATEGORY_ELETRODOMESTICOS"
+    }
+  ]
+}

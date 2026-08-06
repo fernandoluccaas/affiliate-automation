@@ -366,21 +366,28 @@ model Offer {
 }
 
 model MercadoLivreDiscoveryConfig {
-  id                        String    @id @default(cuid())
-  enabled                   Boolean   @default(false)
-  siteId                    String    @default("MLB")
-  categoryIds               Json      @default("[]")
-  bestSellersEnabled        Boolean   @default(true)
-  minimumPrice              Decimal?  @db.Decimal(12, 2)
-  maximumPrice              Decimal?  @db.Decimal(12, 2)
-  minimumDiscountPercentage Decimal?  @db.Decimal(5, 2)
-  minimumScore              Int       @default(0)
-  maxCandidatesPerCategory  Int       @default(20)
-  refreshIntervalMinutes    Int       @default(360)
-  lastRunAt                 DateTime?
-  lastRunSummary            Json?
-  createdAt                 DateTime  @default(now())
-  updatedAt                 DateTime  @updatedAt
+  id                                 String    @id @default(cuid())
+  enabled                            Boolean   @default(false)
+  siteId                             String    @default("MLB")
+  categoryIds                        Json      @default("[]")
+  bestSellersEnabled                 Boolean   @default(true)
+  minimumPrice                       Decimal?  @db.Decimal(12, 2)
+  maximumPrice                       Decimal?  @db.Decimal(12, 2)
+  minimumDiscountPercentage          Decimal?  @db.Decimal(5, 2)
+  minimumScore                       Int       @default(0)
+  maxCandidatesPerCategory           Int       @default(20)
+  refreshIntervalMinutes             Int       @default(360)
+  lastRunAt                          DateTime?
+  lastRunSummary                     Json?
+  multiCategoryEnabled               Boolean   @default(false)
+  multiCategorySettings              Json      @default("[]")
+  multiCategoryMinOffersPerCategory  Int       @default(1)
+  multiCategoryMaxOffersPerCategory  Int       @default(2)
+  multiCategoryMaxTotalPerSession    Int       @default(12)
+  multiCategorySelectionMode         String    @default("ROUND_ROBIN")
+  multiCategoryAllowCategoryBackfill Boolean   @default(false)
+  createdAt                          DateTime  @default(now())
+  updatedAt                          DateTime  @updatedAt
 }
 
 model Coupon {

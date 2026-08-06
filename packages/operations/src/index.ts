@@ -57,10 +57,7 @@ export const OPERATIONS_WORKSPACE_ROOT = resolve(
 );
 
 export type OperationalSeverity =
-  | "INFO"
-  | "WARNING"
-  | "CRITICAL"
-  | "HUMAN_REVIEW_REQUIRED";
+  "INFO" | "WARNING" | "CRITICAL" | "HUMAN_REVIEW_REQUIRED";
 
 export type OperationalFinding = {
   code: string;
@@ -155,7 +152,11 @@ export type SupervisorComponentState = {
   lastExitReason: "REQUESTED" | "CRASH" | null;
 };
 
-export function supervisorBackoffMs(crashes: number, baseMs = 1_000, maxMs = 60_000) {
+export function supervisorBackoffMs(
+  crashes: number,
+  baseMs = 1_000,
+  maxMs = 60_000,
+) {
   return Math.min(maxMs, baseMs * 2 ** Math.max(0, crashes - 1));
 }
 
@@ -185,7 +186,12 @@ export function resetSupervisorStateAfterStability(
 
 export function nextSupervisorState(
   state: SupervisorComponentState,
-  input: { requested: boolean; exitCode: number; maxCrashes: number; now: Date },
+  input: {
+    requested: boolean;
+    exitCode: number;
+    maxCrashes: number;
+    now: Date;
+  },
 ): SupervisorComponentState {
   if (input.requested) {
     return {
@@ -302,7 +308,11 @@ export function auditOperationalSnapshot(input: {
   }>;
   channels: Array<{ id: string; configuration: unknown }>;
   runningAutomationRuns: Array<{ id: string; startedAt: Date }>;
-  pendingAttempts: Array<{ id: string; publicationId: string; attemptedAt: Date }>;
+  pendingAttempts: Array<{
+    id: string;
+    publicationId: string;
+    attemptedAt: Date;
+  }>;
   workerContext?: WorkerOperationalContext;
 }): OperationalFinding[] {
   const findings: OperationalFinding[] = [];
@@ -338,9 +348,11 @@ export function auditOperationalSnapshot(input: {
     // states that hold (or must hold) the single operational channel slot are
     // considered active for this consistency check.
     if (
-      ["AUTHORIZED_FOR_SEND", "SEND_IN_PROGRESS", "DELIVERY_UNCERTAIN"].includes(
-        state,
-      )
+      [
+        "AUTHORIZED_FOR_SEND",
+        "SEND_IN_PROGRESS",
+        "DELIVERY_UNCERTAIN",
+      ].includes(state)
     ) {
       const ids = activeByChannel.get(publication.channelId) ?? [];
       ids.push(publication.id);
@@ -410,7 +422,8 @@ export function auditOperationalSnapshot(input: {
     if (
       metadata.sendAuthorizationStatus === "ACTIVE" &&
       typeof metadata.sendAuthorizationExpiresAt === "string" &&
-      new Date(metadata.sendAuthorizationExpiresAt).getTime() <= input.now.getTime()
+      new Date(metadata.sendAuthorizationExpiresAt).getTime() <=
+        input.now.getTime()
     ) {
       findings.push({
         code: "WHATSAPP_AUTHORIZATION_EXPIRED_ACTIVE",
@@ -456,7 +469,10 @@ export function auditOperationalSnapshot(input: {
     }
   }
   for (const attempt of input.pendingAttempts) {
-    if (input.now.getTime() - attempt.attemptedAt.getTime() > staleOperationMs) {
+    if (
+      input.now.getTime() - attempt.attemptedAt.getTime() >
+      staleOperationMs
+    ) {
       findings.push({
         code: "PUBLICATION_ATTEMPT_STALE",
         severity: "WARNING",
@@ -680,7 +696,9 @@ export async function applyBackupRetention(input: {
 }) {
   const now = input.now ?? new Date();
   const files = (await readdir(input.directory, { withFileTypes: true }))
-    .filter((entry) => entry.isFile() && /^affiliate-.*\.dump$/.test(entry.name))
+    .filter(
+      (entry) => entry.isFile() && /^affiliate-.*\.dump$/.test(entry.name),
+    )
     .map((entry) => join(input.directory, entry.name));
   const details = await Promise.all(
     files.map(async (file) => ({ file, stats: await stat(file) })),
@@ -690,7 +708,10 @@ export async function applyBackupRetention(input: {
   for (const [index, item] of details.entries()) {
     const expired =
       now.getTime() - item.stats.mtimeMs > input.maxAgeDays * 86_400_000;
-    if ((index >= input.maxCount || expired) && isFileInsideDirectory(input.directory, item.file)) {
+    if (
+      (index >= input.maxCount || expired) &&
+      isFileInsideDirectory(input.directory, item.file)
+    ) {
       await rm(item.file);
       await rm(`${item.file}.manifest.json`, { force: true });
       removed.push(item.file);
@@ -704,10 +725,16 @@ export async function latestBackup(directory: string) {
   const manifests = (await readdir(directory))
     .filter((name) => /^affiliate-.*\.dump\.manifest\.json$/.test(name))
     .map((name) => join(directory, name));
-  const valid: Array<{ file: string; manifest: BackupManifest; stats: Awaited<ReturnType<typeof stat>> }> = [];
+  const valid: Array<{
+    file: string;
+    manifest: BackupManifest;
+    stats: Awaited<ReturnType<typeof stat>>;
+  }> = [];
   for (const file of manifests) {
     try {
-      const manifest = JSON.parse(await readFile(file, "utf8")) as BackupManifest;
+      const manifest = JSON.parse(
+        await readFile(file, "utf8"),
+      ) as BackupManifest;
       const backupFile = join(directory, manifest.file);
       const stats = await stat(backupFile);
       valid.push({ file: backupFile, manifest, stats });
@@ -715,7 +742,11 @@ export async function latestBackup(directory: string) {
       // Invalid manifests are ignored and surfaced by audit/preflight as stale.
     }
   }
-  return valid.sort((a, b) => Number(b.stats.mtimeMs) - Number(a.stats.mtimeMs))[0] ?? null;
+  return (
+    valid.sort(
+      (a, b) => Number(b.stats.mtimeMs) - Number(a.stats.mtimeMs),
+    )[0] ?? null
+  );
 }
 
 export async function rotateLogs(input: {
@@ -781,11 +812,15 @@ export async function logDirectoryStatus(directory: string) {
 
 async function localSupervisorStatus(workspaceRoot: string, now: Date) {
   try {
-    const raw = await readFile(join(workspaceRoot, OPS_ROOT, "supervisor.json"), "utf8");
+    const raw = await readFile(
+      join(workspaceRoot, OPS_ROOT, "supervisor.json"),
+      "utf8",
+    );
     const state = asRecord(JSON.parse(raw.replace(/^\uFEFF/, "")));
     const pid = typeof state.pid === "number" ? state.pid : null;
     const startedAt =
-      typeof state.startedAt === "string" && !Number.isNaN(Date.parse(state.startedAt))
+      typeof state.startedAt === "string" &&
+      !Number.isNaN(Date.parse(state.startedAt))
         ? state.startedAt
         : null;
     let processPresent = false;
@@ -800,9 +835,14 @@ async function localSupervisorStatus(workspaceRoot: string, now: Date) {
     return {
       state: processPresent ? "RUNNING" : "STALE",
       instanceId:
-        typeof state.instanceId === "string" ? state.instanceId.slice(0, 12) : null,
+        typeof state.instanceId === "string"
+          ? state.instanceId.slice(0, 12)
+          : null,
       uptimeSeconds: startedAt
-        ? Math.max(0, Math.floor((now.getTime() - Date.parse(startedAt)) / 1_000))
+        ? Math.max(
+            0,
+            Math.floor((now.getTime() - Date.parse(startedAt)) / 1_000),
+          )
         : 0,
     };
   } catch {
@@ -812,23 +852,33 @@ async function localSupervisorStatus(workspaceRoot: string, now: Date) {
 
 async function localComponentStatus(workspaceRoot: string) {
   try {
-    const raw = await readFile(join(workspaceRoot, OPS_ROOT, "components.json"), "utf8");
+    const raw = await readFile(
+      join(workspaceRoot, OPS_ROOT, "components.json"),
+      "utf8",
+    );
     const parsed = JSON.parse(raw.replace(/^\uFEFF/, "")) as unknown;
     const components = Array.isArray(parsed) ? parsed : [];
     return components.map((value) => {
       const component = asRecord(value);
-      const status = typeof component.status === "string" ? component.status : "UNKNOWN";
+      const status =
+        typeof component.status === "string" ? component.status : "UNKNOWN";
       return {
         component:
-          component.component === "dashboard" || component.component === "worker"
+          component.component === "dashboard" ||
+          component.component === "worker"
             ? component.component
             : "unknown",
         status,
         restartCount:
-          typeof component.restartCount === "number" ? component.restartCount : 0,
+          typeof component.restartCount === "number"
+            ? component.restartCount
+            : 0,
         lastExitReason:
-          typeof component.lastExitReason === "string" ? component.lastExitReason : null,
-        action: status === "FAILED" ? "INSPECT_LOGS_THEN_RESTART_SUPERVISOR" : null,
+          typeof component.lastExitReason === "string"
+            ? component.lastExitReason
+            : null,
+        action:
+          status === "FAILED" ? "INSPECT_LOGS_THEN_RESTART_SUPERVISOR" : null,
         consecutiveCrashes:
           typeof component.consecutiveCrashes === "number"
             ? component.consecutiveCrashes
@@ -892,6 +942,34 @@ export async function collectOperationalStatus(
           },
         })
       : null;
+  const multiCategoryConfig =
+    database === "OK"
+      ? await client.mercadoLivreDiscoveryConfig.findFirst({
+          orderBy: { updatedAt: "desc" },
+          select: {
+            multiCategoryEnabled: true,
+            multiCategorySettings: true,
+            multiCategoryMinOffersPerCategory: true,
+            multiCategoryMaxOffersPerCategory: true,
+            multiCategoryMaxTotalPerSession: true,
+            multiCategorySelectionMode: true,
+            multiCategoryAllowCategoryBackfill: true,
+            lastRunAt: true,
+            lastRunSummary: true,
+          },
+        })
+      : null;
+  const latestMultiCategoryJob =
+    database === "OK"
+      ? await client.importJob.findFirst({
+          where: {
+            marketplace: "MERCADO_LIVRE",
+            source: "MERCADOLIVRE_BEST_SELLERS",
+          },
+          orderBy: { createdAt: "desc" },
+          select: { id: true, status: true, startedAt: true, finishedAt: true },
+        })
+      : null;
   const worker = asRecord(workerSetting?.value);
   const heartbeatAt =
     typeof worker.lastHeartbeatAt === "string"
@@ -904,10 +982,14 @@ export async function collectOperationalStatus(
     heartbeatAt,
     now,
   });
-  const expectedMigrations = existsSync(join(workspaceRoot, "prisma/migrations"))
-    ? (await readdir(join(workspaceRoot, "prisma/migrations"), { withFileTypes: true })).filter(
-        (entry) => entry.isDirectory(),
-      ).length
+  const expectedMigrations = existsSync(
+    join(workspaceRoot, "prisma/migrations"),
+  )
+    ? (
+        await readdir(join(workspaceRoot, "prisma/migrations"), {
+          withFileTypes: true,
+        })
+      ).filter((entry) => entry.isDirectory()).length
     : 0;
   let appliedMigrations = 0;
   if (database === "OK") {
@@ -949,7 +1031,9 @@ export async function collectOperationalStatus(
       paused: configuration.webAutomationPaused === true,
     });
   }
-  const buildReady = existsSync(join(workspaceRoot, "apps/dashboard/.next/BUILD_ID"));
+  const buildReady = existsSync(
+    join(workspaceRoot, "apps/dashboard/.next/BUILD_ID"),
+  );
   const supervisor = await localSupervisorStatus(workspaceRoot, now);
   const components = await localComponentStatus(workspaceRoot);
   const burnInActive = worker.mode === "BURN_IN" && worker.state === "ONLINE";
@@ -964,11 +1048,12 @@ export async function collectOperationalStatus(
     redis.status === "ok" &&
     appliedMigrations === expectedMigrations &&
     buildReady;
-  const status = !dependenciesReady || workerContext.heartbeatSeverity === "CRITICAL"
-    ? "NOT_READY"
-    : workerContext.heartbeatSeverity === "WARNING"
-      ? "READY_WITH_WARNINGS"
-      : "READY";
+  const status =
+    !dependenciesReady || workerContext.heartbeatSeverity === "CRITICAL"
+      ? "NOT_READY"
+      : workerContext.heartbeatSeverity === "WARNING"
+        ? "READY_WITH_WARNINGS"
+        : "READY";
   return {
     checkedAt: now.toISOString(),
     status,
@@ -983,8 +1068,40 @@ export async function collectOperationalStatus(
       redirectAvailable: tracking.redirectAvailable,
       ...trackingOperations,
     },
+    multiCategoryDiscovery: {
+      enabled:
+        process.env.MULTI_CATEGORY_DISCOVERY_ENABLED === "true" &&
+        (multiCategoryConfig?.multiCategoryEnabled ?? false),
+      persistedEnabled: multiCategoryConfig?.multiCategoryEnabled ?? false,
+      selectionMode:
+        multiCategoryConfig?.multiCategorySelectionMode ?? "ROUND_ROBIN",
+      categoriesConfigured: Array.isArray(
+        multiCategoryConfig?.multiCategorySettings,
+      )
+        ? multiCategoryConfig.multiCategorySettings.length
+        : 0,
+      minOffersPerCategory:
+        multiCategoryConfig?.multiCategoryMinOffersPerCategory ?? 1,
+      maxOffersPerCategory:
+        multiCategoryConfig?.multiCategoryMaxOffersPerCategory ?? 2,
+      maxTotalPerSession:
+        multiCategoryConfig?.multiCategoryMaxTotalPerSession ?? 12,
+      allowCategoryBackfill:
+        multiCategoryConfig?.multiCategoryAllowCategoryBackfill ?? false,
+      lastRunAt: multiCategoryConfig?.lastRunAt?.toISOString() ?? null,
+      lastSession: latestMultiCategoryJob
+        ? {
+            id: latestMultiCategoryJob.id.slice(0, 12),
+            status: latestMultiCategoryJob.status,
+            startedAt: latestMultiCategoryJob.startedAt?.toISOString() ?? null,
+            finishedAt:
+              latestMultiCategoryJob.finishedAt?.toISOString() ?? null,
+          }
+        : null,
+    },
     migrations: {
-      status: appliedMigrations === expectedMigrations ? "UP_TO_DATE" : "PENDING",
+      status:
+        appliedMigrations === expectedMigrations ? "UP_TO_DATE" : "PENDING",
       expected: expectedMigrations,
       applied: appliedMigrations,
     },
@@ -995,16 +1112,24 @@ export async function collectOperationalStatus(
     worker: {
       state: workerState,
       instanceId:
-        typeof worker.instanceId === "string" ? worker.instanceId.slice(0, 12) : null,
+        typeof worker.instanceId === "string"
+          ? worker.instanceId.slice(0, 12)
+          : null,
       leaderStatus:
         typeof worker.leaderStatus === "string" ? worker.leaderStatus : null,
       lastHeartbeatAt: heartbeatAt,
       lastCycleStartedAt:
-        typeof worker.lastCycleStartedAt === "string" ? worker.lastCycleStartedAt : null,
+        typeof worker.lastCycleStartedAt === "string"
+          ? worker.lastCycleStartedAt
+          : null,
       lastCycleFinishedAt:
-        typeof worker.lastCycleFinishedAt === "string" ? worker.lastCycleFinishedAt : null,
+        typeof worker.lastCycleFinishedAt === "string"
+          ? worker.lastCycleFinishedAt
+          : null,
       lastCycleStatus:
-        typeof worker.lastCycleStatus === "string" ? worker.lastCycleStatus : null,
+        typeof worker.lastCycleStatus === "string"
+          ? worker.lastCycleStatus
+          : null,
       currentPlanningRunId:
         typeof worker.currentPlanningRunId === "string"
           ? worker.currentPlanningRunId.slice(0, 24)
@@ -1070,7 +1195,19 @@ export async function collectStateAudit(
 ) {
   const workspaceRoot = input.workspaceRoot ?? OPERATIONS_WORKSPACE_ROOT;
   const now = input.now ?? new Date();
-  const [worker, publications, channels, runs, attempts, backup, supervisor, components] = await Promise.all([
+  const [
+    worker,
+    publications,
+    channels,
+    runs,
+    attempts,
+    multiCategoryJobs,
+    multiCategoryConfig,
+    affiliateSession,
+    backup,
+    supervisor,
+    components,
+  ] = await Promise.all([
     client.systemSetting.findUnique({
       where: { key: WORKER_STATUS_KEY },
       select: { value: true, updatedAt: true },
@@ -1090,6 +1227,23 @@ export async function collectStateAudit(
     client.publicationAttempt.findMany({
       where: { status: "PENDING" },
       select: { id: true, publicationId: true, attemptedAt: true },
+    }),
+    client.importJob.findMany({
+      where: {
+        marketplace: "MERCADO_LIVRE",
+        source: "MERCADOLIVRE_BEST_SELLERS",
+        status: { in: ["RUNNING", "FAILED", "SUCCEEDED_WITH_ERRORS"] },
+      },
+      orderBy: { createdAt: "desc" },
+      take: 20,
+      select: { id: true, status: true, updatedAt: true, summary: true },
+    }),
+    client.mercadoLivreDiscoveryConfig.findFirst({
+      orderBy: { updatedAt: "desc" },
+      select: { multiCategoryEnabled: true, multiCategorySettings: true },
+    }),
+    client.mercadoLivreAffiliateSession.findFirst({
+      select: { status: true },
     }),
     latestBackup(resolveSafeBackupDirectory(workspaceRoot)),
     localSupervisorStatus(workspaceRoot, now),
@@ -1171,13 +1325,117 @@ export async function collectStateAudit(
       action: "NO_AUTOMATIC_ACTION_REQUIRED",
     });
   }
+  const abandonedMultiCategory = multiCategoryJobs.some(
+    (job) =>
+      job.status === "RUNNING" &&
+      now.getTime() - job.updatedAt.getTime() > 20 * 60_000,
+  );
+  if (abandonedMultiCategory) {
+    findings.push({
+      code: "MULTI_CATEGORY_SESSION_ABANDONED",
+      severity: "WARNING",
+      action: "REVIEW_DISCOVERY_LOCK_AND_SESSION",
+    });
+  }
+  if (
+    multiCategoryJobs.filter((job) => job.status === "RUNNING").length > 1
+  ) {
+    findings.push({
+      code: "MULTI_CATEGORY_SESSION_CONCURRENT",
+      severity: "WARNING",
+      action: "REVIEW_DISCOVERY_LOCK_OWNERSHIP",
+    });
+  }
+  if (
+    multiCategoryConfig?.multiCategoryEnabled &&
+    (!Array.isArray(multiCategoryConfig.multiCategorySettings) ||
+      multiCategoryConfig.multiCategorySettings.length === 0)
+  ) {
+    findings.push({
+      code: "MULTI_CATEGORY_CONFIGURATION_INVALID",
+      severity: "WARNING",
+      action: "REVIEW_MERCADO_LIVRE_CATEGORIES",
+    });
+  }
+  const latestSummary = asRecord(multiCategoryJobs[0]?.summary);
+  const selection = asRecord(latestSummary.multiCategory);
+  const categorySettings = Array.isArray(
+    multiCategoryConfig?.multiCategorySettings,
+  )
+    ? multiCategoryConfig.multiCategorySettings.map(asRecord)
+    : [];
+  if (categorySettings.some((setting) => setting.isLeaf === false)) {
+    findings.push({
+      code: "MULTI_CATEGORY_NON_LEAF_CATEGORY",
+      severity: "WARNING",
+      action: "REVIEW_MERCADO_LIVRE_CATEGORIES",
+    });
+  }
+  const categoryResults = Array.isArray(selection.categories)
+    ? selection.categories.map(asRecord)
+    : [];
+  if (
+    categoryResults.some(
+      (category) => category.reason === "CATEGORY_WITHOUT_RESULTS",
+    )
+  ) {
+    findings.push({
+      code: "MULTI_CATEGORY_CATEGORY_WITHOUT_RESULTS",
+      severity: "INFO",
+      action: "REVIEW_CATEGORY_DISCOVERY_HISTORY",
+    });
+  }
+  const selectedCounts = categoryResults.map((category) =>
+    Number(category.selected ?? 0),
+  );
+  const totalSelected = selectedCounts.reduce(
+    (total, count) => total + count,
+    0,
+  );
+  if (
+    categoryResults.length > 1 &&
+    totalSelected > 2 &&
+    Math.max(0, ...selectedCounts) > Math.ceil(totalSelected / 2)
+  ) {
+    findings.push({
+      code: "MULTI_CATEGORY_SELECTION_DOMINATED",
+      severity: "WARNING",
+      action: "REVIEW_CATEGORY_QUOTAS_AND_PRIORITIES",
+    });
+  }
+  if (Number(selection.quotaNotMet ?? 0) > 0) {
+    findings.push({
+      code: "MULTI_CATEGORY_QUOTA_NOT_MET",
+      severity: "INFO",
+      action: "REVIEW_DISCOVERY_ELIGIBILITY",
+    });
+  }
+  if (Number(selection.crossCategoryDuplicates ?? 0) > 0) {
+    findings.push({
+      code: "MULTI_CATEGORY_DUPLICATES_DETECTED",
+      severity: "INFO",
+      action: "NO_AUTOMATIC_ACTION_REQUIRED",
+    });
+  }
+  if (Number(latestSummary.candidatesWithoutAffiliateLink ?? 0) > 0) {
+    findings.push({
+      code: "MERCADO_LIVRE_AFFILIATE_LINK_GENERATION_DEGRADED",
+      severity: "WARNING",
+      action: "REVIEW_AFFILIATE_SESSION_AND_PENDING_LINKS",
+    });
+  }
+  if (affiliateSession?.status === "EXPIRED") {
+    findings.push({
+      code: "MERCADO_LIVRE_AFFILIATE_SESSION_EXPIRED",
+      severity: "WARNING",
+      action: "RENEW_AFFILIATE_SESSION_MANUALLY",
+    });
+  }
   return findings;
 }
 
 function fingerprintRows(rows: unknown[]) {
-  return createHash("sha256")
-    .update(JSON.stringify(rows))
-    .digest("hex");
+  return createHash("sha256").update(JSON.stringify(rows)).digest("hex");
 }
 
 function whatsappOperationalMetadata(value: unknown) {
@@ -1192,44 +1450,54 @@ function whatsappOperationalMetadata(value: unknown) {
     "retryBlocked",
   ];
   return Object.fromEntries(
-    keys.filter((key) => metadata[key] !== undefined).map((key) => [key, metadata[key]]),
+    keys
+      .filter((key) => metadata[key] !== undefined)
+      .map((key) => [key, metadata[key]]),
   );
 }
 
-export async function captureBusinessStateSnapshot(client: PrismaClient = prisma) {
-  const [products, offers, publications, attempts, runs, channels] = await Promise.all([
-    client.product.findMany({
-      orderBy: { id: "asc" },
-      select: { id: true, updatedAt: true },
-    }),
-    client.offer.findMany({
-      orderBy: { id: "asc" },
-      select: { id: true, updatedAt: true, version: true, status: true },
-    }),
-    client.publication.findMany({
-      orderBy: { id: "asc" },
-      select: {
-        id: true,
-        updatedAt: true,
-        status: true,
-        channelId: true,
-        metadata: true,
-      },
-    }),
-    client.publicationAttempt.findMany({
-      orderBy: { id: "asc" },
-      select: { id: true, attemptedAt: true, status: true, publicationId: true },
-    }),
-    client.automationRun.findMany({
-      orderBy: { id: "asc" },
-      select: { id: true, status: true, startedAt: true, finishedAt: true },
-    }),
-    client.channel.findMany({
-      where: { type: "WHATSAPP_GROUPS" },
-      orderBy: { id: "asc" },
-      select: { id: true, updatedAt: true, configuration: true },
-    }),
-  ]);
+export async function captureBusinessStateSnapshot(
+  client: PrismaClient = prisma,
+) {
+  const [products, offers, publications, attempts, runs, channels] =
+    await Promise.all([
+      client.product.findMany({
+        orderBy: { id: "asc" },
+        select: { id: true, updatedAt: true },
+      }),
+      client.offer.findMany({
+        orderBy: { id: "asc" },
+        select: { id: true, updatedAt: true, version: true, status: true },
+      }),
+      client.publication.findMany({
+        orderBy: { id: "asc" },
+        select: {
+          id: true,
+          updatedAt: true,
+          status: true,
+          channelId: true,
+          metadata: true,
+        },
+      }),
+      client.publicationAttempt.findMany({
+        orderBy: { id: "asc" },
+        select: {
+          id: true,
+          attemptedAt: true,
+          status: true,
+          publicationId: true,
+        },
+      }),
+      client.automationRun.findMany({
+        orderBy: { id: "asc" },
+        select: { id: true, status: true, startedAt: true, finishedAt: true },
+      }),
+      client.channel.findMany({
+        where: { type: "WHATSAPP_GROUPS" },
+        orderBy: { id: "asc" },
+        select: { id: true, updatedAt: true, configuration: true },
+      }),
+    ]);
   const entities = {
     Product: { count: products.length, fingerprint: fingerprintRows(products) },
     Offer: { count: offers.length, fingerprint: fingerprintRows(offers) },
@@ -1276,10 +1544,14 @@ export function compareBusinessStateSnapshots(
   return { unchanged: changed.length === 0, changedEntities: changed };
 }
 
-export async function readBurnInReport(workspaceRoot = OPERATIONS_WORKSPACE_ROOT) {
+export async function readBurnInReport(
+  workspaceRoot = OPERATIONS_WORKSPACE_ROOT,
+) {
   try {
     const value = asRecord(
-      JSON.parse(await readFile(join(workspaceRoot, BURN_IN_REPORT_FILE), "utf8")),
+      JSON.parse(
+        await readFile(join(workspaceRoot, BURN_IN_REPORT_FILE), "utf8"),
+      ),
     );
     return {
       status: typeof value.status === "string" ? value.status : "UNKNOWN",
@@ -1290,9 +1562,12 @@ export async function readBurnInReport(workspaceRoot = OPERATIONS_WORKSPACE_ROOT
           ? value.reportSource
           : "UNKNOWN",
       sessionId:
-        typeof value.sessionId === "string" ? value.sessionId.slice(0, 12) : null,
+        typeof value.sessionId === "string"
+          ? value.sessionId.slice(0, 12)
+          : null,
       startedAt: typeof value.startedAt === "string" ? value.startedAt : null,
-      finishedAt: typeof value.finishedAt === "string" ? value.finishedAt : null,
+      finishedAt:
+        typeof value.finishedAt === "string" ? value.finishedAt : null,
       durationSeconds:
         typeof value.durationSeconds === "number" ? value.durationSeconds : 0,
       supervisorInstanceId:
@@ -1319,14 +1594,19 @@ export async function readBurnInReport(workspaceRoot = OPERATIONS_WORKSPACE_ROOT
           : 0,
       burnInConfirmed: value.burnInConfirmed === true,
       leadershipChanges:
-        typeof value.leadershipChanges === "number" ? value.leadershipChanges : 0,
+        typeof value.leadershipChanges === "number"
+          ? value.leadershipChanges
+          : 0,
       leadershipRenewals:
-        typeof value.leadershipRenewals === "number" ? value.leadershipRenewals : 0,
+        typeof value.leadershipRenewals === "number"
+          ? value.leadershipRenewals
+          : 0,
       leadershipRenewalFailures:
         typeof value.leadershipRenewalFailures === "number"
           ? value.leadershipRenewalFailures
           : 0,
-      blockedCycles: typeof value.blockedCycles === "number" ? value.blockedCycles : 0,
+      blockedCycles:
+        typeof value.blockedCycles === "number" ? value.blockedCycles : 0,
       externalEffectsObserved:
         typeof value.externalEffectsObserved === "number"
           ? value.externalEffectsObserved
@@ -1337,31 +1617,48 @@ export async function readBurnInReport(workspaceRoot = OPERATIONS_WORKSPACE_ROOT
           : 0,
       businessFingerprintUnchanged: value.businessFingerprintUnchanged === true,
       changedEntities: Array.isArray(value.changedEntities)
-        ? value.changedEntities.filter((item): item is string => typeof item === "string")
+        ? value.changedEntities.filter(
+            (item): item is string => typeof item === "string",
+          )
         : [],
       maxHeartbeatGapMs:
-        typeof value.maxHeartbeatGapMs === "number" ? value.maxHeartbeatGapMs : 0,
+        typeof value.maxHeartbeatGapMs === "number"
+          ? value.maxHeartbeatGapMs
+          : 0,
       liveValidated: value.liveValidated === true,
       readyValidated: value.readyValidated === true,
       shutdownValidated: value.shutdownValidated === true,
       realLeaderKeyUnchanged: value.realLeaderKeyUnchanged === true,
       leaderReleaseValidated: value.leaderReleaseValidated === true,
       lastCycleStatus:
-        typeof value.lastCycleStatus === "string" ? value.lastCycleStatus : null,
+        typeof value.lastCycleStatus === "string"
+          ? value.lastCycleStatus
+          : null,
       residualProcesses:
-        typeof value.residualProcesses === "number" ? value.residualProcesses : 0,
-      residualLocks: typeof value.residualLocks === "number" ? value.residualLocks : 0,
+        typeof value.residualProcesses === "number"
+          ? value.residualProcesses
+          : 0,
+      residualLocks:
+        typeof value.residualLocks === "number" ? value.residualLocks : 0,
       humanActions: Array.isArray(value.humanActions)
-        ? value.humanActions.filter((item): item is string => typeof item === "string")
+        ? value.humanActions.filter(
+            (item): item is string => typeof item === "string",
+          )
         : [],
       findingsPreexisting: Array.isArray(value.findingsPreexisting)
-        ? value.findingsPreexisting.filter((item): item is string => typeof item === "string")
+        ? value.findingsPreexisting.filter(
+            (item): item is string => typeof item === "string",
+          )
         : [],
       findingsNew: Array.isArray(value.findingsNew)
-        ? value.findingsNew.filter((item): item is string => typeof item === "string")
+        ? value.findingsNew.filter(
+            (item): item is string => typeof item === "string",
+          )
         : [],
       findingsResolvedNaturally: Array.isArray(value.findingsResolvedNaturally)
-        ? value.findingsResolvedNaturally.filter((item): item is string => typeof item === "string")
+        ? value.findingsResolvedNaturally.filter(
+            (item): item is string => typeof item === "string",
+          )
         : [],
     };
   } catch {
