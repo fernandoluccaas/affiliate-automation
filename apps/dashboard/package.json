@@ -21,6 +21,7 @@
     "@affiliate/publisher-connectors": "0.1.0",
     "@affiliate/redis": "0.1.0",
     "@affiliate/scoring": "0.1.0",
+    "@affiliate/shopee-affiliate": "0.1.0",
     "@affiliate/shared": "0.1.0",
     "@affiliate/tracking": "0.1.0",
     "@affiliate/validation": "0.1.0",

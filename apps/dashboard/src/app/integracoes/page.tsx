@@ -13,6 +13,7 @@ import {
   getOpenAiIntegrationStatus,
 } from "@affiliate/ai-copywriter";
 import { prisma } from "@affiliate/database";
+import { resolveShopeeAffiliateConfiguration } from "@affiliate/shopee-affiliate";
 import Link from "next/link";
 import { AdminShell } from "@/components/admin-shell";
 import { Button } from "@/components/ui/button";
@@ -69,6 +70,7 @@ export default async function IntegrationsPage({
   const ollama = getOllamaIntegrationStatus();
   const ollamaHealth = await new OllamaAiProvider().healthCheck();
   const openAi = getOpenAiIntegrationStatus();
+  const shopee = resolveShopeeAffiliateConfiguration();
   const message = messageText(params?.message);
   const [mercadoLivreAccount, mercadoLivreConfig] = await Promise.all([
     prisma.marketplaceAccount.findFirst({
@@ -166,15 +168,27 @@ export default async function IntegrationsPage({
                 <ShoppingBag aria-hidden="true" size={18} />
                 Shopee
               </CardTitle>
-              <StatusBadge status="DISABLED" label="Não configurada" />
+              <StatusBadge
+                status={shopee.enabled ? "ACTIVE" : "DISABLED"}
+                label={shopee.mode}
+              />
             </div>
             <p className="text-sm text-[var(--foreground-secondary)]">
-              Espaço reservado para uma integração oficial futura.
+              Datafeeds oficiais processados localmente, com Open API
+              fail-closed.
             </p>
           </CardHeader>
-          <CardContent className="text-sm text-[var(--foreground-secondary)]">
-            Nenhuma credencial, importação ou chamada Shopee está ativa nesta
-            branch.
+          <CardContent className="grid gap-4 text-sm text-[var(--foreground-secondary)]">
+            <p>
+              Descoberta e preview em streaming. Nenhuma publicação é criada
+              enquanto a atribuição dos links não estiver confirmada.
+            </p>
+            <Button asChild variant="outline">
+              <Link href="/integracoes/shopee">
+                <Settings aria-hidden="true" size={16} />
+                Configurar Datafeeds
+              </Link>
+            </Button>
           </CardContent>
         </Card>
 
