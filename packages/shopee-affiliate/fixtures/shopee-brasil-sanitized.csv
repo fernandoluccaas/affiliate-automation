@@ -1,0 +1,6 @@
+﻿image_link,itemid,price,global_category1,description,global_category2,global_item_attributes,item_rating,sale_price,global_catid2,discount_percentage,image_link_3,title,global_catid1,product_link,product_short link
+https://cf.shopee.com.br/file/casa-b,2001,249.90,Home & Living,"Descrição duplicada
+com quebra de linha",Storage & Organization,,4.8,169.90,210,32,,Organizador Exemplo B,200,https://shopee.com.br/produto-i.20.2001,https://shope.ee/an_redir?origin_link=casa-b
+https://cf.shopee.com.br/file/moda,3001,199.90,Women Clothes,"Vestido, tecido leve",Dresses,,4.9,129.90,310,35,,Vestido Exemplo,300,https://shopee.com.br/produto-i.30.3001,https://shope.ee/an_redir?origin_link=moda
+https://cf.shopee.com.br/file/eletro,6001,799.90,Home Appliances,"Eletrodoméstico de teste",Kitchen Appliances,,4.9,559.90,610,30,,Eletrodoméstico Exemplo,600,https://shopee.com.br/produto-i.60.6001,https://shope.ee/an_redir?origin_link=eletro
+https://cf.shopee.com.br/file/invalido,7001,100,Home & Living,"URL inválida",Decor,,4.9,80,710,20,,Produto URL Inválida,700,https://evil.example/item,https://shope.ee/an_redir?origin_link=invalido
