@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
   GENERATE_SHORT_LINK_MUTATION,
@@ -38,6 +37,38 @@ function successFetch() {
 }
 
 describe("Shopee Affiliate Open API signature and payload", () => {
+  it("matches the official signature vector byte-for-byte", () => {
+    const payload =
+      '{"query":"{\\nbrandOffer{\\n    nodes{\\n        commissionRate\\n        offerName\\n    }\\n}\\n}"}';
+    const signature = createShopeeOpenApiSignature({
+      appId: "123456",
+      timestamp: 1_577_836_800,
+      payload,
+      secret: "demo",
+    });
+
+    expect(Buffer.byteLength(payload, "utf8")).toBe(94);
+    expect(signature).toBe(
+      "dc88d72feea70c80c52c3399751a7d34966763f51a7f056aa070a5e9df645412",
+    );
+    expect(
+      createShopeeOpenApiSignature({
+        appId: "123456",
+        timestamp: 1_577_836_800,
+        payload: `${payload} `,
+        secret: "demo",
+      }),
+    ).not.toBe(signature);
+    expect(
+      createShopeeOpenApiSignature({
+        appId: "123456",
+        timestamp: 1_577_836_800,
+        payload: payload.replace("\\n", "\n"),
+        secret: "demo",
+      }),
+    ).not.toBe(signature);
+  });
+
   it("produces deterministic lowercase SHA-256 output", () => {
     const payload = createGenerateShortLinkPayload({
       originUrl,
@@ -82,9 +113,12 @@ describe("Shopee Affiliate Open API signature and payload", () => {
     });
     const [, init] = request.mock.calls[0]!;
     const body = String(init?.body);
-    const signature = createHash("sha256")
-      .update(`1234561577836800${body}demo`)
-      .digest("hex");
+    const signature = createShopeeOpenApiSignature({
+      appId: "123456",
+      timestamp: 1_577_836_800,
+      payload: body,
+      secret: "demo",
+    });
     expect(init?.headers).toMatchObject({
       "content-type": "application/json",
       authorization: `SHA256 Credential=123456, Timestamp=1577836800, Signature=${signature}`,
