@@ -141,7 +141,7 @@ function deterministicPrimary(
   return rightKey.localeCompare(leftKey) < 0 ? right : left;
 }
 
-function mergeProduct(
+export function mergeShopeeDatafeedProducts(
   left: ShopeeDatafeedProduct,
   right: ShopeeDatafeedProduct,
   conflicts: Map<string, number>,
@@ -500,7 +500,7 @@ export async function previewShopeeDatafeeds(input: {
           duplicates += 1;
           byItem.set(
             product.itemId,
-            mergeProduct(previous, product, conflicts),
+            mergeShopeeDatafeedProducts(previous, product, conflicts),
           );
         } else {
           if (byItem.size >= configuration.maxTrackedItems) {
@@ -601,4 +601,40 @@ export async function previewShopeeDatafeeds(input: {
       await rm(temporaryDirectory, { recursive: true, force: true });
     }
   }
+}
+
+export async function collectSelectedShopeeProducts(input: {
+  files: string[];
+  selected: readonly ShopeeRankedCandidate[];
+  environment?: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
+  provider?: DatafeedOfferProvider;
+}) {
+  const configuration = resolveShopeeAffiliateConfiguration(input.environment);
+  const wanted = new Set(
+    input.selected.slice(0, 12).map((item) => item.itemId),
+  );
+  const products = new Map<string, ShopeeDatafeedProduct>();
+  const conflicts = new Map<string, number>();
+  const provider = input.provider ?? new DatafeedOfferProvider();
+  await provider.stream({
+    files: safeFiles(input.files),
+    linksVerified: configuration.linksVerified,
+    maxFileBytes: configuration.maxFileBytes,
+    ...(input.signal ? { signal: input.signal } : {}),
+    onProduct(product) {
+      if (!wanted.has(product.itemId)) return;
+      const previous = products.get(product.itemId);
+      products.set(
+        product.itemId,
+        previous
+          ? mergeShopeeDatafeedProducts(previous, product, conflicts)
+          : product,
+      );
+    },
+  });
+  return input.selected.slice(0, 12).flatMap((candidate) => {
+    const product = products.get(candidate.itemId);
+    return product ? [{ candidate, product }] : [];
+  });
 }

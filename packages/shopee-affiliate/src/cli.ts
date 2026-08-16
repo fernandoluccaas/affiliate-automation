@@ -1,5 +1,6 @@
 import {
   inspectShopeeDatafeeds,
+  importShopeeOperationalOffers,
   previewShopeeDatafeeds,
   resolveShopeeAffiliateConfiguration,
 } from "./index";
@@ -39,6 +40,7 @@ function usage() {
       "shopee:datafeed:status",
       "shopee:datafeed:inspect -- --file <CSV> [--file <CSV>]",
       "shopee:datafeed:preview -- --file <CSV> [--file <CSV>]",
+      "shopee:datafeed:import -- --file <CSV> [--file <CSV>] [--confirm-import]",
     ],
     stateModified: false,
   };
@@ -53,14 +55,16 @@ async function main() {
     return output({
       status: "SHOPEE_DATAFEED_STATUS",
       ...configuration,
-      openApiReady: false,
-      hybridReady: false,
+      openApiReady: configuration.openApiReady,
+      openApiConfigured: configuration.openApiConfigured,
+      hybridReady:
+        configuration.mode === "HYBRID" && configuration.openApiReady,
       datafeedSource: "LOCAL_FILE",
       remoteUrlEnabled: false,
       stateModified: false,
     });
   }
-  if (configuration.mode !== "DATAFEED") {
+  if (!["DATAFEED", "HYBRID"].includes(configuration.mode)) {
     throw new Error("SHOPEE_DATAFEED_MODE_REQUIRED");
   }
   const files = values("--file").map(workspaceFile);
@@ -81,6 +85,14 @@ async function main() {
         await previewShopeeDatafeeds({
           files,
           signal: controller.signal,
+        }),
+      );
+    }
+    if (command === "import") {
+      return output(
+        await importShopeeOperationalOffers({
+          files,
+          confirmImport: process.argv.includes("--confirm-import"),
         }),
       );
     }

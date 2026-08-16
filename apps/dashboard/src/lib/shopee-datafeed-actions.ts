@@ -3,12 +3,16 @@
 import { z } from "zod";
 import {
   SHOPEE_CATEGORY_CATALOG,
+  applyManualShopeeAffiliateLink,
+  importShopeeOperationalOffers,
   inspectShopeeDatafeeds,
   previewShopeeDatafeeds,
   resolveShopeeAffiliateConfiguration,
+  retryShopeeAffiliateLink,
   type ShopeeCategoryRule,
   type ShopeeLogicalCategory,
 } from "@affiliate/shopee-affiliate";
+import { revalidatePath } from "next/cache";
 import type {
   ShopeeDatafeedActionInput,
   ShopeeInspectActionResult,
@@ -100,7 +104,7 @@ async function parseAuthorized(input: ShopeeDatafeedActionInput) {
   const parsed = inputSchema.safeParse(input);
   if (!parsed.success) throw new Error("SHOPEE_DATAFEED_INPUT_INVALID");
   const configuration = resolveShopeeAffiliateConfiguration();
-  if (configuration.mode !== "DATAFEED") {
+  if (!["DATAFEED", "HYBRID"].includes(configuration.mode)) {
     throw new Error("SHOPEE_DATAFEED_MODE_REQUIRED");
   }
   return parsed.data;
@@ -145,3 +149,73 @@ export async function previewShopeeDatafeedAction(
 }
 
 export type { ShopeeLogicalCategory };
+
+export async function confirmShopeeDatafeedImportAction(
+  input: ShopeeDatafeedActionInput,
+) {
+  try {
+    const parsed = await parseAuthorized(input);
+    const data = await importShopeeOperationalOffers({
+      files: parsed.files,
+      categories: categoriesFromInput(parsed),
+      filters: parsed.filters,
+      confirmImport: true,
+      subIds: ["source_datafeed", "phase_6a3"],
+    });
+    revalidatePath("/integracoes/shopee");
+    return {
+      ok: true as const,
+      data,
+      message: `${data.metrics.readyToPublish} pronta(s), ${data.metrics.pendingAffiliateLink} aguardando link e ${data.metrics.failed} falha(s).`,
+    };
+  } catch (error) {
+    const errorCode = safeError(error);
+    return { ok: false as const, errorCode, message: messageFor(errorCode) };
+  }
+}
+
+const offerIdSchema = z.string().trim().min(1).max(100);
+
+export async function retryShopeeAffiliateLinkAction(offerId: string) {
+  try {
+    await authorize();
+    const data = await retryShopeeAffiliateLink({
+      offerId: offerIdSchema.parse(offerId),
+      subIds: ["source_datafeed", "retry"],
+    });
+    revalidatePath("/integracoes/shopee");
+    return {
+      ok: true as const,
+      data,
+      message: "Link gerado e oferta revalidada.",
+    };
+  } catch (error) {
+    const errorCode = safeError(error);
+    return { ok: false as const, errorCode, message: messageFor(errorCode) };
+  }
+}
+
+export async function applyManualShopeeAffiliateLinkAction(input: {
+  offerId: string;
+  affiliateUrl: string;
+}) {
+  try {
+    await authorize();
+    const parsed = z
+      .object({
+        offerId: offerIdSchema,
+        affiliateUrl: z.string().trim().url().max(2_048),
+      })
+      .parse(input);
+    const data = await applyManualShopeeAffiliateLink(parsed);
+    revalidatePath("/integracoes/shopee");
+    return {
+      ok: true as const,
+      data,
+      message: "Link manual validado e aplicado.",
+    };
+  } catch (error) {
+    const errorCode = safeError(error);
+    return { ok: false as const, errorCode, message: messageFor(errorCode) };
+  }
+}

@@ -15,17 +15,32 @@ describe("datafeed streaming architecture", () => {
     expect(production).toContain("drain");
   });
 
-  it("does not import database, Telegram, WhatsApp, Playwright or external clients", async () => {
-    const source = await readFile(
-      new URL("./index.ts", import.meta.url),
-      "utf8",
-    );
+  it("keeps database access out of parser/discovery and prohibited integrations out of the package", async () => {
+    const streamingSources = await Promise.all([
+      readFile(new URL("./parser.ts", import.meta.url), "utf8"),
+      readFile(new URL("./discovery.ts", import.meta.url), "utf8"),
+      readFile(new URL("./source.ts", import.meta.url), "utf8"),
+    ]);
+    expect(streamingSources.join("\n")).not.toMatch(/@affiliate\/database/i);
     const packageJson = await readFile(
       new URL("../package.json", import.meta.url),
       "utf8",
     );
-    expect(`${source}\n${packageJson}`).not.toMatch(
-      /@affiliate\/database|telegram|whatsapp|playwright|openai/i,
+    expect(packageJson).not.toMatch(/telegram|whatsapp|playwright|openai/i);
+  });
+
+  it("routes operational persistence through ingestion and never creates Publications", async () => {
+    const source = await readFile(
+      new URL("./operational.ts", import.meta.url),
+      "utf8",
+    );
+    expect(source).toContain("ingestOfferInTransaction");
+    expect(source).toContain("reusableAffiliateUrl");
+    expect(source.indexOf("reusableAffiliateUrl(tx")).toBeLessThan(
+      source.indexOf("input.linkProvider.resolve"),
+    );
+    expect(source).not.toMatch(
+      /(?:database|tx)\.publication\.(?:create|update)/i,
     );
   });
 });

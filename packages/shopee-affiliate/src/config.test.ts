@@ -4,7 +4,6 @@ import {
   resolveShopeeAffiliateConfiguration,
 } from "./config";
 import {
-  OpenApiAffiliateLinkProvider,
   OpenApiConversionProvider,
   OpenApiOfferProvider,
   assertShopeeOperationalPublishingAllowed,
@@ -46,7 +45,7 @@ describe("Shopee affiliate configuration", () => {
     });
   });
 
-  it("keeps OPEN_API unavailable", () => {
+  it("keeps OPEN_API fail-closed without credentials", () => {
     expect(
       resolveShopeeAffiliateConfiguration({
         SHOPEE_AFFILIATE_ENABLED: "true",
@@ -54,21 +53,63 @@ describe("Shopee affiliate configuration", () => {
       }),
     ).toMatchObject({
       mode: "OPEN_API",
-      state: "WAITING_FOR_OFFICIAL_ACCESS",
+      state: "OPEN_API_NOT_CONFIGURED",
       externalRequestsEnabled: false,
+      openApiConfigured: false,
     });
   });
 
-  it("keeps HYBRID unavailable", () => {
+  it("enables HYBRID only with both server-side credentials", () => {
+    const resolved = resolveShopeeAffiliateConfiguration({
+      SHOPEE_AFFILIATE_ENABLED: "true",
+      SHOPEE_AFFILIATE_MODE: "HYBRID",
+      SHOPEE_OPEN_API_APP_ID: "fixture-app",
+      SHOPEE_OPEN_API_SECRET: "fixture-secret",
+    });
+    expect(resolved).toMatchObject({
+      mode: "HYBRID",
+      state: "READY_FOR_HYBRID",
+      externalRequestsEnabled: true,
+      operationalWritesEnabled: true,
+      openApiConfigured: true,
+    });
+    expect(JSON.stringify(resolved)).not.toContain("fixture-app");
+    expect(JSON.stringify(resolved)).not.toContain("fixture-secret");
+  });
+
+  it("fails closed with only one credential", () => {
     expect(
       resolveShopeeAffiliateConfiguration({
         SHOPEE_AFFILIATE_ENABLED: "true",
         SHOPEE_AFFILIATE_MODE: "HYBRID",
+        SHOPEE_OPEN_API_APP_ID: "fixture-app",
       }),
     ).toMatchObject({
-      mode: "HYBRID",
-      state: "WAITING_FOR_OFFICIAL_ACCESS",
+      state: "OPEN_API_NOT_CONFIGURED",
+      openApiConfigured: false,
+      openApiReady: false,
       externalRequestsEnabled: false,
+    });
+  });
+
+  it("bounds invalid and excessive transport settings", () => {
+    expect(
+      resolveShopeeAffiliateConfiguration({
+        SHOPEE_OPEN_API_TIMEOUT_MS: "invalid",
+        SHOPEE_OPEN_API_RATE_LIMIT_PER_HOUR: "9000",
+      }),
+    ).toMatchObject({
+      openApiTimeoutMs: 10_000,
+      openApiRateLimitPerHour: 1_000,
+    });
+    expect(
+      resolveShopeeAffiliateConfiguration({
+        SHOPEE_OPEN_API_TIMEOUT_MS: "30000",
+        SHOPEE_OPEN_API_RATE_LIMIT_PER_HOUR: "8000",
+      }),
+    ).toMatchObject({
+      openApiTimeoutMs: 30_000,
+      openApiRateLimitPerHour: 8_000,
     });
   });
 
@@ -111,11 +152,8 @@ describe("Shopee affiliate configuration", () => {
     ).toThrow("SHOPEE_DATAFEED_PREVIEW_ONLY");
   });
 
-  it("keeps all Open API providers unavailable without requests", async () => {
+  it("keeps unsupported Open API discovery and conversion unavailable", async () => {
     await expect(new OpenApiOfferProvider().stream()).rejects.toThrow(
-      "WAITING_FOR_OFFICIAL_ACCESS",
-    );
-    await expect(new OpenApiAffiliateLinkProvider().resolve()).rejects.toThrow(
       "WAITING_FOR_OFFICIAL_ACCESS",
     );
     await expect(new OpenApiConversionProvider().preflight()).resolves.toEqual({

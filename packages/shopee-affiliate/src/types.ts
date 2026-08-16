@@ -18,12 +18,19 @@ export type ShopeeAffiliateConfiguration = {
   state:
     | "DISABLED"
     | "READY_FOR_DATAFEED"
+    | "READY_FOR_OPEN_API"
+    | "READY_FOR_HYBRID"
+    | "OPEN_API_NOT_CONFIGURED"
     | "WAITING_FOR_OFFICIAL_ACCESS"
     | "INVALID_CONFIGURATION";
   configurationValid: boolean;
   linksVerified: boolean;
-  externalRequestsEnabled: false;
-  operationalWritesEnabled: false;
+  openApiConfigured: boolean;
+  openApiReady: boolean;
+  externalRequestsEnabled: boolean;
+  operationalWritesEnabled: boolean;
+  openApiTimeoutMs: number;
+  openApiRateLimitPerHour: number;
   maxFileBytes: number;
   maxTrackedItems: number;
   issues: string[];
@@ -273,8 +280,9 @@ export interface ShopeeAffiliateLinkProvider {
   readonly kind: "DATAFEED" | "OPEN_API";
   resolve(
     product: ShopeeDatafeedProduct,
+    options?: { subIds?: string[] },
   ): Promise<
-    | { status: "VERIFIED"; affiliateUrl: string }
+    | { status: "VERIFIED"; affiliateUrl: string; provider?: string }
     | { status: "UNVERIFIED"; candidateUrl: string | null; reason: string }
   >;
 }

@@ -3,10 +3,18 @@ import type {
   ShopeeCategoryRule,
   ShopeeDatafeedInspectResult,
   ShopeeDatafeedPreviewResult,
+  ShopeeOperationalImportResult,
 } from "@affiliate/shopee-affiliate";
 
 export type ShopeeDashboardConfigurationDto = ShopeeAffiliateConfiguration & {
   categories: ShopeeCategoryRule[];
+  offerCounts: { pending: number; ready: number };
+  pendingOffers: Array<{
+    id: string;
+    title: string;
+    externalProductId: string;
+    statusReason: string | null;
+  }>;
 };
 
 export type ShopeeDatafeedActionInput = {
@@ -37,3 +45,5 @@ export type ShopeeInspectActionResult =
   ShopeeActionResult<ShopeeDatafeedInspectResult>;
 export type ShopeePreviewActionResult =
   ShopeeActionResult<ShopeeDatafeedPreviewResult>;
+export type ShopeeImportActionResult =
+  ShopeeActionResult<ShopeeOperationalImportResult>;

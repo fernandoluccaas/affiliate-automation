@@ -33,14 +33,6 @@ export class OpenApiOfferProvider implements ShopeeOfferProvider {
   }
 }
 
-export class OpenApiAffiliateLinkProvider implements ShopeeAffiliateLinkProvider {
-  readonly kind = "OPEN_API" as const;
-
-  async resolve(): Promise<never> {
-    throw new Error("SHOPEE_OPEN_API_WAITING_FOR_OFFICIAL_ACCESS");
-  }
-}
-
 export class OpenApiConversionProvider implements ShopeeConversionProvider {
   readonly kind = "OPEN_API" as const;
   readonly available = false as const;

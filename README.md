@@ -188,6 +188,13 @@ See [Tracking, attribution and financial reports](docs/tracking-attribution.md)
 for privacy details, canonical columns, commands, locks, rollback, Sub IDs,
 retention, analytics, and troubleshooting.
 
+Shopee Datafeeds support deterministic preview and an explicitly confirmed
+operational import. In `HYBRID` mode, server-only App ID/Secret credentials sign
+the official `generateShortLink` GraphQL request; successful links are validated
+and stored through the existing Offer/AffiliateLink pipeline. The flow stops at
+`READY_TO_PUBLISH` and never creates a Publication. See
+[Shopee Affiliate](docs/shopee-affiliate.md).
+
 The worker processes queued `AFFILIATE_LINK_BATCH` jobs and isolates expiration, discovery, refresh, scheduling, retries and publication as independent stages. A failed discovery produces `PARTIAL` while refresh and ready publications continue. Refresh records `selected`, `refreshed`, `unchanged`, `newVersions`, `notFound`, `failed` and `affiliateUrlsPreserved`; it never replaces an existing affiliate URL with `null`.
 
 Mercado Livre publications use `DIRECT_AFFILIATE_LINK`. A missing or invalid affiliate URL prevents scheduling and publication; there is no fallback to the original URL.
