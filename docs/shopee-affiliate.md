@@ -201,3 +201,27 @@ limitados a hosts oficiais, até confirmar o mesmo `itemId`.
 O redirect `/go/[slug]` continua consultando exclusivamente
 `AffiliateLink.destination`; URL do produto, candidato do Datafeed e `shope.ee`
 não são fallbacks de tracking.
+
+## Smoke test controlado da Open API
+
+O comando `shopee:open-api:smoke` serve exclusivamente para diagnosticar as
+credenciais com uma única chamada `GenerateShortLink`. Ele reutiliza o cliente
+produtivo, mas não importa Datafeed, não acessa PostgreSQL, Prisma ou Redis e não
+cria nenhum registro. Sem `--confirm-live-call`, encerra com
+`LIVE_CALL_NOT_CONFIRMED` antes de qualquer requisição.
+
+Configure `SHOPEE_AFFILIATE_ENABLED=true`, modo `OPEN_API` ou `HYBRID`,
+`SHOPEE_OPEN_API_APP_ID` e `SHOPEE_OPEN_API_SECRET` somente no ambiente do
+processo. Use valores reais apenas em uma sessão local controlada:
+
+```powershell
+npm run shopee:open-api:smoke -- --origin-url "https://shopee.com.br/produto-ficticio-i.123.456" --item-id "456" --sub-id "diagnostico" --confirm-live-call
+```
+
+A URL e o item devem ser fornecidos pelo operador e corresponder exatamente. Até
+cinco `--sub-id` podem ser repetidos. O resultado contém somente estado, número
+de tentativas e, no sucesso, o shortlink oficial necessário à conferência. App
+ID, Secret, assinatura, Authorization, payload e resposta bruta nunca são
+impressos. Não cole credenciais na linha de comando, documentação, logs,
+commits ou mensagens. Após o diagnóstico, remova as variáveis sensíveis da
+sessão do terminal.

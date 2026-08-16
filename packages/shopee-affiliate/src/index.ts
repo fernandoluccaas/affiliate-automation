@@ -3,6 +3,7 @@ export * from "./discovery";
 export * from "./parser";
 export * from "./providers";
 export * from "./open-api";
+export * from "./open-api-smoke";
 export * from "./operational";
 export * from "./schema";
 export * from "./source";

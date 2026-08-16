@@ -48,6 +48,7 @@
     "shopee:datafeed:inspect": "npm run cli -w @affiliate/shopee-affiliate -- inspect",
     "shopee:datafeed:preview": "npm run cli -w @affiliate/shopee-affiliate -- preview",
     "shopee:datafeed:import": "npm run cli -w @affiliate/shopee-affiliate -- import",
+    "shopee:open-api:smoke": "npm run open-api:smoke -w @affiliate/shopee-affiliate --",
     "conversions:inspect-csv": "npm run cli -w @affiliate/tracking -- conversions-inspect-csv",
     "conversions:import-csv": "npm run cli -w @affiliate/tracking -- conversions-import-csv",
     "commissions:inspect-csv": "npm run cli -w @affiliate/tracking -- commissions-inspect-csv",
