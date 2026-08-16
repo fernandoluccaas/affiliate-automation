@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  GENERATE_SHORT_LINK_MUTATION,
   SHOPEE_OPEN_API_ENDPOINT,
   ShopeeOpenApiClient,
   createGenerateShortLinkPayload,
+  createShopeeGraphQlStringLiteral,
   createShopeeOpenApiSignature,
   sanitizeShopeeSubIds,
 } from "./open-api";
@@ -30,6 +30,7 @@ function successFetch() {
       data: {
         generateShortLink: {
           shortLink: "https://s.shopee.com.br/fixture",
+          longLink: "https://shopee.com.br/product/123/456",
         },
       },
     }),
@@ -81,7 +82,7 @@ describe("Shopee Affiliate Open API signature and payload", () => {
         timestamp: 1_577_836_800,
         payload,
       }),
-    ).toBe("ab66144fa8bd551a0c9ad0e4c3ce95f5b9aa01f870e93d29b5ada3bfb7787b4b");
+    ).toBe("4970c767fe42dcb1d98bfd41108d7b9084db81f22430ca3db32eee1f3f188bb6");
     expect(
       createShopeeOpenApiSignature({
         appId: "123456",
@@ -92,12 +93,40 @@ describe("Shopee Affiliate Open API signature and payload", () => {
     ).toMatch(/^[a-f0-9]{64}$/);
   });
 
-  it("uses the named mutation, GraphQL variables and no interpolated URL", () => {
-    const payload = createGenerateShortLinkPayload({ originUrl });
-    expect(payload.request.operationName).toBe("GenerateShortLink");
-    expect(payload.request.query).toBe(GENERATE_SHORT_LINK_MUTATION);
-    expect(payload.request.query).not.toContain(originUrl);
-    expect(payload.request.variables.originUrl).toBe(originUrl);
+  it("uses the anonymous Explorer V2 literal mutation and a query-only body", () => {
+    const payload = createGenerateShortLinkPayload({
+      originUrl,
+      subIds: ["source_datafeed", "phase_6a3"],
+    });
+    expect(payload.request.query).toBe(`mutation {
+  generateShortLink(input: {originUrl: "https://shopee.com.br/produto-i.123.456", subIds: ["source_datafeed", "phase_6a3"]}) {
+    shortLink
+    longLink
+  }
+}`);
+    expect(payload.request.query).not.toContain("mutation GenerateShortLink");
+    expect(payload.request).not.toHaveProperty("operationName");
+    expect(payload.request).not.toHaveProperty("variables");
+    expect(Object.keys(JSON.parse(payload.body))).toEqual(["query"]);
+    expect(JSON.parse(payload.body)).toEqual(payload.request);
+  });
+
+  it("omits the optional SubIds field when none are supplied", () => {
+    expect(
+      createGenerateShortLinkPayload({ originUrl }).request.query,
+    ).not.toContain("subIds");
+    expect(
+      createGenerateShortLinkPayload({ originUrl, subIds: [] }).request.query,
+    ).not.toContain("subIds");
+  });
+
+  it("creates escaped GraphQL literals and rejects control characters", () => {
+    expect(createShopeeGraphQlStringLiteral('aspas " e barra \\')).toBe(
+      '"aspas \\" e barra \\\\"',
+    );
+    expect(() => createShopeeGraphQlStringLiteral("linha\nseguinte")).toThrow(
+      "SHOPEE_GRAPHQL_STRING_CONTROL_CHARACTER",
+    );
   });
 
   it("sends byte-for-byte the same body that was signed", async () => {
@@ -139,6 +168,9 @@ describe("Shopee Affiliate Open API signature and payload", () => {
       "SHOPEE_SUB_IDS_LIMIT_EXCEEDED",
     );
     expect(() => sanitizeShopeeSubIds([""])).toThrow("SHOPEE_SUB_ID_INVALID");
+    expect(() => sanitizeShopeeSubIds(['safe"]}) { injected'])).toThrow(
+      "SHOPEE_SUB_ID_INVALID",
+    );
   });
 });
 
@@ -162,6 +194,64 @@ describe("Shopee Affiliate Open API transport", () => {
       request.mock.calls[0]![1]?.headers as Record<string, string>
     ).authorization;
     expect(authorization).toContain("Timestamp=1700000000");
+  });
+
+  it("normalizes a Unicode URL before creating its safe literal", async () => {
+    const request = successFetch();
+    await new ShopeeOpenApiClient(credentials, {
+      fetch: request,
+      now: () => now,
+    }).generateShortLink({
+      originUrl:
+        "https://shopee.com.br/Kit-Orgânico-i.1060585622.23199461392",
+      itemId: "23199461392",
+    });
+    const body = JSON.parse(String(request.mock.calls[0]![1]?.body)) as {
+      query: string;
+    };
+    expect(body.query).toContain("Kit-Org%C3%A2nico");
+    expect(body.query).toContain("23199461392");
+    expect(body.query).not.toContain("variables");
+  });
+
+  it("cannot close the origin literal to inject another operation", async () => {
+    const request = successFetch();
+    await new ShopeeOpenApiClient(credentials, {
+      fetch: request,
+      now: () => now,
+    }).generateShortLink({
+      originUrl:
+        "https://shopee.com.br/produto-i.123.456?probe=%22%7D%29%7Bmutation%7Bevil%7D",
+      itemId: "456",
+    });
+    const body = JSON.parse(String(request.mock.calls[0]![1]?.body)) as {
+      query: string;
+    };
+    expect(body.query.match(/generateShortLink/gu)).toHaveLength(1);
+    expect(body.query).not.toContain('probe="}){mutation{evil}');
+  });
+
+  it("rejects origin control characters before transport", async () => {
+    const request = successFetch();
+    await expect(
+      new ShopeeOpenApiClient(credentials, {
+        fetch: request,
+        now: () => now,
+      }).generateShortLink({
+        originUrl: "https://shopee.com.br/produto-i.123.456\n",
+        itemId: "456",
+      }),
+    ).rejects.toThrow("SHOPEE_ORIGIN_URL_INVALID");
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("recognizes longLink without returning or persisting it", async () => {
+    const result = await new ShopeeOpenApiClient(credentials, {
+      fetch: successFetch(),
+      now: () => now,
+    }).generateShortLink({ originUrl, itemId: "456" });
+    expect(result.affiliateUrl).toBe("https://s.shopee.com.br/fixture");
+    expect(result).not.toHaveProperty("longLink");
   });
 
   it("fails safely for timeout and non-200 HTTP", async () => {

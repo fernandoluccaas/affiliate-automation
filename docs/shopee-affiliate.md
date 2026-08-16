@@ -106,8 +106,7 @@ mas os links candidatos aparecem como `NÃO VERIFICADO` e nunca são promovidos 
 links de afiliado. A Fase 6A.2 permanece disponível para preview. Na Fase 6A.3,
 uma confirmação explícita permite que `DATAFEED` persista os vencedores ainda
 pendentes; `HYBRID` persiste primeiro a oferta pendente e envia somente a URL de
-produto validada à mutation nomeada `GenerateShortLink`, usando variáveis
-GraphQL.
+produto validada à operação `generateShortLink`.
 
 O endpoint de produção é fixo em
 `https://open-api.affiliate.shopee.com.br/graphql`. O corpo é serializado uma
@@ -121,6 +120,13 @@ operacionais sem payload, header ou segredo.
 Contrato conferido no [Open API Explorer oficial da Shopee Brasil](https://open-api.affiliate.shopee.com.br/explorer/v2),
 sem informar credenciais ao Explorer. A implementação usa somente o contrato
 `generateShortLink` descrito acima; nenhuma operação não documentada foi criada.
+Por compatibilidade específica com o endpoint brasileiro, o payload segue a
+mutation anônima literal produzida pelo Explorer V2, com `originUrl` e SubIds
+validados e escapados, seleção de `shortLink` e `longLink` e envelope JSON
+contendo somente `query`. O formato anterior com `operationName` e `variables`
+foi rejeitado por esse endpoint com o código oficial `10010`; isso não implica
+uma limitação geral do padrão GraphQL. `longLink` é reconhecido na resposta,
+mas somente o `shortLink` validado é usado como destino afiliado.
 
 A URL de origem deve ser HTTPS, pertencer a `shopee.com.br` ou subdomínio
 legítimo, não conter credenciais/porta e carregar o mesmo `itemId` do Datafeed.

@@ -11,17 +11,6 @@ import {
 export const SHOPEE_OPEN_API_ENDPOINT =
   "https://open-api.affiliate.shopee.com.br/graphql";
 
-export const GENERATE_SHORT_LINK_MUTATION = `mutation GenerateShortLink($originUrl: String!, $subIds: [String]) {
-  generateShortLink(
-    input: {
-      originUrl: $originUrl
-      subIds: $subIds
-    }
-  ) {
-    shortLink
-  }
-}`;
-
 const OFFICIAL_ERROR_CODES = new Map<number, string>([
   [10000, "SHOPEE_OPEN_API_SYSTEM_ERROR"],
   [10010, "SHOPEE_OPEN_API_REQUEST_PARSE_ERROR"],
@@ -70,19 +59,41 @@ export function sanitizeShopeeSubIds(values: readonly string[] | undefined) {
   });
 }
 
+function hasControlCharacter(value: string) {
+  return Array.from(value).some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint <= 31 || (codePoint >= 127 && codePoint <= 159);
+  });
+}
+
+export function createShopeeGraphQlStringLiteral(value: string) {
+  if (hasControlCharacter(value)) {
+    throw new ShopeeOpenApiError("SHOPEE_GRAPHQL_STRING_CONTROL_CHARACTER");
+  }
+  return JSON.stringify(value);
+}
+
 export function createGenerateShortLinkPayload(input: {
   originUrl: string;
   subIds?: readonly string[];
 }) {
-  const variables: { originUrl: string; subIds?: string[] } = {
-    originUrl: input.originUrl,
-  };
   const subIds = sanitizeShopeeSubIds(input.subIds);
-  if (subIds) variables.subIds = subIds;
+  const fields = [
+    `originUrl: ${createShopeeGraphQlStringLiteral(input.originUrl)}`,
+  ];
+  if (subIds?.length) {
+    fields.push(
+      `subIds: [${subIds.map(createShopeeGraphQlStringLiteral).join(", ")}]`,
+    );
+  }
+  const query = `mutation {
+  generateShortLink(input: {${fields.join(", ")}}) {
+    shortLink
+    longLink
+  }
+}`;
   const request = {
-    query: GENERATE_SHORT_LINK_MUTATION,
-    operationName: "GenerateShortLink",
-    variables,
+    query,
   };
   return { request, body: JSON.stringify(request) };
 }
@@ -128,6 +139,9 @@ export class ShopeeOpenApiClient {
     itemId: string;
     subIds?: readonly string[];
   }) {
+    if (hasControlCharacter(input.originUrl)) {
+      throw new ShopeeOpenApiError("SHOPEE_ORIGIN_URL_INVALID");
+    }
     const origin = validateShopeeProductOrigin(input.originUrl, input.itemId);
     if (!origin.ok) throw new ShopeeOpenApiError(origin.code);
     const now = this.dependencies.now?.() ?? new Date();
@@ -196,7 +210,9 @@ export class ShopeeOpenApiClient {
       throw new ShopeeOpenApiError("SHOPEE_OPEN_API_RESPONSE_INVALID");
     }
     const record = parsed as {
-      data?: { generateShortLink?: { shortLink?: unknown } };
+      data?: {
+        generateShortLink?: { shortLink?: unknown; longLink?: unknown };
+      };
       errors?: unknown;
     };
     if (Array.isArray(record.errors) && record.errors.length > 0) {
