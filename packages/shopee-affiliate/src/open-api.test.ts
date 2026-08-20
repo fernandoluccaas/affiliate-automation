@@ -212,8 +212,7 @@ describe("Shopee Affiliate Open API transport", () => {
       fetch: request,
       now: () => now,
     }).generateShortLink({
-      originUrl:
-        "https://shopee.com.br/Kit-Orgânico-i.1060585622.23199461392",
+      originUrl: "https://shopee.com.br/Kit-Orgânico-i.1060585622.23199461392",
       itemId: "23199461392",
     });
     const body = JSON.parse(String(request.mock.calls[0]![1]?.body)) as {
@@ -312,6 +311,17 @@ describe("Shopee Affiliate Open API transport", () => {
         now: () => now,
       }).generateShortLink({ originUrl, itemId: "456" }),
     ).rejects.toThrow("SHOPEE_OPEN_API_HTTP_ERROR");
+  });
+
+  it("classifies HTTP 429 as a retryable rate-limit error", async () => {
+    const operation = new ShopeeOpenApiClient(credentials, {
+      fetch: vi.fn(async () => response({}, 429)),
+      now: () => now,
+    }).generateShortLink({ originUrl, itemId: "456" });
+    await expect(operation).rejects.toMatchObject({
+      code: "SHOPEE_OPEN_API_RATE_LIMITED",
+      retryable: true,
+    });
   });
 
   it("rejects malformed JSON without reflecting response contents", async () => {

@@ -90,6 +90,22 @@ export function resolveShopeeAffiliateConfiguration(
     "SHOPEE_MAX_PER_SHOP_INVALID",
     issues,
   );
+  const autoLinkMaxPerRun = boundedInteger(
+    environment.SHOPEE_AUTO_LINK_MAX_PER_RUN,
+    12,
+    1,
+    12,
+    "SHOPEE_AUTO_LINK_MAX_PER_RUN_INVALID",
+    issues,
+  );
+  const autoLinkConcurrency = boundedInteger(
+    environment.SHOPEE_AUTO_LINK_CONCURRENCY,
+    1,
+    1,
+    1,
+    "SHOPEE_AUTO_LINK_CONCURRENCY_INVALID",
+    issues,
+  );
   if (enabled && requestedMode === "OFF") {
     issues.push("SHOPEE_ENABLED_WITH_OFF_MODE");
   }
@@ -137,6 +153,9 @@ export function resolveShopeeAffiliateConfiguration(
     maxTrackedItems,
     recentSelectionWindowDays,
     maxPerShopPerSession,
+    autoLinkAfterImport: environment.SHOPEE_AUTO_LINK_AFTER_IMPORT === "true",
+    autoLinkMaxPerRun,
+    autoLinkConcurrency,
     issues,
   };
 }

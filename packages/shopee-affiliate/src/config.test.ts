@@ -117,6 +117,9 @@ describe("Shopee affiliate configuration", () => {
     expect(resolveShopeeAffiliateConfiguration({})).toMatchObject({
       recentSelectionWindowDays: 7,
       maxPerShopPerSession: 2,
+      autoLinkAfterImport: false,
+      autoLinkMaxPerRun: 12,
+      autoLinkConcurrency: 1,
     });
     expect(
       resolveShopeeAffiliateConfiguration({
@@ -126,6 +129,39 @@ describe("Shopee affiliate configuration", () => {
     ).toMatchObject({
       recentSelectionWindowDays: 7,
       maxPerShopPerSession: 2,
+    });
+  });
+
+  it("enables post-import auto-linking only through exact safe settings", () => {
+    expect(
+      resolveShopeeAffiliateConfiguration({
+        SHOPEE_AUTO_LINK_AFTER_IMPORT: "true",
+        SHOPEE_AUTO_LINK_MAX_PER_RUN: "6",
+        SHOPEE_AUTO_LINK_CONCURRENCY: "1",
+      }),
+    ).toMatchObject({
+      autoLinkAfterImport: true,
+      autoLinkMaxPerRun: 6,
+      autoLinkConcurrency: 1,
+    });
+    expect(
+      resolveShopeeAffiliateConfiguration({
+        SHOPEE_AUTO_LINK_AFTER_IMPORT: "TRUE",
+      }).autoLinkAfterImport,
+    ).toBe(false);
+    expect(
+      resolveShopeeAffiliateConfiguration({
+        SHOPEE_AUTO_LINK_MAX_PER_RUN: "13",
+        SHOPEE_AUTO_LINK_CONCURRENCY: "2",
+      }),
+    ).toMatchObject({
+      configurationValid: false,
+      autoLinkMaxPerRun: 12,
+      autoLinkConcurrency: 1,
+      issues: expect.arrayContaining([
+        "SHOPEE_AUTO_LINK_MAX_PER_RUN_INVALID",
+        "SHOPEE_AUTO_LINK_CONCURRENCY_INVALID",
+      ]),
     });
   });
 

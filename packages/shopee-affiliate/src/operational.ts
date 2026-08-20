@@ -55,7 +55,6 @@ export interface ShopeeOperationalPersistence {
     position: number;
     winner: ShopeeOperationalWinner;
     subIds?: string[];
-    linkProvider?: ShopeeAffiliateLinkProvider;
     now: Date;
   }): Promise<ShopeeWinnerPersistenceResult>;
   recordFailure(input: {
@@ -92,6 +91,52 @@ export type ShopeeOperationalImportResult = {
   stateModified: boolean;
   publicationsCreated: 0;
   messagesSent: 0;
+  autoLinkResult?: ShopeeBulkAffiliateLinkResult;
+};
+
+export type ShopeeAffiliateLinkApplicationResult = {
+  status: "LINKED" | "ALREADY_LINKED";
+  offerId: string;
+  itemId: string;
+  attempts: 1;
+  linkStatus: "GENERATED" | "REUSED" | "EXISTING";
+  offerStatus: string;
+};
+
+export type ShopeeBulkAffiliateLinkItemResult = {
+  offerId: string;
+  itemId: string | null;
+  status: "LINKED" | "ALREADY_LINKED" | "FAILED" | "NOT_ATTEMPTED";
+  attempts: number;
+  linkStatus?: "GENERATED" | "REUSED" | "EXISTING";
+  errorCode?: string;
+};
+
+export type ShopeeBulkAffiliateLinkResult = {
+  status: "SUCCEEDED" | "SUCCEEDED_WITH_ERRORS" | "FAILED" | "DRY_RUN";
+  source: "IMPORT" | "MANUAL_BULK" | "RETRY";
+  requested: number;
+  eligible: number;
+  attempted: number;
+  linked: number;
+  alreadyLinked: number;
+  failed: number;
+  notAttempted: number;
+  readyToPublish: number;
+  remainingPending: number;
+  linksRequested: number;
+  linksGenerated: number;
+  linksReused: number;
+  linksFailed: number;
+  linksSkipped: number;
+  apiAttempts: number;
+  retryAttempts: number;
+  durationMs: number;
+  externalRequests: number;
+  writes: number;
+  publicationsCreated: 0;
+  messagesSent: 0;
+  items: ShopeeBulkAffiliateLinkItemResult[];
 };
 
 function safeCode(error: unknown) {
@@ -289,11 +334,10 @@ export function createPrismaShopeeOperationalPersistence(
         const subIds = sanitizeShopeeSubIds(input.subIds);
         const label = attributionLabel(origin.normalizedUrl, subIds);
         const reused = await reusableAffiliateUrl(tx, input.winner, label);
-        let affiliateUrl = reused;
-        let linkStatus: ShopeeWinnerPersistenceResult["linkStatus"] = reused
+        const affiliateUrl = reused;
+        const linkStatus: ShopeeWinnerPersistenceResult["linkStatus"] = reused
           ? "REUSED"
           : "PENDING";
-        let errorCode: string | undefined;
         let pendingResult: IngestOfferResult | null = null;
 
         if (!reused) {
@@ -305,28 +349,6 @@ export function createPrismaShopeeOperationalPersistence(
               minScore: 0,
             },
           );
-          if (input.linkProvider) {
-            try {
-              const generated = await input.linkProvider.resolve(
-                input.winner.product,
-                subIds ? { subIds } : undefined,
-              );
-              if (generated.status === "VERIFIED") {
-                const validated = validateShopeeGeneratedShortLink(
-                  generated.affiliateUrl,
-                );
-                if (!validated.ok) throw new ShopeeOpenApiError(validated.code);
-                affiliateUrl = validated.normalizedUrl;
-                linkStatus = "GENERATED";
-              } else {
-                errorCode = generated.reason;
-              }
-            } catch (error) {
-              errorCode = safeCode(error);
-            }
-          } else {
-            errorCode = "SHOPEE_OPEN_API_NOT_READY";
-          }
         }
 
         const result = affiliateUrl
@@ -358,8 +380,7 @@ export function createPrismaShopeeOperationalPersistence(
                 ? "SUCCEEDED"
                 : "INELIGIBLE"
               : "PENDING_AFFILIATE_LINK",
-            attempts: input.linkProvider ? 1 : 0,
-            ...(errorCode ? { errorCode, errorMessage: errorCode } : {}),
+            attempts: 0,
             metadata: {
               category: input.winner.candidate.category,
               score: input.winner.candidate.score,
@@ -368,7 +389,7 @@ export function createPrismaShopeeOperationalPersistence(
             },
           },
         });
-        return { ...result, linkStatus, ...(errorCode ? { errorCode } : {}) };
+        return { ...result, linkStatus };
       });
     },
     async finishImport(input) {
@@ -407,7 +428,9 @@ export function createPrismaShopeeOperationalPersistence(
   };
 }
 
-function providerFromEnvironment(environment: NodeJS.ProcessEnv) {
+export function createShopeeOpenApiProviderFromEnvironment(
+  environment: NodeJS.ProcessEnv,
+) {
   const configuration = resolveShopeeAffiliateConfiguration(environment);
   if (!configuration.openApiReady) return undefined;
   const appId = environment.SHOPEE_OPEN_API_APP_ID?.trim();
@@ -435,6 +458,7 @@ export async function importShopeeOperationalOffers(input: {
   persistence?: ShopeeOperationalPersistence;
   linkProvider?: ShopeeAffiliateLinkProvider;
   recentItemIds?: string[];
+  bulkLinker?: typeof generateShopeeAffiliateLinksBulk;
 }): Promise<ShopeeOperationalImportResult> {
   const environment = input.environment ?? process.env;
   const configuration = resolveShopeeAffiliateConfiguration(environment);
@@ -524,8 +548,7 @@ export async function importShopeeOperationalOffers(input: {
     });
     throw error;
   }
-  const linkProvider =
-    input.linkProvider ?? providerFromEnvironment(environment);
+  const persistedOfferIds: string[] = [];
   for (const [index, winner] of winners.entries()) {
     try {
       const result = await persistence.persistWinner({
@@ -533,9 +556,9 @@ export async function importShopeeOperationalOffers(input: {
         position: index + 1,
         winner,
         ...(input.subIds ? { subIds: input.subIds } : {}),
-        ...(linkProvider ? { linkProvider } : {}),
         now: input.now ?? new Date(),
       });
+      if (result.offerId) persistedOfferIds.push(result.offerId);
       if (result.productCreated || result.offerCreated) metrics.created += 1;
       else if (result.offerUpdated) metrics.updated += 1;
       if (result.linkStatus === "GENERATED") metrics.linksGenerated += 1;
@@ -571,6 +594,35 @@ export async function importShopeeOperationalOffers(input: {
       errorCode: "SHOPEE_SELECTED_ITEM_NOT_RESOLVED",
     });
   }
+  let autoLinkResult: ShopeeBulkAffiliateLinkResult | undefined;
+  if (
+    configuration.autoLinkAfterImport &&
+    configuration.mode === "HYBRID" &&
+    configuration.openApiReady &&
+    persistedOfferIds.length > 0
+  ) {
+    try {
+      const bulkLinker = input.bulkLinker ?? generateShopeeAffiliateLinksBulk;
+      autoLinkResult = await bulkLinker({
+        offerIds: persistedOfferIds,
+        maxItems: configuration.autoLinkMaxPerRun,
+        source: "IMPORT",
+        confirmGenerate: true,
+        subIds: input.subIds ?? ["sourcedatafeed", "autolink"],
+        environment,
+        ...(input.linkProvider ? { linkProvider: input.linkProvider } : {}),
+      });
+      metrics.linksGenerated += autoLinkResult.linksGenerated;
+      metrics.linksReused += autoLinkResult.linksReused;
+      metrics.readyToPublish += autoLinkResult.linked;
+      metrics.pendingAffiliateLink = Math.max(
+        0,
+        metrics.pendingAffiliateLink - autoLinkResult.linked,
+      );
+    } catch {
+      // The committed import remains valid and keeps its manual-link fallback.
+    }
+  }
   const status =
     metrics.failed || metrics.pendingAffiliateLink
       ? "SUCCEEDED_WITH_ERRORS"
@@ -583,6 +635,17 @@ export async function importShopeeOperationalOffers(input: {
       selectedItemIds: preview.selected.map((item) => item.itemId),
       openApiConfigured: configuration.openApiConfigured,
       openApiReady: configuration.openApiReady,
+      autoLink: autoLinkResult
+        ? {
+            status: autoLinkResult.status,
+            requested: autoLinkResult.requested,
+            linked: autoLinkResult.linked,
+            alreadyLinked: autoLinkResult.alreadyLinked,
+            failed: autoLinkResult.failed,
+            notAttempted: autoLinkResult.notAttempted,
+            apiAttempts: autoLinkResult.apiAttempts,
+          }
+        : null,
       publicationsCreated: 0,
       messagesSent: 0,
     },
@@ -595,6 +658,7 @@ export async function importShopeeOperationalOffers(input: {
     stateModified: true,
     publicationsCreated: 0,
     messagesSent: 0,
+    ...(autoLinkResult ? { autoLinkResult } : {}),
   };
 }
 
@@ -676,72 +740,536 @@ function winnerFromOffer(offer: {
   };
 }
 
-export async function retryShopeeAffiliateLink(input: {
+const affiliateLinkOfferSelect = {
+  id: true,
+  marketplace: true,
+  externalProductId: true,
+  title: true,
+  description: true,
+  category: true,
+  sourceCategoryId: true,
+  imageUrl: true,
+  productUrl: true,
+  affiliateUrl: true,
+  originalPrice: true,
+  currentPrice: true,
+  discountPercentage: true,
+  rating: true,
+  status: true,
+  version: true,
+} satisfies Prisma.OfferSelect;
+
+export async function generateAndApplyShopeeAffiliateLink(input: {
   offerId: string;
   subIds?: string[];
   environment?: NodeJS.ProcessEnv;
   linkProvider?: ShopeeAffiliateLinkProvider;
   database?: PrismaClient;
   now?: Date;
-}) {
+}): Promise<ShopeeAffiliateLinkApplicationResult> {
   const environment = input.environment ?? process.env;
-  const provider = input.linkProvider ?? providerFromEnvironment(environment);
+  const configuration = resolveShopeeAffiliateConfiguration(environment);
+  if (!input.linkProvider && !configuration.openApiReady) {
+    throw new ShopeeOpenApiError("SHOPEE_OPEN_API_NOT_READY");
+  }
+  const subIds = sanitizeShopeeSubIds(input.subIds);
+  const provider =
+    input.linkProvider ??
+    createShopeeOpenApiProviderFromEnvironment(environment);
   if (!provider) throw new ShopeeOpenApiError("SHOPEE_OPEN_API_NOT_READY");
   const database = input.database ?? prisma;
-  return database.$transaction(async (tx) => {
-    const current = await tx.offer.findUnique({
-      where: { id: input.offerId },
-      select: {
-        marketplace: true,
-        externalProductId: true,
-        title: true,
-        description: true,
-        category: true,
-        sourceCategoryId: true,
-        imageUrl: true,
-        productUrl: true,
-        originalPrice: true,
-        currentPrice: true,
-        discountPercentage: true,
-        rating: true,
-      },
-    });
-    if (!current || current.marketplace !== "SHOPEE") {
-      throw new ShopeeOpenApiError("SHOPEE_OFFER_NOT_FOUND");
-    }
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`shopee:${current.externalProductId}`}))`;
-    const winner = winnerFromOffer(current);
-    const subIds = sanitizeShopeeSubIds(input.subIds);
-    const origin = validateShopeeProductOrigin(
-      current.productUrl,
-      current.externalProductId,
+  const requested = await database.offer.findUnique({
+    where: { id: input.offerId },
+    select: { marketplace: true, externalProductId: true },
+  });
+  if (!requested || requested.marketplace !== "SHOPEE") {
+    throw new ShopeeOpenApiError("SHOPEE_OFFER_NOT_FOUND");
+  }
+  const current = await database.offer.findFirst({
+    where: {
+      marketplace: "SHOPEE",
+      externalProductId: requested.externalProductId,
+    },
+    orderBy: { version: "desc" },
+    select: affiliateLinkOfferSelect,
+  });
+  if (!current) throw new ShopeeOpenApiError("SHOPEE_OFFER_NOT_FOUND");
+  if (
+    current.status === "READY_TO_PUBLISH" &&
+    current.affiliateUrl &&
+    validateShopeeGeneratedShortLink(current.affiliateUrl).ok
+  ) {
+    return {
+      status: "ALREADY_LINKED",
+      offerId: current.id,
+      itemId: current.externalProductId,
+      attempts: 1,
+      linkStatus: "EXISTING",
+      offerStatus: current.status,
+    };
+  }
+  if (current.status !== "READY_FOR_AFFILIATE_LINK") {
+    throw new ShopeeOpenApiError("SHOPEE_OFFER_NOT_ELIGIBLE");
+  }
+  const winner = winnerFromOffer(current);
+  const origin = validateShopeeProductOrigin(
+    current.productUrl,
+    current.externalProductId,
+  );
+  if (!origin.ok) throw new ShopeeOpenApiError(origin.code);
+  const label = attributionLabel(origin.normalizedUrl, subIds);
+  const reusable = await database.$transaction((tx) =>
+    reusableAffiliateUrl(tx, winner, label),
+  );
+  let resolvedUrl = reusable;
+  let linkStatus: ShopeeAffiliateLinkApplicationResult["linkStatus"] = reusable
+    ? "REUSED"
+    : "GENERATED";
+  if (!resolvedUrl) {
+    const generated = await provider.resolve(
+      winner.product,
+      subIds ? { subIds } : undefined,
     );
-    if (!origin.ok) throw new ShopeeOpenApiError(origin.code);
-    const label = attributionLabel(origin.normalizedUrl, subIds);
-    const existing = await reusableAffiliateUrl(tx, winner, label);
-    const affiliateUrl =
-      existing ??
-      (await provider.resolve(winner.product, subIds ? { subIds } : undefined));
-    const resolvedUrl =
-      typeof affiliateUrl === "string"
-        ? affiliateUrl
-        : affiliateUrl.status === "VERIFIED"
-          ? affiliateUrl.affiliateUrl
-          : null;
+    if (generated.status !== "VERIFIED") {
+      throw new ShopeeOpenApiError(generated.reason);
+    }
+    resolvedUrl = generated.affiliateUrl;
+  }
+  const validated = validateShopeeGeneratedShortLink(resolvedUrl);
+  if (!validated.ok) throw new ShopeeOpenApiError(validated.code);
+
+  return database.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`shopee:${current.externalProductId}`}))`;
+    const latest = await tx.offer.findFirst({
+      where: {
+        marketplace: "SHOPEE",
+        externalProductId: current.externalProductId,
+      },
+      orderBy: { version: "desc" },
+      select: affiliateLinkOfferSelect,
+    });
+    if (!latest) throw new ShopeeOpenApiError("SHOPEE_OFFER_NOT_FOUND");
+    if (
+      latest.status === "READY_TO_PUBLISH" &&
+      latest.affiliateUrl &&
+      validateShopeeGeneratedShortLink(latest.affiliateUrl).ok
+    ) {
+      return {
+        status: "ALREADY_LINKED",
+        offerId: latest.id,
+        itemId: latest.externalProductId,
+        attempts: 1,
+        linkStatus: "EXISTING",
+        offerStatus: latest.status,
+      };
+    }
+    if (latest.status !== "READY_FOR_AFFILIATE_LINK") {
+      throw new ShopeeOpenApiError("SHOPEE_OFFER_NOT_ELIGIBLE");
+    }
+    const latestWinner = winnerFromOffer(latest);
+    const racedReusable = await reusableAffiliateUrl(tx, latestWinner, label);
+    if (racedReusable) {
+      resolvedUrl = racedReusable;
+      linkStatus = "REUSED";
+    }
     if (!resolvedUrl) {
       throw new ShopeeOpenApiError("SHOPEE_OPEN_API_SHORT_LINK_MISSING");
     }
-    const validated = validateShopeeGeneratedShortLink(resolvedUrl);
-    if (!validated.ok) throw new ShopeeOpenApiError(validated.code);
-    return ingestOfferInTransaction(
+    const result = await ingestOfferInTransaction(
       tx,
-      offerInput(winner, {
-        affiliateUrl: validated.normalizedUrl,
+      offerInput(latestWinner, {
+        affiliateUrl: resolvedUrl,
         affiliateLabel: label,
       }),
       { now: input.now ?? new Date(), minScore: 70 },
     );
+    if (result.status !== "READY_TO_PUBLISH") {
+      throw new ShopeeOpenApiError("SHOPEE_AFFILIATE_LINK_APPLICATION_FAILED");
+    }
+    return {
+      status: "LINKED",
+      offerId: result.offerId ?? latest.id,
+      itemId: latest.externalProductId,
+      attempts: 1,
+      linkStatus,
+      offerStatus: result.status,
+    };
   });
+}
+
+export async function retryShopeeAffiliateLink(
+  input: Parameters<typeof generateAndApplyShopeeAffiliateLink>[0],
+) {
+  return generateAndApplyShopeeAffiliateLink(input);
+}
+
+type ShopeeBulkOfferCandidate = {
+  id: string;
+  marketplace: string;
+  externalProductId: string;
+  productUrl: string;
+  affiliateUrl: string | null;
+  status: string;
+  version: number;
+};
+
+const GLOBAL_BULK_ERROR_CODES = new Set([
+  "SHOPEE_OPEN_API_AUTHENTICATION_FAILED",
+  "SHOPEE_OPEN_API_CREDENTIALS_MISSING",
+  "SHOPEE_OPEN_API_LOCAL_RATE_LIMITED",
+  "SHOPEE_OPEN_API_NOT_READY",
+  "SHOPEE_OPEN_API_RATE_LIMITED",
+  "SHOPEE_OPEN_API_SYSTEM_ERROR",
+  "SHOPEE_AFFILIATE_CONFIGURATION_INVALID",
+]);
+
+const RETRYABLE_BULK_ERROR_CODES = new Set([
+  "SHOPEE_OPEN_API_TIMEOUT",
+  "SHOPEE_OPEN_API_REQUEST_FAILED",
+  "SHOPEE_OPEN_API_HTTP_ERROR",
+  "SHOPEE_OPEN_API_RATE_LIMITED",
+  "SHOPEE_OPEN_API_SYSTEM_ERROR",
+]);
+
+const NO_REQUEST_ERROR_CODES = new Set([
+  "SHOPEE_SUB_ID_INVALID",
+  "SHOPEE_SUB_IDS_LIMIT_EXCEEDED",
+  "SHOPEE_ORIGIN_URL_INVALID",
+  "SHOPEE_ORIGIN_ITEM_ID_INVALID",
+  "SHOPEE_ORIGIN_ITEM_ID_MISMATCH",
+  "SHOPEE_ORIGIN_ITEM_ID_REQUIRED",
+  "SHOPEE_OFFER_NOT_ELIGIBLE",
+  "SHOPEE_OFFER_NOT_FOUND",
+  "SHOPEE_OPEN_API_LOCAL_RATE_LIMITED",
+]);
+
+function isRetryableBulkError(error: unknown, code: string) {
+  if (code === "SHOPEE_OPEN_API_LOCAL_RATE_LIMITED") return false;
+  return (
+    (error instanceof ShopeeOpenApiError && error.retryable) ||
+    RETRYABLE_BULK_ERROR_CODES.has(code)
+  );
+}
+
+async function loadShopeeBulkOffers(
+  database: PrismaClient,
+  offerIds: readonly string[] | undefined,
+) {
+  const rows = await database.offer.findMany({
+    where: offerIds?.length
+      ? { id: { in: [...offerIds] } }
+      : { marketplace: "SHOPEE" },
+    orderBy: [{ externalProductId: "asc" }, { version: "desc" }],
+    select: {
+      id: true,
+      marketplace: true,
+      externalProductId: true,
+      productUrl: true,
+      affiliateUrl: true,
+      status: true,
+      version: true,
+    },
+  });
+  if (offerIds?.length) {
+    const byId = new Map(rows.map((offer) => [offer.id, offer]));
+    return offerIds.flatMap((id) => {
+      const offer = byId.get(id);
+      return offer ? [offer] : [];
+    });
+  }
+  const current = new Map<string, (typeof rows)[number]>();
+  for (const offer of rows) {
+    if (!current.has(offer.externalProductId)) {
+      current.set(offer.externalProductId, offer);
+    }
+  }
+  return [...current.values()]
+    .filter((offer) => offer.status === "READY_FOR_AFFILIATE_LINK")
+    .sort((left, right) => left.id.localeCompare(right.id));
+}
+
+function emptyBulkResult(input: {
+  source: ShopeeBulkAffiliateLinkResult["source"];
+  status: ShopeeBulkAffiliateLinkResult["status"];
+  requested: number;
+  eligible: number;
+  durationMs: number;
+  items?: ShopeeBulkAffiliateLinkItemResult[];
+}): ShopeeBulkAffiliateLinkResult {
+  const items = input.items ?? [];
+  return {
+    status: input.status,
+    source: input.source,
+    requested: input.requested,
+    eligible: input.eligible,
+    attempted: 0,
+    linked: 0,
+    alreadyLinked: 0,
+    failed: 0,
+    notAttempted: items.filter((item) => item.status === "NOT_ATTEMPTED")
+      .length,
+    readyToPublish: 0,
+    remainingPending: input.eligible,
+    linksRequested: input.eligible,
+    linksGenerated: 0,
+    linksReused: 0,
+    linksFailed: 0,
+    linksSkipped: items.length,
+    apiAttempts: 0,
+    retryAttempts: 0,
+    durationMs: input.durationMs,
+    externalRequests: 0,
+    writes: 0,
+    publicationsCreated: 0,
+    messagesSent: 0,
+    items,
+  };
+}
+
+export async function generateShopeeAffiliateLinksBulk(input: {
+  offerIds?: string[];
+  maxItems?: number;
+  source: ShopeeBulkAffiliateLinkResult["source"];
+  confirmGenerate: boolean;
+  dryRun?: boolean;
+  subIds?: string[];
+  environment?: NodeJS.ProcessEnv;
+  database?: PrismaClient;
+  linkProvider?: ShopeeAffiliateLinkProvider;
+  dependencies?: {
+    loadOffers?: () => Promise<ShopeeBulkOfferCandidate[]>;
+    applyLink?: typeof generateAndApplyShopeeAffiliateLink;
+    sleep?: (milliseconds: number) => Promise<void>;
+    now?: () => number;
+  };
+}): Promise<ShopeeBulkAffiliateLinkResult> {
+  if (!input.confirmGenerate && !input.dryRun) {
+    throw new ShopeeOpenApiError("SHOPEE_BULK_LINK_NOT_CONFIRMED");
+  }
+  const environment = input.environment ?? process.env;
+  const configuration = resolveShopeeAffiliateConfiguration(environment);
+  const maxItems = input.maxItems ?? configuration.autoLinkMaxPerRun;
+  if (!Number.isSafeInteger(maxItems) || maxItems < 1 || maxItems > 12) {
+    throw new ShopeeOpenApiError("SHOPEE_BULK_LINK_MAX_INVALID");
+  }
+  const offerIds = input.offerIds
+    ? [...new Set(input.offerIds.map((id) => id.trim()).filter(Boolean))]
+    : undefined;
+  if (offerIds && offerIds.length > maxItems) {
+    throw new ShopeeOpenApiError("SHOPEE_BULK_LINK_MAX_EXCEEDED");
+  }
+  const now = input.dependencies?.now ?? Date.now;
+  const startedAt = now();
+  const database = input.database ?? prisma;
+  const loaded = input.dependencies?.loadOffers
+    ? await input.dependencies.loadOffers()
+    : await loadShopeeBulkOffers(database, offerIds);
+  const loadedById = new Map(loaded.map((offer) => [offer.id, offer]));
+  const candidates = offerIds
+    ? offerIds.map(
+        (id) =>
+          loadedById.get(id) ?? {
+            id,
+            marketplace: "",
+            externalProductId: "",
+            productUrl: "",
+            affiliateUrl: null,
+            status: "NOT_FOUND",
+            version: 0,
+          },
+      )
+    : [...loaded].sort((left, right) => left.id.localeCompare(right.id));
+  const offers = candidates.slice(0, maxItems);
+  const requested = offerIds?.length ?? offers.length;
+  const eligible = offers.filter(
+    (offer) =>
+      offer.marketplace === "SHOPEE" &&
+      offer.status === "READY_FOR_AFFILIATE_LINK",
+  );
+  if (input.dryRun) {
+    return emptyBulkResult({
+      source: input.source,
+      status: "DRY_RUN",
+      requested,
+      eligible: eligible.length,
+      durationMs: Math.max(0, now() - startedAt),
+      items: eligible.map((offer) => ({
+        offerId: offer.id,
+        itemId: offer.externalProductId || null,
+        status: "NOT_ATTEMPTED",
+        attempts: 0,
+        errorCode: "SHOPEE_BULK_LINK_DRY_RUN",
+      })),
+    });
+  }
+  if (
+    !configuration.configurationValid ||
+    configuration.mode !== "HYBRID" ||
+    !configuration.openApiReady
+  ) {
+    const errorCode = !configuration.configurationValid
+      ? "SHOPEE_AFFILIATE_CONFIGURATION_INVALID"
+      : "SHOPEE_OPEN_API_NOT_READY";
+    return emptyBulkResult({
+      source: input.source,
+      status: "FAILED",
+      requested,
+      eligible: eligible.length,
+      durationMs: Math.max(0, now() - startedAt),
+      items: eligible.map((offer) => ({
+        offerId: offer.id,
+        itemId: offer.externalProductId || null,
+        status: "NOT_ATTEMPTED",
+        attempts: 0,
+        errorCode,
+      })),
+    });
+  }
+  const provider =
+    input.linkProvider ??
+    createShopeeOpenApiProviderFromEnvironment(environment);
+  if (!provider) throw new ShopeeOpenApiError("SHOPEE_OPEN_API_NOT_READY");
+  const applyLink =
+    input.dependencies?.applyLink ?? generateAndApplyShopeeAffiliateLink;
+  const sleep =
+    input.dependencies?.sleep ??
+    ((milliseconds: number) =>
+      new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
+  const items: ShopeeBulkAffiliateLinkItemResult[] = [];
+  let apiAttempts = 0;
+  let retryAttempts = 0;
+  let globalFailure: string | null = null;
+
+  for (const offer of offers) {
+    if (globalFailure) {
+      items.push({
+        offerId: offer.id,
+        itemId: offer.externalProductId || null,
+        status: "NOT_ATTEMPTED",
+        attempts: 0,
+        errorCode: "SHOPEE_BULK_LINK_GLOBAL_FAILURE",
+      });
+      continue;
+    }
+    if (offer.marketplace !== "SHOPEE") {
+      items.push({
+        offerId: offer.id,
+        itemId: offer.externalProductId || null,
+        status: "FAILED",
+        attempts: 0,
+        errorCode: "SHOPEE_OFFER_NOT_ELIGIBLE",
+      });
+      continue;
+    }
+    if (
+      offer.status === "READY_TO_PUBLISH" &&
+      offer.affiliateUrl &&
+      validateShopeeGeneratedShortLink(offer.affiliateUrl).ok
+    ) {
+      items.push({
+        offerId: offer.id,
+        itemId: offer.externalProductId || null,
+        status: "ALREADY_LINKED",
+        attempts: 0,
+      });
+      continue;
+    }
+    if (offer.status !== "READY_FOR_AFFILIATE_LINK") {
+      items.push({
+        offerId: offer.id,
+        itemId: offer.externalProductId,
+        status: "FAILED",
+        attempts: 0,
+        errorCode: "SHOPEE_OFFER_NOT_ELIGIBLE",
+      });
+      continue;
+    }
+    let attempts = 0;
+    while (attempts < 2) {
+      attempts += 1;
+      try {
+        const result = await applyLink({
+          offerId: offer.id,
+          subIds: input.subIds ?? ["sourcedatafeed", "autolink"],
+          environment,
+          linkProvider: provider,
+          database,
+        });
+        if (result.linkStatus === "GENERATED") apiAttempts += 1;
+        items.push({
+          offerId: result.offerId,
+          itemId: result.itemId,
+          status: result.status,
+          attempts,
+          linkStatus: result.linkStatus,
+        });
+        break;
+      } catch (error) {
+        const errorCode = safeCode(error);
+        if (!NO_REQUEST_ERROR_CODES.has(errorCode)) apiAttempts += 1;
+        const retryable = isRetryableBulkError(error, errorCode);
+        if (retryable && attempts < 2) {
+          retryAttempts += 1;
+          await sleep(100);
+          continue;
+        }
+        items.push({
+          offerId: offer.id,
+          itemId: offer.externalProductId,
+          status: "FAILED",
+          attempts,
+          errorCode,
+        });
+        if (GLOBAL_BULK_ERROR_CODES.has(errorCode)) globalFailure = errorCode;
+        break;
+      }
+    }
+  }
+  const linked = items.filter((item) => item.status === "LINKED").length;
+  const alreadyLinked = items.filter(
+    (item) => item.status === "ALREADY_LINKED",
+  ).length;
+  const failed = items.filter((item) => item.status === "FAILED").length;
+  const notAttempted = items.filter(
+    (item) => item.status === "NOT_ATTEMPTED",
+  ).length;
+  const generated = items.filter(
+    (item) => item.status === "LINKED" && item.linkStatus === "GENERATED",
+  ).length;
+  const reused = items.filter(
+    (item) => item.status === "ALREADY_LINKED" || item.linkStatus === "REUSED",
+  ).length;
+  return {
+    status:
+      linked + alreadyLinked === 0 && (failed > 0 || notAttempted > 0)
+        ? "FAILED"
+        : failed > 0 || notAttempted > 0
+          ? "SUCCEEDED_WITH_ERRORS"
+          : "SUCCEEDED",
+    source: input.source,
+    requested,
+    eligible: eligible.length,
+    attempted: items.filter((item) => item.attempts > 0).length,
+    linked,
+    alreadyLinked,
+    failed,
+    notAttempted,
+    readyToPublish: linked + alreadyLinked,
+    remainingPending: failed + notAttempted,
+    linksRequested: eligible.length,
+    linksGenerated: generated,
+    linksReused: reused,
+    linksFailed: failed,
+    linksSkipped: alreadyLinked + notAttempted,
+    apiAttempts,
+    retryAttempts,
+    durationMs: Math.max(0, now() - startedAt),
+    externalRequests: apiAttempts,
+    writes: linked,
+    publicationsCreated: 0,
+    messagesSent: 0,
+    items,
+  };
 }
 
 export type ShopeeDnsResolver = (
@@ -750,7 +1278,8 @@ export type ShopeeDnsResolver = (
 
 function ipv4Octets(address: string) {
   const octets = address.split(".").map(Number);
-  return octets.length === 4 && octets.every((octet) => octet >= 0 && octet <= 255)
+  return octets.length === 4 &&
+    octets.every((octet) => octet >= 0 && octet <= 255)
     ? octets
     : null;
 }
@@ -853,7 +1382,8 @@ async function assertSafeShopeeRedirectTarget(
       );
     });
   } catch {
-    if (signal.aborted) throw new ShopeeOpenApiError("SHOPEE_MANUAL_LINK_TIMEOUT", true);
+    if (signal.aborted)
+      throw new ShopeeOpenApiError("SHOPEE_MANUAL_LINK_TIMEOUT", true);
     throw new ShopeeOpenApiError("SHOPEE_MANUAL_LINK_DNS_FAILED", true);
   }
   if (
@@ -900,9 +1430,7 @@ export async function resolveManualShopeeShortLink(input: {
         signal: controller.signal,
       });
       if (response.status < 300 || response.status >= 400) {
-        throw new ShopeeOpenApiError(
-          "SHOPEE_MANUAL_LINK_REDIRECT_REJECTED",
-        );
+        throw new ShopeeOpenApiError("SHOPEE_MANUAL_LINK_REDIRECT_REJECTED");
       }
       const location = response.headers.get("location");
       if (!location) {
@@ -916,9 +1444,7 @@ export async function resolveManualShopeeShortLink(input: {
       const product = validateShopeeProductOrigin(next, input.expectedItemId);
       if (product.ok) return product.normalizedUrl;
       if (product.code === "SHOPEE_ORIGIN_ITEM_ID_MISMATCH") {
-        throw new ShopeeOpenApiError(
-          "SHOPEE_AFFILIATE_LINK_PRODUCT_MISMATCH",
-        );
+        throw new ShopeeOpenApiError("SHOPEE_AFFILIATE_LINK_PRODUCT_MISMATCH");
       }
       if (
         product.code === "SHOPEE_ORIGIN_ITEM_ID_MISSING" &&

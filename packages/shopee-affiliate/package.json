@@ -9,6 +9,7 @@
   "scripts": {
     "cli": "node --env-file=../../.env --import tsx src/cli.ts",
     "open-api:smoke": "node --env-file=../../.env --import tsx src/open-api-smoke-cli.ts",
+    "affiliate-links": "node --env-file=../../.env --import tsx src/affiliate-links-cli.ts",
     "build": "tsc -p tsconfig.json",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",

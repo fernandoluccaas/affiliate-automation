@@ -190,9 +190,11 @@ retention, analytics, and troubleshooting.
 
 Shopee Datafeeds support deterministic preview and an explicitly confirmed
 operational import. In `HYBRID` mode, server-only App ID/Secret credentials sign
-the official `generateShortLink` GraphQL request; successful links are validated
-and stored through the existing Offer/AffiliateLink pipeline. The flow stops at
-`READY_TO_PUBLISH` and never creates a Publication. See
+the official `generateShortLink` GraphQL request; individual, manually confirmed
+bulk and optional post-import auto-linking all reuse the same validated
+Offer/AffiliateLink pipeline. Auto-linking is disabled by default, partial
+success keeps failed Offers pending, and the flow stops at `READY_TO_PUBLISH`
+without creating a Publication. See
 [Shopee Affiliate](docs/shopee-affiliate.md).
 
 The worker processes queued `AFFILIATE_LINK_BATCH` jobs and isolates expiration, discovery, refresh, scheduling, retries and publication as independent stages. A failed discovery produces `PARTIAL` while refresh and ready publications continue. Refresh records `selected`, `refreshed`, `unchanged`, `newVersions`, `notFound`, `failed` and `affiliateUrlsPreserved`; it never replaces an existing affiliate URL with `null`.

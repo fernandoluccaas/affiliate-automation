@@ -9,6 +9,7 @@ const manualLink = vi.hoisted(() => vi.fn());
 const configuration = vi.hoisted(() => vi.fn());
 const recentItems = vi.hoisted(() => vi.fn());
 const offerState = vi.hoisted(() => vi.fn());
+const bulkLinks = vi.hoisted(() => vi.fn());
 
 vi.mock("./session", () => ({ requireSession }));
 vi.mock("@affiliate/shopee-affiliate", async (importOriginal) => {
@@ -24,12 +25,14 @@ vi.mock("@affiliate/shopee-affiliate", async (importOriginal) => {
     resolveShopeeAffiliateConfiguration: configuration,
     loadRecentShopeeItemIds: recentItems,
     loadShopeeOperationalOfferState: offerState,
+    generateShopeeAffiliateLinksBulk: bulkLinks,
   };
 });
 
 import {
   applyManualShopeeAffiliateLinkAction,
   confirmShopeeDatafeedImportAction,
+  generatePendingShopeeAffiliateLinksAction,
   inspectShopeeDatafeedAction,
   previewShopeeDatafeedAction,
   retryShopeeAffiliateLinkAction,
@@ -144,7 +147,7 @@ describe("Shopee dashboard Server Actions", () => {
     expect(operationalImport).toHaveBeenCalledWith(
       expect.objectContaining({
         confirmImport: true,
-        subIds: ["sourcedatafeed", "phase6a3"],
+        subIds: ["sourcedatafeed", "autolink"],
       }),
     );
     expect(JSON.stringify(operationalImport.mock.calls[0])).not.toMatch(
@@ -164,9 +167,60 @@ describe("Shopee dashboard Server Actions", () => {
       offerId: "offer-safe",
       subIds: ["sourcedatafeed", "retry"],
     });
-    expect(JSON.stringify(retryLink.mock.calls)).not.toContain("source_datafeed");
+    expect(JSON.stringify(retryLink.mock.calls)).not.toContain(
+      "source_datafeed",
+    );
     expect(offerState).toHaveBeenCalled();
     expect(JSON.stringify(result)).not.toMatch(/secret|authorization|cookie/i);
+  });
+
+  it("requires backend confirmation before bulk linking", async () => {
+    const result = await generatePendingShopeeAffiliateLinksAction({
+      confirmGenerate: false,
+      maxItems: 12,
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      errorCode: "SHOPEE_BULK_LINK_NOT_CONFIRMED",
+    });
+    expect(bulkLinks).not.toHaveBeenCalled();
+  });
+
+  it("generates pending links with valid SubIds and a sanitized partial DTO", async () => {
+    bulkLinks.mockResolvedValue({
+      status: "SUCCEEDED_WITH_ERRORS",
+      linked: 10,
+      remainingPending: 2,
+      publicationsCreated: 0,
+      messagesSent: 0,
+      items: [
+        {
+          offerId: "offer-safe",
+          itemId: "123",
+          status: "FAILED",
+          attempts: 1,
+          errorCode: "SHOPEE_ORIGIN_URL_INVALID",
+        },
+      ],
+    });
+    const result = await generatePendingShopeeAffiliateLinksAction({
+      confirmGenerate: true,
+      maxItems: 12,
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      message: "10 links aplicados; 2 ofertas ainda precisam de atenção.",
+    });
+    expect(bulkLinks).toHaveBeenCalledWith({
+      source: "MANUAL_BULK",
+      confirmGenerate: true,
+      maxItems: 12,
+      subIds: ["sourcedatafeed", "bulk"],
+    });
+    expect(JSON.stringify(result)).not.toMatch(
+      /secret|authorization|signature|graphql/i,
+    );
+    expect(offerState).toHaveBeenCalled();
   });
 
   it("returns a specific sanitized message for an Open API GraphQL error", async () => {

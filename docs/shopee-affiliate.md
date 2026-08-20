@@ -244,6 +244,69 @@ O redirect `/go/[slug]` continua consultando exclusivamente
 `AffiliateLink.destination`; URL do produto, candidato do Datafeed e `shope.ee`
 não são fallbacks de tracking.
 
+## Geração automatizada de links
+
+O fluxo padrão permanece fail-closed:
+
+```text
+DATAFEED -> discovery -> import -> READY_FOR_AFFILIATE_LINK
+```
+
+Em modo `HYBRID`, a aba **Links** permite confirmar **Gerar links das
+pendentes**. O serviço seleciona somente a versão comercial atual de Offers
+Shopee pendentes, processa no máximo 12 por execução e usa concorrência 1. Cada
+item reutiliza o mesmo cliente Open API e, portanto, o mesmo rate limiter. O
+fluxo usa a URL pública do Product, nunca o link candidato do Datafeed:
+
+```text
+DATAFEED -> import -> bulk generateShortLink -> AffiliateLink -> READY_TO_PUBLISH
+```
+
+O serviço individual usado por **Tentar Open API** também é usado pelo bulk. Ele
+procura primeiro um link reutilizável, chama `generateShortLink` fora da
+transação de escrita e relê a Offer sob lock antes de aplicar o resultado. Uma
+execução repetida classifica links existentes como `ALREADY_LINKED` e não chama
+a API. Isso preserva o `AffiliateLink`, evita versões duplicadas e trata uma
+corrida concorrente antes da persistência.
+
+Timeout, conexão interrompida, HTTP 429/5xx e erros oficiais temporários admitem
+no máximo duas tentativas totais, com backoff curto. Erros de autenticação,
+configuração, URL, Offer ou Sub ID não são repetidos. Uma falha específica não
+cancela os sucessos anteriores; por exemplo, `10 linked / 2 pending`. Uma falha
+global interrompe novas chamadas e classifica o restante como `NOT_ATTEMPTED`.
+Os erros retornados ao dashboard e CLI contêm apenas códigos sanitizados.
+
+Os Sub IDs internos do bulk são alfanuméricos: `sourcedatafeed` + `autolink`
+após importação e `sourcedatafeed` + `bulk` na ação manual. O contrato estrito
+`^[A-Za-z0-9]+$` permanece inalterado.
+
+O auto-link pós-importação é progressivo e fica desligado por padrão:
+
+```dotenv
+SHOPEE_AUTO_LINK_AFTER_IMPORT="false"
+SHOPEE_AUTO_LINK_MAX_PER_RUN="12"
+SHOPEE_AUTO_LINK_CONCURRENCY="1"
+```
+
+Quando a primeira flag for explicitamente alterada para `true` e o modo
+`HYBRID` estiver pronto, a importação faz commit primeiro e só então inicia o
+bulk. Falha da Open API não desfaz Products ou Offers importados; eles continuam
+`READY_FOR_AFFILIATE_LINK` com **Tentar Open API** e o fallback manual
+`s.shopee.com.br` disponíveis. Em `DATAFEED`, nenhuma chamada Open API ocorre.
+
+Operação local:
+
+```powershell
+npm run shopee:offers:status
+npm run shopee:affiliate-links:generate -- --pending --dry-run
+npm run shopee:affiliate-links:generate -- --pending --max 12 --confirm-generate
+```
+
+Sem `--confirm-generate`, o comando realiza zero requests e zero escritas. O
+dry-run apenas informa quantas Offers seriam elegíveis. Resultado parcial usa
+exit code 1 e falha global usa exit code 2. Nenhum desses fluxos cria
+Publication, chama planner ou envia Telegram/WhatsApp.
+
 ## Smoke test controlado da Open API
 
 O comando `shopee:open-api:smoke` serve exclusivamente para diagnosticar as

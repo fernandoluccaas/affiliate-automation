@@ -191,8 +191,10 @@ export class ShopeeOpenApiClient {
     }
     if (!response.ok) {
       throw new ShopeeOpenApiError(
-        "SHOPEE_OPEN_API_HTTP_ERROR",
-        response.status >= 500,
+        response.status === 429
+          ? "SHOPEE_OPEN_API_RATE_LIMITED"
+          : "SHOPEE_OPEN_API_HTTP_ERROR",
+        response.status === 429 || response.status >= 500,
       );
     }
     let parsed: unknown;

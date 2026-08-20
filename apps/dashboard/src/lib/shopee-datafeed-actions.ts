@@ -4,6 +4,7 @@ import { z } from "zod";
 import {
   SHOPEE_CATEGORY_CATALOG,
   applyManualShopeeAffiliateLink,
+  generateShopeeAffiliateLinksBulk,
   importShopeeOperationalOffers,
   inspectShopeeDatafeeds,
   loadRecentShopeeItemIds,
@@ -86,14 +87,19 @@ function messageFor(code: string) {
       "O link excede o limite seguro de redirecionamentos.",
     SHOPEE_MANUAL_LINK_REDIRECT_REJECTED:
       "O link redireciona para um destino não permitido.",
-    SHOPEE_AFFILIATE_LINK_PRODUCT_MISMATCH:
-      "O link pertence a outro produto.",
+    SHOPEE_AFFILIATE_LINK_PRODUCT_MISMATCH: "O link pertence a outro produto.",
     SHOPEE_AFFILIATE_LINK_ITEM_ID_MISSING:
       "Não foi possível confirmar o item do link.",
     SHOPEE_OPEN_API_GRAPHQL_ERROR:
       "Não foi possível gerar o link pela Open API da Shopee.",
     SHOPEE_SUB_ID_INVALID:
       "Os identificadores de rastreamento do link são inválidos.",
+    SHOPEE_BULK_LINK_NOT_CONFIRMED:
+      "Confirme explicitamente a geração dos links pendentes.",
+    SHOPEE_BULK_LINK_MAX_INVALID:
+      "A quantidade solicitada para geração de links é inválida.",
+    SHOPEE_BULK_LINK_GLOBAL_FAILURE:
+      "A geração foi interrompida por uma falha global da Open API.",
   };
   return (
     messages[code] ?? "Não foi possível processar o Datafeed com segurança."
@@ -185,7 +191,7 @@ export async function confirmShopeeDatafeedImportAction(
       categories: categoriesFromInput(parsed),
       filters: parsed.filters,
       confirmImport: true,
-      subIds: ["sourcedatafeed", "phase6a3"],
+      subIds: ["sourcedatafeed", "autolink"],
     });
     const offerState = await loadShopeeOperationalOfferState();
     return {
@@ -201,6 +207,44 @@ export async function confirmShopeeDatafeedImportAction(
 }
 
 const offerIdSchema = z.string().trim().min(1).max(100);
+const bulkLinkSchema = z.object({
+  confirmGenerate: z.literal(true),
+  maxItems: z.number().int().min(1).max(12),
+});
+
+export async function generatePendingShopeeAffiliateLinksAction(input: {
+  confirmGenerate: boolean;
+  maxItems: number;
+}) {
+  try {
+    await authorize();
+    if (input.confirmGenerate !== true) {
+      throw new Error("SHOPEE_BULK_LINK_NOT_CONFIRMED");
+    }
+    const parsed = bulkLinkSchema.parse(input);
+    const data = await generateShopeeAffiliateLinksBulk({
+      source: "MANUAL_BULK",
+      confirmGenerate: parsed.confirmGenerate,
+      maxItems: parsed.maxItems,
+      subIds: ["sourcedatafeed", "bulk"],
+    });
+    const offerState = await loadShopeeOperationalOfferState();
+    return {
+      ok: true as const,
+      data,
+      offerState,
+      message:
+        data.status === "SUCCEEDED_WITH_ERRORS"
+          ? `${data.linked} links aplicados; ${data.remainingPending} ofertas ainda precisam de atenção.`
+          : data.status === "FAILED"
+            ? `A geração foi interrompida; ${data.remainingPending} ofertas continuam pendentes.`
+            : `${data.linked} links aplicados; nenhuma Publication criada.`,
+    };
+  } catch (error) {
+    const errorCode = safeError(error);
+    return { ok: false as const, errorCode, message: messageFor(errorCode) };
+  }
+}
 
 export async function retryShopeeAffiliateLinkAction(offerId: string) {
   try {
