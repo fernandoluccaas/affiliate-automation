@@ -2,7 +2,9 @@ import type { Readable } from "node:stream";
 
 export type ShopeeAffiliateMode = "OFF" | "DATAFEED" | "OPEN_API" | "HYBRID";
 export type ShopeeDatafeedSchema = "OFFICIAL_BR" | "BRAZIL";
+export type ShopeeProductSource = ShopeeDatafeedSchema | "OPEN_API_FEED";
 export type ShopeeDatafeedSourceKind = "LOCAL_FILE" | "REMOTE_URL";
+export type ShopeeDiscoverySource = "LOCAL_FILE" | "OPEN_API_FEED";
 export type ShopeeLogicalCategory =
   | "CELULARES"
   | "CASA"
@@ -38,6 +40,13 @@ export type ShopeeAffiliateConfiguration = {
   autoLinkAfterImport: boolean;
   autoLinkMaxPerRun: number;
   autoLinkConcurrency: number;
+  discoverySource: ShopeeDiscoverySource;
+  automatedDiscoveryEnabled: boolean;
+  remoteDiscoveryContract: "WAITING_FOR_OFFICIAL_CONTRACT";
+  remoteDiscoveryReady: boolean;
+  remoteDiscoveryMaxPages: number;
+  remoteDiscoveryMaxItems: number;
+  remoteDiscoveryFeedIds: string[];
   issues: string[];
 };
 
@@ -137,8 +146,8 @@ export type ShopeeDatafeedProduct = {
   modelNames: string[] | null;
   commissionAvailable: false;
   salesCountAvailable: false;
-  source: ShopeeDatafeedSchema;
-  sources: ShopeeDatafeedSchema[];
+  source: ShopeeProductSource;
+  sources: ShopeeProductSource[];
 };
 
 export type ShopeeDatafeedIssue = {
@@ -235,7 +244,7 @@ export type ShopeeRankedCandidate = {
   linkStatus: "VERIFIED" | "NOT_VERIFIED" | "MISSING";
   score: number;
   components: ShopeeScoreBreakdown;
-  sources: ShopeeDatafeedSchema[];
+  sources: ShopeeProductSource[];
 };
 
 export type ShopeePreviewCategorySummary = {

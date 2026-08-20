@@ -94,6 +94,11 @@ export type ShopeeOperationalImportResult = {
   autoLinkResult?: ShopeeBulkAffiliateLinkResult;
 };
 
+export type ShopeePreparedImportResult = Omit<
+  ShopeeOperationalImportResult,
+  "preview"
+>;
+
 export type ShopeeAffiliateLinkApplicationResult = {
   status: "LINKED" | "ALREADY_LINKED";
   offerId: string;
@@ -447,6 +452,183 @@ export function createShopeeOpenApiProviderFromEnvironment(
   );
 }
 
+export async function persistShopeeOperationalWinners(input: {
+  winners: ShopeeOperationalWinner[];
+  selected: readonly ShopeeRankedCandidate[];
+  checksum: string;
+  source: string;
+  confirmImport: boolean;
+  environment?: NodeJS.ProcessEnv;
+  subIds?: string[];
+  now?: Date;
+  persistence?: ShopeeOperationalPersistence;
+  startedImport?: { id: string };
+  linkProvider?: ShopeeAffiliateLinkProvider;
+  bulkLinker?: typeof generateShopeeAffiliateLinksBulk;
+}): Promise<ShopeePreparedImportResult> {
+  const environment = input.environment ?? process.env;
+  const configuration = resolveShopeeAffiliateConfiguration(environment);
+  const emptyMetrics: ShopeeOperationalMetrics = {
+    selected: input.selected.length,
+    created: 0,
+    updated: 0,
+    linksGenerated: 0,
+    linksReused: 0,
+    readyToPublish: 0,
+    pendingAffiliateLink: 0,
+    failed: 0,
+  };
+  if (!input.confirmImport) {
+    return {
+      status: "PREVIEW_COMPLETED",
+      importJobId: null,
+      metrics: emptyMetrics,
+      stateModified: false,
+      publicationsCreated: 0,
+      messagesSent: 0,
+    };
+  }
+  if (!configuration.enabled || configuration.mode === "OFF") {
+    throw new ShopeeOpenApiError("SHOPEE_OPERATIONAL_MODE_REQUIRED");
+  }
+  const persistence =
+    input.persistence ?? createPrismaShopeeOperationalPersistence();
+  if (!input.startedImport) {
+    const duplicate = await persistence.findDuplicateImport(input.checksum);
+    if (duplicate) {
+      return {
+        status: "DUPLICATE",
+        importJobId: duplicate.id,
+        metrics: emptyMetrics,
+        stateModified: false,
+        publicationsCreated: 0,
+        messagesSent: 0,
+      };
+    }
+  }
+  const job =
+    input.startedImport ??
+    (await persistence.startImport({
+      checksum: input.checksum,
+      totalFound: input.selected.length,
+      source: input.source,
+    }));
+  const metrics = { ...emptyMetrics };
+  const persistedOfferIds: string[] = [];
+  for (const [index, winner] of input.winners.entries()) {
+    try {
+      const result = await persistence.persistWinner({
+        jobId: job.id,
+        position: index + 1,
+        winner,
+        ...(input.subIds ? { subIds: input.subIds } : {}),
+        now: input.now ?? new Date(),
+      });
+      if (result.offerId) persistedOfferIds.push(result.offerId);
+      if (result.productCreated || result.offerCreated) metrics.created += 1;
+      else if (result.offerUpdated) metrics.updated += 1;
+      if (result.linkStatus === "GENERATED") metrics.linksGenerated += 1;
+      if (result.linkStatus === "REUSED") metrics.linksReused += 1;
+      if (result.status === "READY_TO_PUBLISH") metrics.readyToPublish += 1;
+      else if (result.status === "READY_FOR_AFFILIATE_LINK") {
+        metrics.pendingAffiliateLink += 1;
+      } else {
+        metrics.failed += 1;
+      }
+    } catch (error) {
+      metrics.failed += 1;
+      await persistence.recordFailure({
+        jobId: job.id,
+        position: index + 1,
+        itemId: winner.product.itemId,
+        errorCode: safeCode(error),
+      });
+    }
+  }
+  const resolvedIds = new Set(
+    input.winners.map((winner) => winner.product.itemId),
+  );
+  for (const candidate of input.selected.filter(
+    (item) => !resolvedIds.has(item.itemId),
+  )) {
+    metrics.failed += 1;
+    await persistence.recordFailure({
+      jobId: job.id,
+      position:
+        input.selected.findIndex((item) => item.itemId === candidate.itemId) +
+        1,
+      itemId: candidate.itemId,
+      errorCode: "SHOPEE_SELECTED_ITEM_NOT_RESOLVED",
+    });
+  }
+  let autoLinkResult: ShopeeBulkAffiliateLinkResult | undefined;
+  if (
+    configuration.autoLinkAfterImport &&
+    configuration.mode === "HYBRID" &&
+    configuration.openApiReady &&
+    persistedOfferIds.length > 0
+  ) {
+    try {
+      const bulkLinker = input.bulkLinker ?? generateShopeeAffiliateLinksBulk;
+      autoLinkResult = await bulkLinker({
+        offerIds: persistedOfferIds,
+        maxItems: configuration.autoLinkMaxPerRun,
+        source: "IMPORT",
+        confirmGenerate: true,
+        subIds: input.subIds ?? ["sourcedatafeed", "autolink"],
+        environment,
+        ...(input.linkProvider ? { linkProvider: input.linkProvider } : {}),
+      });
+      metrics.linksGenerated += autoLinkResult.linksGenerated;
+      metrics.linksReused += autoLinkResult.linksReused;
+      metrics.readyToPublish += autoLinkResult.linked;
+      metrics.pendingAffiliateLink = Math.max(
+        0,
+        metrics.pendingAffiliateLink - autoLinkResult.linked,
+      );
+    } catch {
+      // The committed import remains valid and keeps its manual-link fallback.
+    }
+  }
+  const status =
+    metrics.failed || metrics.pendingAffiliateLink
+      ? "SUCCEEDED_WITH_ERRORS"
+      : "SUCCEEDED";
+  await persistence.finishImport({
+    jobId: job.id,
+    status,
+    metrics,
+    summary: {
+      selectedItemIds: input.selected.map((item) => item.itemId),
+      source: input.source,
+      openApiConfigured: configuration.openApiConfigured,
+      openApiReady: configuration.openApiReady,
+      autoLink: autoLinkResult
+        ? {
+            status: autoLinkResult.status,
+            requested: autoLinkResult.requested,
+            linked: autoLinkResult.linked,
+            alreadyLinked: autoLinkResult.alreadyLinked,
+            failed: autoLinkResult.failed,
+            notAttempted: autoLinkResult.notAttempted,
+            apiAttempts: autoLinkResult.apiAttempts,
+          }
+        : null,
+      publicationsCreated: 0,
+      messagesSent: 0,
+    },
+  });
+  return {
+    status,
+    importJobId: job.id,
+    metrics,
+    stateModified: true,
+    publicationsCreated: 0,
+    messagesSent: 0,
+    ...(autoLinkResult ? { autoLinkResult } : {}),
+  };
+}
+
 export async function importShopeeOperationalOffers(input: {
   files: string[];
   confirmImport: boolean;
@@ -526,7 +708,6 @@ export async function importShopeeOperationalOffers(input: {
     totalFound: preview.selected.length,
     source: preview.files.map((file) => file.name).join("+"),
   });
-  const metrics = { ...emptyMetrics };
   let winners: ShopeeOperationalWinner[];
   try {
     winners = await collectSelectedShopeeProducts({
@@ -535,11 +716,14 @@ export async function importShopeeOperationalOffers(input: {
       environment,
     });
   } catch (error) {
-    metrics.failed = metrics.selected;
+    const failedMetrics = {
+      ...emptyMetrics,
+      failed: emptyMetrics.selected,
+    };
     await persistence.finishImport({
       jobId: job.id,
       status: "FAILED",
-      metrics,
+      metrics: failedMetrics,
       summary: {
         errorCode: safeCode(error),
         publicationsCreated: 0,
@@ -548,117 +732,23 @@ export async function importShopeeOperationalOffers(input: {
     });
     throw error;
   }
-  const persistedOfferIds: string[] = [];
-  for (const [index, winner] of winners.entries()) {
-    try {
-      const result = await persistence.persistWinner({
-        jobId: job.id,
-        position: index + 1,
-        winner,
-        ...(input.subIds ? { subIds: input.subIds } : {}),
-        now: input.now ?? new Date(),
-      });
-      if (result.offerId) persistedOfferIds.push(result.offerId);
-      if (result.productCreated || result.offerCreated) metrics.created += 1;
-      else if (result.offerUpdated) metrics.updated += 1;
-      if (result.linkStatus === "GENERATED") metrics.linksGenerated += 1;
-      if (result.linkStatus === "REUSED") metrics.linksReused += 1;
-      if (result.status === "READY_TO_PUBLISH") metrics.readyToPublish += 1;
-      else if (result.status === "READY_FOR_AFFILIATE_LINK") {
-        metrics.pendingAffiliateLink += 1;
-      } else {
-        metrics.failed += 1;
-      }
-    } catch (error) {
-      metrics.failed += 1;
-      await persistence.recordFailure({
-        jobId: job.id,
-        position: index + 1,
-        itemId: winner.product.itemId,
-        errorCode: safeCode(error),
-      });
-    }
-  }
-  const resolvedIds = new Set(winners.map((winner) => winner.product.itemId));
-  const unresolved = preview.selected.filter(
-    (candidate) => !resolvedIds.has(candidate.itemId),
-  );
-  for (const candidate of unresolved) {
-    metrics.failed += 1;
-    await persistence.recordFailure({
-      jobId: job.id,
-      position:
-        preview.selected.findIndex((item) => item.itemId === candidate.itemId) +
-        1,
-      itemId: candidate.itemId,
-      errorCode: "SHOPEE_SELECTED_ITEM_NOT_RESOLVED",
-    });
-  }
-  let autoLinkResult: ShopeeBulkAffiliateLinkResult | undefined;
-  if (
-    configuration.autoLinkAfterImport &&
-    configuration.mode === "HYBRID" &&
-    configuration.openApiReady &&
-    persistedOfferIds.length > 0
-  ) {
-    try {
-      const bulkLinker = input.bulkLinker ?? generateShopeeAffiliateLinksBulk;
-      autoLinkResult = await bulkLinker({
-        offerIds: persistedOfferIds,
-        maxItems: configuration.autoLinkMaxPerRun,
-        source: "IMPORT",
-        confirmGenerate: true,
-        subIds: input.subIds ?? ["sourcedatafeed", "autolink"],
-        environment,
-        ...(input.linkProvider ? { linkProvider: input.linkProvider } : {}),
-      });
-      metrics.linksGenerated += autoLinkResult.linksGenerated;
-      metrics.linksReused += autoLinkResult.linksReused;
-      metrics.readyToPublish += autoLinkResult.linked;
-      metrics.pendingAffiliateLink = Math.max(
-        0,
-        metrics.pendingAffiliateLink - autoLinkResult.linked,
-      );
-    } catch {
-      // The committed import remains valid and keeps its manual-link fallback.
-    }
-  }
-  const status =
-    metrics.failed || metrics.pendingAffiliateLink
-      ? "SUCCEEDED_WITH_ERRORS"
-      : "SUCCEEDED";
-  await persistence.finishImport({
-    jobId: job.id,
-    status,
-    metrics,
-    summary: {
-      selectedItemIds: preview.selected.map((item) => item.itemId),
-      openApiConfigured: configuration.openApiConfigured,
-      openApiReady: configuration.openApiReady,
-      autoLink: autoLinkResult
-        ? {
-            status: autoLinkResult.status,
-            requested: autoLinkResult.requested,
-            linked: autoLinkResult.linked,
-            alreadyLinked: autoLinkResult.alreadyLinked,
-            failed: autoLinkResult.failed,
-            notAttempted: autoLinkResult.notAttempted,
-            apiAttempts: autoLinkResult.apiAttempts,
-          }
-        : null,
-      publicationsCreated: 0,
-      messagesSent: 0,
-    },
+  const persisted = await persistShopeeOperationalWinners({
+    winners,
+    selected: preview.selected,
+    checksum,
+    source: preview.files.map((file) => file.name).join("+"),
+    confirmImport: true,
+    environment,
+    ...(input.subIds ? { subIds: input.subIds } : {}),
+    ...(input.now ? { now: input.now } : {}),
+    persistence,
+    startedImport: job,
+    ...(input.linkProvider ? { linkProvider: input.linkProvider } : {}),
+    ...(input.bulkLinker ? { bulkLinker: input.bulkLinker } : {}),
   });
   return {
-    status,
     preview,
-    importJobId: job.id,
-    metrics,
-    stateModified: true,
-    publicationsCreated: 0,
-    messagesSent: 0,
-    ...(autoLinkResult ? { autoLinkResult } : {}),
+    ...persisted,
   };
 }
 

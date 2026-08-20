@@ -47,6 +47,14 @@ describe("Shopee dashboard architecture", () => {
     );
   });
 
+  it("exposes the remote discovery source as fail-closed without automatic calls", () => {
+    const source = `${app("page.tsx")}\n${app("shopee-datafeed-console.tsx")}`;
+    expect(source).toContain("remoteDiscoveryContract");
+    expect(source).toContain("Contrato oficial ainda não comprovado");
+    expect(source).toContain("Consultar feeds oficiais");
+    expect(source).not.toMatch(/useEffect\s*\(/);
+  });
+
   it("does not contain operational publication or messaging calls", () => {
     const source = `${app("shopee-datafeed-console.tsx")}\n${lib("shopee-datafeed-actions.ts")}`;
     expect(source).not.toMatch(

@@ -1,4 +1,4 @@
-# Shopee Affiliate — Datafeed discovery
+# Shopee Affiliate — Datafeed and Open API discovery
 
 ## Escopo das Fases 6A.2 e 6A.3
 
@@ -214,6 +214,132 @@ O dashboard em `/integracoes/shopee` oferece as mesmas operações com feedback
 inline, pending localizado, prevenção de duplo clique e preservação de tab,
 scroll e formulário. O arquivo continua no servidor; não há upload de 198 MB
 para a memória do browser.
+
+## Automated Discovery Source Decision
+
+A Fase 6A.5 auditou o cliente autenticado, os testes de assinatura, o smoke de
+`generateShortLink`, o histórico Git e o Explorer V2 oficial. O único contrato
+completo preservado no repositório é a mutation `generateShortLink`: payload
+literal, assinatura, headers e resposta já foram validados nas fases anteriores.
+
+As operações `listItemFeeds`, `getItemFeedData`, `productOfferV2`,
+`shopeeOfferV2` e `shopOfferV2` foram consideradas como possíveis fontes. O
+repositório, entretanto, não contém os tipos GraphQL, argumentos, campos,
+paginação ou response shape oficiais dessas operações. O Explorer público não
+expôs esse conteúdo sem a sessão do proprietário. Portanto, nenhuma delas foi
+escolhida como query de produção e nenhum GraphQL foi inferido pelo nome.
+
+A decisão é manter duas sources explícitas:
+
+```text
+LOCAL_FILE     contrato comprovado, funcional e default
+OPEN_API_FEED  infraestrutura pronta, adaptador de produção fail-closed
+```
+
+`UnavailableShopeeRemoteFeedClient` encerra com
+`SHOPEE_OPEN_API_FEED_CONTRACT_UNAVAILABLE` antes do transporte. Logo, mesmo
+com credenciais e `--confirm-live-call`, a versão atual faz zero requests de
+feed. O status público é `WAITING_FOR_OFFICIAL_CONTRACT`. Para liberar a source
+remota será necessário registrar, a partir do Explorer oficial autenticado:
+
+1. operation name e query exatos;
+2. tipos e valores das variables;
+3. campos obrigatórios e opcionais da resposta;
+4. mecanismo e término da paginação;
+5. duração e semântica do cursor/`scrollId`, caso exista;
+6. IDs/metadata estáveis dos feeds;
+7. limites e códigos de erro da operação para o ambiente brasileiro.
+
+Somente então um adapter poderá ser conectado ao cliente HTTP e à assinatura
+existentes. Não será criado um segundo transporte ou mecanismo de rate limit.
+
+### Source, paginação e memória
+
+A fronteira `ShopeeRemoteFeedClient` fornece lista sanitizada de feeds e páginas
+normalizadas ao pipeline interno. O cursor é opaco: a infraestrutura não assume
+offset, número de página nem duração. Cursores repetidos são rejeitados como
+`SHOPEE_REMOTE_DISCOVERY_CURSOR_LOOP`. Feed ID é obrigatório e validado; nenhum
+feed é escolhido pelo nome ou pela primeira posição.
+
+Cada página converge para o mesmo `ShopeeDatafeedProduct` usado pelo CSV. A
+validação exige identidade numérica, preço, categoria, imagem oficial e Product
+URL contendo o mesmo `itemId`; campos opcionais permanecem `null`. Comissão e
+sales count continuam indisponíveis e não entram no score. A proveniência é
+`OPEN_API_FEED`, e `itemId` deduplica páginas e futuras sources.
+
+O processamento é limitado e bounded: produtos são mantidos somente até o
+limite explícito da execução; ranking, filtros, recent selection, máximo por
+loja, seis categorias e round robin reutilizam as funções da source local. O
+resultado sanitizado contém source, feed, páginas, itens recebidos/normalizados,
+rejeições, duplicados, elegíveis, selecionados, requests e duração. Não contém
+credentials, headers, assinatura ou payload bruto.
+
+Defaults conservadores:
+
+```dotenv
+SHOPEE_DISCOVERY_SOURCE="LOCAL_FILE"
+SHOPEE_AUTOMATED_DISCOVERY_ENABLED="false"
+SHOPEE_REMOTE_DISCOVERY_MAX_PAGES="10"
+SHOPEE_REMOTE_DISCOVERY_MAX_ITEMS="10000"
+SHOPEE_REMOTE_DISCOVERY_FEED_IDS=""
+```
+
+Configuração ausente preserva o Datafeed local. Source/limite/feed ID inválido
+falha fechado. Não existe busca automática em Downloads nem fallback silencioso
+para um arquivo encontrado no disco.
+
+### Preview, import e lock
+
+O one-shot `runShopeeAutomatedDiscovery` separa os efeitos:
+
+```text
+remote pages -> validação -> dedup -> filtros/ranking compartilhados
+             -> round robin (máximo 12) -> preview
+             -> import confirmado -> auto-link opcional
+```
+
+Preview nunca escreve `Product`, `Offer`, `AffiliateLink` ou `Publication`,
+mesmo se auto-link estiver habilitado. Import exige simultaneamente chamada live
+e escrita confirmadas. Antes de qualquer request de uma execução com escrita, o
+pipeline exige o lock Redis com ownership `shopee:remote-discovery`; lock ocupado
+ou Redis indisponível termina com zero requests. O lock é sempre liberado.
+
+O import reutiliza `persistShopeeOperationalWinners`, a mesma persistência
+versionada do Datafeed local, seus advisory locks por `itemId`, ImportJob,
+idempotência e isolamento por winner. O checksum remoto combina source, feed e
+o fingerprint comercial determinístico dos winners; payload bruto nunca é
+persistido. A flag
+`SHOPEE_AUTO_LINK_AFTER_IMPORT` permanece `false` por default. Quando futuramente
+habilitada em `HYBRID`, o bulk da Fase 6A.4 roda depois do commit; falha de link
+não desfaz a importação.
+
+Erros transitórios de transporte admitem no máximo duas tentativas. Rate limit,
+auth, assinatura, GraphQL validation, input e schema mismatch não entram em
+retry infinito. Rate limit depois de páginas válidas preserva um preview parcial
+com zero writes; resposta incompatível falha fechado como
+`SHOPEE_OPEN_API_SCHEMA_MISMATCH`.
+
+### CLI e primeiro smoke planejado
+
+```powershell
+npm run shopee:discovery:remote:status
+npm run shopee:feeds:list -- --confirm-live-call
+npm run shopee:discovery:remote:preview -- --feed <feed-id> --confirm-live-call
+npm run shopee:discovery:remote:run -- --feed <feed-id> --confirm-live-call --confirm-import
+```
+
+Sem `--confirm-live-call`, todos retornam zero requests e zero writes. `run`
+também exige `--confirm-import`; uma confirmação não substitui a outra. Enquanto
+o contrato continuar indisponível, até os comandos confirmados retornam o erro
+de contrato antes de HTTP. O primeiro smoke real futuro será somente a listagem
+read-only dos feeds. Preview remoto e import serão liberados em etapas separadas
+após validar a resposta real.
+
+O dashboard mostra a source configurada, prontidão, limites e a lacuna do
+contrato. Os controles remotos ficam desabilitados e não executam requests no
+load. `LOCAL_FILE`, inspect, preview e import existentes permanecem disponíveis.
+Nenhum fluxo desta fase cria `Publication`, chama Telegram/WhatsApp ou inicia
+worker, browser ou scheduler.
 
 ## Persistência, idempotência e fallback
 

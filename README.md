@@ -197,6 +197,14 @@ success keeps failed Offers pending, and the flow stops at `READY_TO_PUBLISH`
 without creating a Publication. See
 [Shopee Affiliate](docs/shopee-affiliate.md).
 
+The automated-discovery foundation keeps `LOCAL_FILE` as the default source and
+adds a fail-closed `OPEN_API_FEED` adapter boundary. The repository currently
+contains no official, complete feed-operation contract, so it deliberately
+issues zero feed requests until the operation, variables, pagination and
+response schema are confirmed in Shopee's official Explorer. Mocked pagination,
+bounded selection, one-shot import orchestration and operator-confirmed CLI
+gates are ready without speculative GraphQL.
+
 The worker processes queued `AFFILIATE_LINK_BATCH` jobs and isolates expiration, discovery, refresh, scheduling, retries and publication as independent stages. A failed discovery produces `PARTIAL` while refresh and ready publications continue. Refresh records `selected`, `refreshed`, `unchanged`, `newVersions`, `notFound`, `failed` and `affiliateUrlsPreserved`; it never replaces an existing affiliate URL with `null`.
 
 Mercado Livre publications use `DIRECT_AFFILIATE_LINK`. A missing or invalid affiliate URL prevents scheduling and publication; there is no fallback to the original URL.
