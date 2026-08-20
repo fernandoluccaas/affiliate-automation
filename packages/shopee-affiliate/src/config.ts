@@ -3,6 +3,7 @@ import type {
   ShopeeAffiliateMode,
   ShopeeCategoryRule,
   ShopeeDiscoveryFilters,
+  ShopeeDiscoverySource,
   ShopeeRankingWeights,
 } from "./types";
 
@@ -12,6 +13,32 @@ const MODES = new Set<ShopeeAffiliateMode>([
   "OPEN_API",
   "HYBRID",
 ]);
+const DISCOVERY_SOURCES = new Set<ShopeeDiscoverySource>([
+  "LOCAL_FILE",
+  "OPEN_API_FEED",
+]);
+
+function remoteFeedIds(raw: string | undefined, issues: string[]) {
+  if (!raw?.trim()) return [];
+  const values = [
+    ...new Set(
+      raw
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean),
+    ),
+  ];
+  if (
+    values.length > 20 ||
+    values.some(
+      (value) => value.length > 128 || !/^[A-Za-z0-9_-]+$/.test(value),
+    )
+  ) {
+    issues.push("SHOPEE_REMOTE_DISCOVERY_FEED_IDS_INVALID");
+    return [];
+  }
+  return values;
+}
 
 function boundedInteger(
   raw: string | undefined,
@@ -106,6 +133,38 @@ export function resolveShopeeAffiliateConfiguration(
     "SHOPEE_AUTO_LINK_CONCURRENCY_INVALID",
     issues,
   );
+  const requestedDiscoverySource = (
+    environment.SHOPEE_DISCOVERY_SOURCE ?? "LOCAL_FILE"
+  )
+    .trim()
+    .toUpperCase();
+  const knownDiscoverySource = DISCOVERY_SOURCES.has(
+    requestedDiscoverySource as ShopeeDiscoverySource,
+  );
+  if (!knownDiscoverySource) issues.push("SHOPEE_DISCOVERY_SOURCE_INVALID");
+  const discoverySource: ShopeeDiscoverySource = knownDiscoverySource
+    ? (requestedDiscoverySource as ShopeeDiscoverySource)
+    : "LOCAL_FILE";
+  const remoteDiscoveryMaxPages = boundedInteger(
+    environment.SHOPEE_REMOTE_DISCOVERY_MAX_PAGES,
+    10,
+    1,
+    100,
+    "SHOPEE_REMOTE_DISCOVERY_MAX_PAGES_INVALID",
+    issues,
+  );
+  const remoteDiscoveryMaxItems = boundedInteger(
+    environment.SHOPEE_REMOTE_DISCOVERY_MAX_ITEMS,
+    10_000,
+    100,
+    100_000,
+    "SHOPEE_REMOTE_DISCOVERY_MAX_ITEMS_INVALID",
+    issues,
+  );
+  const remoteDiscoveryFeedIds = remoteFeedIds(
+    environment.SHOPEE_REMOTE_DISCOVERY_FEED_IDS,
+    issues,
+  );
   if (enabled && requestedMode === "OFF") {
     issues.push("SHOPEE_ENABLED_WITH_OFF_MODE");
   }
@@ -156,6 +215,14 @@ export function resolveShopeeAffiliateConfiguration(
     autoLinkAfterImport: environment.SHOPEE_AUTO_LINK_AFTER_IMPORT === "true",
     autoLinkMaxPerRun,
     autoLinkConcurrency,
+    discoverySource,
+    automatedDiscoveryEnabled:
+      environment.SHOPEE_AUTOMATED_DISCOVERY_ENABLED === "true",
+    remoteDiscoveryContract: "WAITING_FOR_OFFICIAL_CONTRACT",
+    remoteDiscoveryReady: false,
+    remoteDiscoveryMaxPages,
+    remoteDiscoveryMaxItems,
+    remoteDiscoveryFeedIds,
     issues,
   };
 }

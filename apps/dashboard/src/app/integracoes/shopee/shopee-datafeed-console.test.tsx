@@ -55,6 +55,13 @@ const configuration: ShopeeDashboardConfigurationDto = {
   autoLinkAfterImport: false,
   autoLinkMaxPerRun: 12,
   autoLinkConcurrency: 1,
+  discoverySource: "LOCAL_FILE",
+  automatedDiscoveryEnabled: false,
+  remoteDiscoveryContract: "WAITING_FOR_OFFICIAL_CONTRACT",
+  remoteDiscoveryReady: false,
+  remoteDiscoveryMaxPages: 10,
+  remoteDiscoveryMaxItems: 10_000,
+  remoteDiscoveryFeedIds: [],
   maxFileBytes: 536_870_912,
   maxTrackedItems: 2_000_000,
   issues: [],
@@ -223,6 +230,22 @@ describe("ShopeeDatafeedConsole", () => {
     expect(screen.getByText("Geração de links")).toBeInTheDocument();
     expect(screen.getByText(/Open API não configurada/)).toBeInTheDocument();
     expect(screen.getByText("Nenhuma oferta pendente")).toBeInTheDocument();
+  });
+
+  it("shows the remote source contract gap without issuing an automatic request", () => {
+    render(<ShopeeDatafeedConsole configuration={configuration} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Datafeeds" }));
+    expect(
+      screen.getByText("Contrato oficial ainda não comprovado"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Consultar feeds oficiais" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Executar preview pela Open API" }),
+    ).toBeDisabled();
+    expect(inspectAction).not.toHaveBeenCalled();
+    expect(previewAction).not.toHaveBeenCalled();
   });
 
   it("requires preview before explicit import confirmation", async () => {

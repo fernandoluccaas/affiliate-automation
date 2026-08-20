@@ -120,6 +120,13 @@ describe("Shopee affiliate configuration", () => {
       autoLinkAfterImport: false,
       autoLinkMaxPerRun: 12,
       autoLinkConcurrency: 1,
+      discoverySource: "LOCAL_FILE",
+      automatedDiscoveryEnabled: false,
+      remoteDiscoveryReady: false,
+      remoteDiscoveryContract: "WAITING_FOR_OFFICIAL_CONTRACT",
+      remoteDiscoveryMaxPages: 10,
+      remoteDiscoveryMaxItems: 10_000,
+      remoteDiscoveryFeedIds: [],
     });
     expect(
       resolveShopeeAffiliateConfiguration({
@@ -129,6 +136,48 @@ describe("Shopee affiliate configuration", () => {
     ).toMatchObject({
       recentSelectionWindowDays: 7,
       maxPerShopPerSession: 2,
+    });
+  });
+
+  it("accepts explicit remote discovery settings but keeps the unproven contract closed", () => {
+    expect(
+      resolveShopeeAffiliateConfiguration({
+        SHOPEE_DISCOVERY_SOURCE: "OPEN_API_FEED",
+        SHOPEE_AUTOMATED_DISCOVERY_ENABLED: "true",
+        SHOPEE_REMOTE_DISCOVERY_MAX_PAGES: "20",
+        SHOPEE_REMOTE_DISCOVERY_MAX_ITEMS: "5000",
+        SHOPEE_REMOTE_DISCOVERY_FEED_IDS: "feed-b,feed-a,feed-b",
+      }),
+    ).toMatchObject({
+      discoverySource: "OPEN_API_FEED",
+      automatedDiscoveryEnabled: true,
+      remoteDiscoveryReady: false,
+      remoteDiscoveryMaxPages: 20,
+      remoteDiscoveryMaxItems: 5_000,
+      remoteDiscoveryFeedIds: ["feed-b", "feed-a"],
+    });
+  });
+
+  it("fails closed for invalid remote discovery limits and feed identifiers", () => {
+    expect(
+      resolveShopeeAffiliateConfiguration({
+        SHOPEE_DISCOVERY_SOURCE: "UNKNOWN",
+        SHOPEE_REMOTE_DISCOVERY_MAX_PAGES: "0",
+        SHOPEE_REMOTE_DISCOVERY_MAX_ITEMS: "999999",
+        SHOPEE_REMOTE_DISCOVERY_FEED_IDS: "contains spaces",
+      }),
+    ).toMatchObject({
+      configurationValid: false,
+      discoverySource: "LOCAL_FILE",
+      remoteDiscoveryMaxPages: 10,
+      remoteDiscoveryMaxItems: 10_000,
+      remoteDiscoveryFeedIds: [],
+      issues: expect.arrayContaining([
+        "SHOPEE_DISCOVERY_SOURCE_INVALID",
+        "SHOPEE_REMOTE_DISCOVERY_MAX_PAGES_INVALID",
+        "SHOPEE_REMOTE_DISCOVERY_MAX_ITEMS_INVALID",
+        "SHOPEE_REMOTE_DISCOVERY_FEED_IDS_INVALID",
+      ]),
     });
   });
 

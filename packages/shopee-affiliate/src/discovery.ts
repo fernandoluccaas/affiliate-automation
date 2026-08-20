@@ -133,7 +133,7 @@ function deterministicPrimary(
 ) {
   const completenessDelta = completeness(right) - completeness(left);
   if (completenessDelta !== 0) return completenessDelta > 0 ? right : left;
-  const priority = { OFFICIAL_BR: 2, BRAZIL: 1 } as const;
+  const priority = { OPEN_API_FEED: 3, OFFICIAL_BR: 2, BRAZIL: 1 } as const;
   const priorityDelta = priority[right.source] - priority[left.source];
   if (priorityDelta !== 0) return priorityDelta > 0 ? right : left;
   const leftKey = `${left.title}\0${left.sourceProductUrl}`;
@@ -315,7 +315,7 @@ export function scoreShopeeCandidate(
   };
 }
 
-function compareRanked(
+export function compareShopeeRankedCandidates(
   left: ShopeeRankedCandidate,
   right: ShopeeRankedCandidate,
 ) {
@@ -325,6 +325,40 @@ function compareRanked(
     (right.itemRating ?? -1) - (left.itemRating ?? -1) ||
     left.itemId.localeCompare(right.itemId)
   );
+}
+
+export function createShopeeRankedCandidate(input: {
+  product: ShopeeDatafeedProduct;
+  category: ShopeeLogicalCategory;
+  weights?: ShopeeRankingWeights;
+}) {
+  const { product } = input;
+  const scored = scoreShopeeCandidate(
+    product,
+    input.weights ?? DEFAULT_SHOPEE_RANKING_WEIGHTS,
+  );
+  return {
+    itemId: product.itemId,
+    title: product.title.slice(0, 180),
+    category: input.category,
+    salePrice: product.salePrice,
+    originalPrice: product.originalPrice,
+    discountPercentage: product.discountPercentage,
+    itemRating: product.itemRating,
+    shopRating: product.shopRating,
+    shopName: product.shopName,
+    imageUrl: product.imageUrl,
+    sourceProductHost: urlHost(product.sourceProductUrl) ?? "invalid",
+    candidateLinkHost: urlHost(product.candidateAffiliateUrl),
+    linkStatus: product.verifiedAffiliateUrl
+      ? ("VERIFIED" as const)
+      : product.candidateAffiliateUrl
+        ? ("NOT_VERIFIED" as const)
+        : ("MISSING" as const),
+    score: scored.score,
+    components: scored.components,
+    sources: product.sources,
+  } satisfies ShopeeRankedCandidate;
 }
 
 function normalizedCategories(categories: readonly ShopeeCategoryRule[]) {
@@ -543,32 +577,14 @@ export async function previewShopeeDatafeeds(input: {
           continue;
         }
         increment(categoryEligible, category.id);
-        const scored = scoreShopeeCandidate(product, weights);
-        const candidate: ShopeeRankedCandidate = {
-          itemId: product.itemId,
-          title: product.title.slice(0, 180),
+        const candidate = createShopeeRankedCandidate({
+          product,
           category: category.id,
-          salePrice: product.salePrice,
-          originalPrice: product.originalPrice,
-          discountPercentage: product.discountPercentage,
-          itemRating: product.itemRating,
-          shopRating: product.shopRating,
-          shopName: product.shopName,
-          imageUrl: product.imageUrl,
-          sourceProductHost: urlHost(product.sourceProductUrl) ?? "invalid",
-          candidateLinkHost: urlHost(product.candidateAffiliateUrl),
-          linkStatus: product.verifiedAffiliateUrl
-            ? "VERIFIED"
-            : product.candidateAffiliateUrl
-              ? "NOT_VERIFIED"
-              : "MISSING",
-          score: scored.score,
-          components: scored.components,
-          sources: product.sources,
-        };
+          weights,
+        });
         const pool = pools.get(category.id) ?? [];
         pool.push(candidate);
-        pool.sort(compareRanked);
+        pool.sort(compareShopeeRankedCandidates);
         pool.splice(Math.min(100, Math.max(category.maxPerCategory, 20)));
         pools.set(category.id, pool);
       }
@@ -578,8 +594,7 @@ export async function previewShopeeDatafeeds(input: {
       categories,
       maxTotal: input.maxTotal ?? DEFAULT_SHOPEE_SELECTION.maxTotalPerSession,
       backfill: input.backfill ?? DEFAULT_SHOPEE_SELECTION.backfill,
-      maxPerShop:
-        input.maxPerShop ?? configuration.maxPerShopPerSession,
+      maxPerShop: input.maxPerShop ?? configuration.maxPerShopPerSession,
     });
     return {
       status: "PREVIEW_COMPLETED",

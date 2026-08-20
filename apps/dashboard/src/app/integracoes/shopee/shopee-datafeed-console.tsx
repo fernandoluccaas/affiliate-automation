@@ -247,7 +247,7 @@ export function ShopeeDatafeedConsole({
           <CardContent className="grid gap-4 text-sm sm:grid-cols-2">
             <div>
               <span className="text-[var(--muted-foreground)]">Fonte</span>
-              <p className="font-medium">LOCAL_FILE</p>
+              <p className="font-medium">{configuration.discoverySource}</p>
             </div>
             <div>
               <span className="text-[var(--muted-foreground)]">Modo</span>
@@ -278,63 +278,118 @@ export function ShopeeDatafeedConsole({
       ) : null}
 
       {tab === "datafeeds" ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>Caminhos locais dos Datafeeds</CardTitle>
-          </CardHeader>
-          <CardContent className="grid gap-4">
-            {[0, 1].map((index) => (
-              <div key={index} className="grid gap-2">
-                <Label htmlFor={`shopee-file-${index}`}>
-                  Arquivo {index + 1}
-                  {index === 1 ? " (opcional)" : ""}
-                </Label>
-                <Input
-                  id={`shopee-file-${index}`}
-                  value={files[index]}
-                  onChange={(event) =>
-                    setFiles((current) =>
-                      current.map((value, position) =>
-                        position === index ? event.target.value : value,
-                      ),
-                    )
-                  }
-                  placeholder="C:\\caminho\\datafeed.csv"
-                />
+        <div className="grid gap-5">
+          <Card>
+            <CardHeader>
+              <CardTitle>Fonte oficial pela Open API</CardTitle>
+            </CardHeader>
+            <CardContent className="grid gap-4">
+              <div className="grid gap-2 text-sm sm:grid-cols-3">
+                <div>
+                  <span className="text-[var(--muted-foreground)]">
+                    Contrato
+                  </span>
+                  <p className="font-medium">
+                    {configuration.remoteDiscoveryContract}
+                  </p>
+                </div>
+                <div>
+                  <span className="text-[var(--muted-foreground)]">Limite</span>
+                  <p className="font-medium">
+                    {configuration.remoteDiscoveryMaxPages} páginas /{" "}
+                    {configuration.remoteDiscoveryMaxItems} itens
+                  </p>
+                </div>
+                <div>
+                  <span className="text-[var(--muted-foreground)]">
+                    Auto-run
+                  </span>
+                  <p className="font-medium">
+                    {configuration.automatedDiscoveryEnabled
+                      ? "Ativado"
+                      : "Desativado"}
+                  </p>
+                </div>
               </div>
-            ))}
-            <p className="text-xs text-[var(--muted-foreground)]">
-              O navegador envia somente o caminho informado. O arquivo é lido em
-              streaming no servidor e não é carregado para a memória do browser.
-            </p>
-            <Button
-              type="button"
-              variant="outline"
-              loading={isPending}
-              loadingLabel="Inspecionando..."
-              disabled={
-                input.files.length === 0 ||
-                !["DATAFEED", "HYBRID"].includes(configuration.mode)
-              }
-              onClick={() => execute("inspect")}
-            >
-              <FileSearch aria-hidden="true" size={16} /> Inspecionar feed
-            </Button>
-            {inspectResult ? (
               <Alert
-                live
-                tone={inspectResult.ok ? "success" : "danger"}
-                title={
-                  inspectResult.ok ? "Inspeção concluída" : "Falha na inspeção"
-                }
+                tone="warning"
+                title="Contrato oficial ainda não comprovado"
               >
-                {inspectResult.ok
-                  ? `${inspectResult.data.rowsProcessed} processadas, ${inspectResult.data.validRows} válidas, ${inspectResult.data.invalidRows} inválidas e ${inspectResult.data.duplicateItems} duplicadas.`
-                  : `${inspectResult.message} (${inspectResult.errorCode})`}
+                O cliente autenticado está preparado para receber o adaptador de
+                feed, mas nenhuma query será enviada até que operação, inputs,
+                paginação e resposta sejam confirmados no Explorer oficial.
               </Alert>
-            ) : null}
-          </CardContent>
-        </Card>
+              <div className="flex flex-wrap gap-2">
+                <Button type="button" variant="outline" disabled>
+                  Consultar feeds oficiais
+                </Button>
+                <Button type="button" variant="outline" disabled>
+                  Executar preview pela Open API
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader>
+              <CardTitle>Caminhos locais dos Datafeeds</CardTitle>
+            </CardHeader>
+            <CardContent className="grid gap-4">
+              {[0, 1].map((index) => (
+                <div key={index} className="grid gap-2">
+                  <Label htmlFor={`shopee-file-${index}`}>
+                    Arquivo {index + 1}
+                    {index === 1 ? " (opcional)" : ""}
+                  </Label>
+                  <Input
+                    id={`shopee-file-${index}`}
+                    value={files[index]}
+                    onChange={(event) =>
+                      setFiles((current) =>
+                        current.map((value, position) =>
+                          position === index ? event.target.value : value,
+                        ),
+                      )
+                    }
+                    placeholder="C:\\caminho\\datafeed.csv"
+                  />
+                </div>
+              ))}
+              <p className="text-xs text-[var(--muted-foreground)]">
+                O navegador envia somente o caminho informado. O arquivo é lido
+                em streaming no servidor e não é carregado para a memória do
+                browser.
+              </p>
+              <Button
+                type="button"
+                variant="outline"
+                loading={isPending}
+                loadingLabel="Inspecionando..."
+                disabled={
+                  input.files.length === 0 ||
+                  !["DATAFEED", "HYBRID"].includes(configuration.mode)
+                }
+                onClick={() => execute("inspect")}
+              >
+                <FileSearch aria-hidden="true" size={16} /> Inspecionar feed
+              </Button>
+              {inspectResult ? (
+                <Alert
+                  live
+                  tone={inspectResult.ok ? "success" : "danger"}
+                  title={
+                    inspectResult.ok
+                      ? "Inspeção concluída"
+                      : "Falha na inspeção"
+                  }
+                >
+                  {inspectResult.ok
+                    ? `${inspectResult.data.rowsProcessed} processadas, ${inspectResult.data.validRows} válidas, ${inspectResult.data.invalidRows} inválidas e ${inspectResult.data.duplicateItems} duplicadas.`
+                    : `${inspectResult.message} (${inspectResult.errorCode})`}
+                </Alert>
+              ) : null}
+            </CardContent>
+          </Card>
+        </div>
       ) : null}
 
       {tab === "discovery" ? (
@@ -710,8 +765,9 @@ export function ShopeeDatafeedConsole({
             <p>Parser streaming: csv-parse</p>
             <p>Schemas reconhecidos: OFFICIAL_BR e BRAZIL</p>
             <p>
-              Open API: {configuration.openApiReady ? "pronta" : "fail-closed"};
-              REMOTE_URL: fail-closed
+              Open API de links:{" "}
+              {configuration.openApiReady ? "pronta" : "fail-closed"}; Open API
+              Feed: {configuration.remoteDiscoveryContract}
             </p>
             {inspectResult?.ok ? (
               <p>

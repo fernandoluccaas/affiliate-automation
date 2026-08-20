@@ -2,6 +2,8 @@ export * from "./config";
 export * from "./discovery";
 export * from "./parser";
 export * from "./providers";
+export * from "./remote-discovery";
+export * from "./remote-discovery-command";
 export * from "./open-api";
 export * from "./open-api-smoke";
 export * from "./operational";

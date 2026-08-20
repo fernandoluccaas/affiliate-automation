@@ -19,7 +19,7 @@ export default async function ShopeeIntegrationPage() {
     <AdminShell
       currentPath="/integracoes/shopee"
       title="Shopee Affiliate"
-      description="Descoberta por Datafeeds e geração oficial de links, sem scraping."
+      description="Descoberta por fonte oficial e geração de links, sem scraping."
       actions={
         <StatusBadge
           status={configuration.enabled ? "ACTIVE" : "DISABLED"}
@@ -47,6 +47,17 @@ export default async function ShopeeIntegrationPage() {
             icon={FileSearch}
           />
           <MetricCard
+            label="Fonte de discovery"
+            value={configuration.discoverySource}
+            detail={
+              configuration.remoteDiscoveryReady
+                ? "Open API Feed pronta"
+                : "Arquivo local preservado; feed remoto fail-closed"
+            }
+            icon={FileSearch}
+            tone={configuration.remoteDiscoveryReady ? "success" : "default"}
+          />
+          <MetricCard
             label="Open API"
             value={
               configuration.openApiConfigured
@@ -55,11 +66,18 @@ export default async function ShopeeIntegrationPage() {
             }
             detail={
               configuration.openApiReady
-                ? "Geração automática disponível"
+                ? "Geração de links disponível"
                 : "Fail-closed"
             }
             icon={DatabaseZap}
             tone="warning"
+          />
+          <MetricCard
+            label="Auto-link"
+            value={configuration.autoLinkAfterImport ? "Ativado" : "Desativado"}
+            detail="Executado somente depois de uma importação confirmada"
+            icon={DatabaseZap}
+            tone={configuration.autoLinkAfterImport ? "success" : "default"}
           />
           <MetricCard
             label="Links candidatos do Datafeed"
