@@ -90,6 +90,10 @@ function messageFor(code: string) {
       "O link pertence a outro produto.",
     SHOPEE_AFFILIATE_LINK_ITEM_ID_MISSING:
       "Não foi possível confirmar o item do link.",
+    SHOPEE_OPEN_API_GRAPHQL_ERROR:
+      "Não foi possível gerar o link pela Open API da Shopee.",
+    SHOPEE_SUB_ID_INVALID:
+      "Os identificadores de rastreamento do link são inválidos.",
   };
   return (
     messages[code] ?? "Não foi possível processar o Datafeed com segurança."
@@ -181,7 +185,7 @@ export async function confirmShopeeDatafeedImportAction(
       categories: categoriesFromInput(parsed),
       filters: parsed.filters,
       confirmImport: true,
-      subIds: ["source_datafeed", "phase_6a3"],
+      subIds: ["sourcedatafeed", "phase6a3"],
     });
     const offerState = await loadShopeeOperationalOfferState();
     return {
@@ -203,7 +207,7 @@ export async function retryShopeeAffiliateLinkAction(offerId: string) {
     await authorize();
     const data = await retryShopeeAffiliateLink({
       offerId: offerIdSchema.parse(offerId),
-      subIds: ["source_datafeed", "retry"],
+      subIds: ["sourcedatafeed", "retry"],
     });
     const offerState = await loadShopeeOperationalOfferState();
     return {

@@ -73,7 +73,7 @@ describe("Shopee Affiliate Open API signature and payload", () => {
   it("produces deterministic lowercase SHA-256 output", () => {
     const payload = createGenerateShortLinkPayload({
       originUrl,
-      subIds: ["source_datafeed", "phase_6a3"],
+      subIds: ["sourcedatafeed", "phase6a3"],
     }).body;
     expect(
       createShopeeOpenApiSignature({
@@ -82,7 +82,7 @@ describe("Shopee Affiliate Open API signature and payload", () => {
         timestamp: 1_577_836_800,
         payload,
       }),
-    ).toBe("4970c767fe42dcb1d98bfd41108d7b9084db81f22430ca3db32eee1f3f188bb6");
+    ).toBe("af394380c798b6e99bdd7bd66774318ee108a8907bc789c43de37cd9560779a1");
     expect(
       createShopeeOpenApiSignature({
         appId: "123456",
@@ -96,10 +96,10 @@ describe("Shopee Affiliate Open API signature and payload", () => {
   it("uses the anonymous Explorer V2 literal mutation and a query-only body", () => {
     const payload = createGenerateShortLinkPayload({
       originUrl,
-      subIds: ["source_datafeed", "phase_6a3"],
+      subIds: ["sourcedatafeed", "phase6a3"],
     });
     expect(payload.request.query).toBe(`mutation {
-  generateShortLink(input: {originUrl: "https://shopee.com.br/produto-i.123.456", subIds: ["source_datafeed", "phase_6a3"]}) {
+  generateShortLink(input: {originUrl: "https://shopee.com.br/produto-i.123.456", subIds: ["sourcedatafeed", "phase6a3"]}) {
     shortLink
     longLink
   }
@@ -138,7 +138,7 @@ describe("Shopee Affiliate Open API signature and payload", () => {
     await client.generateShortLink({
       originUrl,
       itemId: "456",
-      subIds: ["source_datafeed"],
+      subIds: ["sourcedatafeed"],
     });
     const [, init] = request.mock.calls[0]!;
     const body = String(init?.body);
@@ -158,19 +158,29 @@ describe("Shopee Affiliate Open API signature and payload", () => {
     );
   });
 
-  it("limits and sanitizes optional SubIds", () => {
-    expect(sanitizeShopeeSubIds([" Source_Datafeed ", "phase-6a3"])).toEqual([
-      "source_datafeed",
-      "phase-6a3",
-    ]);
+  it("accepts only alphanumeric SubIds without silently normalizing them", () => {
+    expect(
+      sanitizeShopeeSubIds(["sourcedatafeed", "retry", "phase6a3", "abc123"]),
+    ).toEqual(["sourcedatafeed", "retry", "phase6a3", "abc123"]);
+    expect(sanitizeShopeeSubIds(["UpperCase123"])).toEqual(["UpperCase123"]);
     expect(() => sanitizeShopeeSubIds([])).not.toThrow();
     expect(() => sanitizeShopeeSubIds(["a", "b", "c", "d", "e", "f"])).toThrow(
       "SHOPEE_SUB_IDS_LIMIT_EXCEEDED",
     );
-    expect(() => sanitizeShopeeSubIds([""])).toThrow("SHOPEE_SUB_ID_INVALID");
-    expect(() => sanitizeShopeeSubIds(['safe"]}) { injected'])).toThrow(
-      "SHOPEE_SUB_ID_INVALID",
-    );
+    for (const invalid of [
+      "source_datafeed",
+      "phase-6a3",
+      "has space",
+      "has.dot",
+      "",
+      " padded ",
+      'safe"]}) { injected',
+      "a".repeat(65),
+    ]) {
+      expect(() => sanitizeShopeeSubIds([invalid])).toThrow(
+        "SHOPEE_SUB_ID_INVALID",
+      );
+    }
   });
 });
 
@@ -243,6 +253,32 @@ describe("Shopee Affiliate Open API transport", () => {
       }),
     ).rejects.toThrow("SHOPEE_ORIGIN_URL_INVALID");
     expect(request).not.toHaveBeenCalled();
+  });
+
+  it("rejects an invalid SubId before fetch without consuming rate capacity", async () => {
+    const request = successFetch();
+    const client = new ShopeeOpenApiClient(credentials, {
+      fetch: request,
+      now: () => now,
+      rateLimitPerHour: 1,
+    });
+    await expect(
+      client.generateShortLink({
+        originUrl,
+        itemId: "456",
+        subIds: ["source_datafeed"],
+      }),
+    ).rejects.toThrow("SHOPEE_SUB_ID_INVALID");
+    expect(request).not.toHaveBeenCalled();
+
+    await expect(
+      client.generateShortLink({
+        originUrl,
+        itemId: "456",
+        subIds: ["sourcedatafeed", "retry"],
+      }),
+    ).resolves.toMatchObject({ provider: "SHOPEE_OPEN_API" });
+    expect(request).toHaveBeenCalledOnce();
   });
 
   it("recognizes longLink without returning or persisting it", async () => {

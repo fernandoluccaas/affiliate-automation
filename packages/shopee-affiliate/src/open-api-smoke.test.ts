@@ -41,7 +41,7 @@ function confirmedInput() {
     confirmLiveCall: true,
     originUrl,
     itemId: "456",
-    subIds: ["smoke_fixture"],
+    subIds: ["smokefixture"],
   };
 }
 
@@ -194,6 +194,21 @@ describe("controlled Shopee Open API smoke test", () => {
       success: false,
       requestAttempts: 0,
       errorCode: "SHOPEE_SUB_IDS_LIMIT_EXCEEDED",
+    });
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("rejects a non-alphanumeric SubId before fetch", async () => {
+    const request = successfulFetch();
+    const result = await runShopeeOpenApiSmoke(
+      { ...confirmedInput(), subIds: ["source_datafeed"] },
+      { environment: environment(), fetch: request, now },
+    );
+    expect(result).toMatchObject({
+      success: false,
+      requestAttempts: 0,
+      errorCode: "SHOPEE_SUB_ID_INVALID",
+      stateModified: false,
     });
     expect(request).not.toHaveBeenCalled();
   });
