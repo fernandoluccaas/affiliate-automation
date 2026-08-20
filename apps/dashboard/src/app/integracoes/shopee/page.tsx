@@ -5,34 +5,16 @@ import { MetricCard, MetricGrid } from "@/components/ui/page";
 import { StatusBadge } from "@/components/ui/status-badge";
 import {
   SHOPEE_CATEGORY_CATALOG,
+  loadShopeeOperationalOfferState,
   resolveShopeeAffiliateConfiguration,
 } from "@affiliate/shopee-affiliate";
 import { ShopeeDatafeedConsole } from "./shopee-datafeed-console";
-import { prisma } from "@affiliate/database";
 
 export const dynamic = "force-dynamic";
 
 export default async function ShopeeIntegrationPage() {
   const configuration = resolveShopeeAffiliateConfiguration();
-  const [pending, ready, pendingOffers] = await Promise.all([
-    prisma.offer.count({
-      where: { marketplace: "SHOPEE", status: "READY_FOR_AFFILIATE_LINK" },
-    }),
-    prisma.offer.count({
-      where: { marketplace: "SHOPEE", status: "READY_TO_PUBLISH" },
-    }),
-    prisma.offer.findMany({
-      where: { marketplace: "SHOPEE", status: "READY_FOR_AFFILIATE_LINK" },
-      orderBy: { updatedAt: "desc" },
-      take: 20,
-      select: {
-        id: true,
-        title: true,
-        externalProductId: true,
-        statusReason: true,
-      },
-    }),
-  ]);
+  const offerState = await loadShopeeOperationalOfferState();
   return (
     <AdminShell
       currentPath="/integracoes/shopee"
@@ -101,8 +83,8 @@ export default async function ShopeeIntegrationPage() {
         <ShopeeDatafeedConsole
           configuration={{
             ...configuration,
-            offerCounts: { pending, ready },
-            pendingOffers,
+            offerCounts: offerState.offerCounts,
+            pendingOffers: offerState.pendingOffers,
             categories: SHOPEE_CATEGORY_CATALOG.map((category) => ({
               ...category,
             })),

@@ -361,6 +361,7 @@ export function selectShopeeRoundRobin(input: {
   categories?: readonly ShopeeCategoryRule[];
   maxTotal?: number;
   backfill?: boolean;
+  maxPerShop?: number;
 }) {
   const categories = normalizedCategories(
     input.categories ?? SHOPEE_CATEGORY_CATALOG,
@@ -369,6 +370,8 @@ export function selectShopeeRoundRobin(input: {
   const selected: ShopeeRankedCandidate[] = [];
   const counts = new Map<ShopeeLogicalCategory, number>();
   const cursors = new Map<ShopeeLogicalCategory, number>();
+  const shopCounts = new Map<string, number>();
+  const maxPerShop = Math.max(1, Math.min(12, input.maxPerShop ?? 2));
   const fill = (limit: "minPerCategory" | "maxPerCategory") => {
     let progressed = true;
     while (progressed && selected.length < maxTotal) {
@@ -377,12 +380,24 @@ export function selectShopeeRoundRobin(input: {
         if (selected.length >= maxTotal) break;
         const count = counts.get(category.id) ?? 0;
         if (count >= category[limit]) continue;
-        const cursor = cursors.get(category.id) ?? 0;
-        const candidate = input.pools.get(category.id)?.[cursor];
+        let cursor = cursors.get(category.id) ?? 0;
+        const pool = input.pools.get(category.id) ?? [];
+        let candidate = pool[cursor];
+        while (candidate?.shopName?.trim()) {
+          const shopKey = candidate.shopName.trim().toLocaleLowerCase("pt-BR");
+          if ((shopCounts.get(shopKey) ?? 0) < maxPerShop) break;
+          cursor += 1;
+          candidate = pool[cursor];
+        }
+        cursors.set(category.id, cursor);
         if (!candidate) continue;
         selected.push(candidate);
         counts.set(category.id, count + 1);
         cursors.set(category.id, cursor + 1);
+        if (candidate.shopName?.trim()) {
+          const shopKey = candidate.shopName.trim().toLocaleLowerCase("pt-BR");
+          shopCounts.set(shopKey, (shopCounts.get(shopKey) ?? 0) + 1);
+        }
         progressed = true;
       }
     }
@@ -430,6 +445,8 @@ export async function previewShopeeDatafeeds(input: {
   weights?: Partial<ShopeeRankingWeights>;
   maxTotal?: number;
   backfill?: boolean;
+  recentItemIds?: readonly string[];
+  maxPerShop?: number;
 }): Promise<ShopeeDatafeedPreviewResult> {
   const startedAt = performance.now();
   const configuration = resolveShopeeAffiliateConfiguration(input.environment);
@@ -439,6 +456,7 @@ export async function previewShopeeDatafeeds(input: {
   );
   const filters = { ...DEFAULT_SHOPEE_FILTERS, ...input.filters };
   const weights = { ...DEFAULT_SHOPEE_RANKING_WEIGHTS, ...input.weights };
+  const recentItemIds = new Set(input.recentItemIds ?? []);
   const tempPrefix = join(tmpdir(), "affiliate-shopee-preview-");
   const temporaryDirectory = await mkdtemp(tempPrefix);
   const writers = new Map<number, ReturnType<typeof createWriteStream>>();
@@ -513,6 +531,11 @@ export async function previewShopeeDatafeeds(input: {
         const category = matchShopeeCategory(product, categories);
         if (!category) continue;
         increment(categoryCandidates, category.id);
+        if (recentItemIds.has(product.itemId)) {
+          increment(rejected, "RECENTLY_SELECTED");
+          increment(categoryRejected, category.id);
+          continue;
+        }
         const rejection = filterShopeeCandidate(product, filters);
         if (rejection) {
           increment(rejected, rejection);
@@ -530,6 +553,7 @@ export async function previewShopeeDatafeeds(input: {
           discountPercentage: product.discountPercentage,
           itemRating: product.itemRating,
           shopRating: product.shopRating,
+          shopName: product.shopName,
           imageUrl: product.imageUrl,
           sourceProductHost: urlHost(product.sourceProductUrl) ?? "invalid",
           candidateLinkHost: urlHost(product.candidateAffiliateUrl),
@@ -545,7 +569,7 @@ export async function previewShopeeDatafeeds(input: {
         const pool = pools.get(category.id) ?? [];
         pool.push(candidate);
         pool.sort(compareRanked);
-        pool.splice(category.maxPerCategory);
+        pool.splice(Math.min(100, Math.max(category.maxPerCategory, 20)));
         pools.set(category.id, pool);
       }
     }
@@ -554,6 +578,8 @@ export async function previewShopeeDatafeeds(input: {
       categories,
       maxTotal: input.maxTotal ?? DEFAULT_SHOPEE_SELECTION.maxTotalPerSession,
       backfill: input.backfill ?? DEFAULT_SHOPEE_SELECTION.backfill,
+      maxPerShop:
+        input.maxPerShop ?? configuration.maxPerShopPerSession,
     });
     return {
       status: "PREVIEW_COMPLETED",

@@ -4,6 +4,7 @@ import type {
   ShopeeDatafeedInspectResult,
   ShopeeDatafeedPreviewResult,
   ShopeeOperationalImportResult,
+  ShopeeOperationalOfferState,
 } from "@affiliate/shopee-affiliate";
 
 export type ShopeeDashboardConfigurationDto = ShopeeAffiliateConfiguration & {
@@ -46,4 +47,10 @@ export type ShopeeInspectActionResult =
 export type ShopeePreviewActionResult =
   ShopeeActionResult<ShopeeDatafeedPreviewResult>;
 export type ShopeeImportActionResult =
-  ShopeeActionResult<ShopeeOperationalImportResult>;
+  | {
+      ok: true;
+      data: ShopeeOperationalImportResult;
+      offerState: ShopeeOperationalOfferState;
+      message: string;
+    }
+  | { ok: false; errorCode: string; message: string };

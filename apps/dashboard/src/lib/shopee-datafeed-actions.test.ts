@@ -7,9 +7,10 @@ const operationalImport = vi.hoisted(() => vi.fn());
 const retryLink = vi.hoisted(() => vi.fn());
 const manualLink = vi.hoisted(() => vi.fn());
 const configuration = vi.hoisted(() => vi.fn());
+const recentItems = vi.hoisted(() => vi.fn());
+const offerState = vi.hoisted(() => vi.fn());
 
 vi.mock("./session", () => ({ requireSession }));
-vi.mock("next/cache", () => ({ revalidatePath: vi.fn() }));
 vi.mock("@affiliate/shopee-affiliate", async (importOriginal) => {
   const actual =
     await importOriginal<typeof import("@affiliate/shopee-affiliate")>();
@@ -21,6 +22,8 @@ vi.mock("@affiliate/shopee-affiliate", async (importOriginal) => {
     retryShopeeAffiliateLink: retryLink,
     applyManualShopeeAffiliateLink: manualLink,
     resolveShopeeAffiliateConfiguration: configuration,
+    loadRecentShopeeItemIds: recentItems,
+    loadShopeeOperationalOfferState: offerState,
   };
 });
 
@@ -63,7 +66,16 @@ describe("Shopee dashboard Server Actions", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     requireSession.mockResolvedValue({ id: "user", role: "ADMIN" });
-    configuration.mockReturnValue({ mode: "DATAFEED" });
+    configuration.mockReturnValue({
+      mode: "DATAFEED",
+      recentSelectionWindowDays: 7,
+      maxPerShopPerSession: 2,
+    });
+    recentItems.mockResolvedValue([]);
+    offerState.mockResolvedValue({
+      offerCounts: { pending: 0, ready: 1 },
+      pendingOffers: [],
+    });
   });
 
   it("requires an authenticated authorized session", async () => {
@@ -112,6 +124,10 @@ describe("Shopee dashboard Server Actions", () => {
     expect(JSON.stringify(result)).not.toMatch(
       /cookie|token|secret|authorization/i,
     );
+    expect(recentItems).toHaveBeenCalledWith({ windowDays: 7 });
+    expect(preview).toHaveBeenCalledWith(
+      expect.objectContaining({ recentItemIds: [], maxPerShop: 2 }),
+    );
   });
 
   it("requires a dedicated confirmation action before operational writes", async () => {
@@ -124,7 +140,7 @@ describe("Shopee dashboard Server Actions", () => {
       publicationsCreated: 0,
       messagesSent: 0,
     });
-    await confirmShopeeDatafeedImportAction(input as never);
+    const result = await confirmShopeeDatafeedImportAction(input as never);
     expect(operationalImport).toHaveBeenCalledWith(
       expect.objectContaining({
         confirmImport: true,
@@ -134,6 +150,10 @@ describe("Shopee dashboard Server Actions", () => {
     expect(JSON.stringify(operationalImport.mock.calls[0])).not.toMatch(
       /secret|authorization|cookie/i,
     );
+    expect(result).toMatchObject({
+      ok: true,
+      offerState: { offerCounts: { pending: 0, ready: 1 } },
+    });
   });
 
   it("runs a controlled retry without exposing credentials", async () => {
@@ -144,6 +164,7 @@ describe("Shopee dashboard Server Actions", () => {
       offerId: "offer-safe",
       subIds: ["source_datafeed", "retry"],
     });
+    expect(offerState).toHaveBeenCalled();
     expect(JSON.stringify(result)).not.toMatch(/secret|authorization|cookie/i);
   });
 
@@ -157,6 +178,9 @@ describe("Shopee dashboard Server Actions", () => {
     expect(manualLink).toHaveBeenCalledWith({
       offerId: "offer-safe",
       affiliateUrl: "https://s.shopee.com.br/fixture",
+    });
+    expect(result).toMatchObject({
+      offerState: { offerCounts: { pending: 0, ready: 1 } },
     });
   });
 });

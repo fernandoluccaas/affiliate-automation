@@ -80,6 +80,10 @@ export function ShopeeDatafeedConsole({
     errorCode?: string;
   } | null>(null);
   const [manualLinks, setManualLinks] = useState<Record<string, string>>({});
+  const [pendingOffers, setPendingOffers] = useState(
+    configuration.pendingOffers,
+  );
+  const [offerCounts, setOfferCounts] = useState(configuration.offerCounts);
   const [isPending, startTransition] = useTransition();
   const activeOperation = useRef(false);
 
@@ -131,7 +135,12 @@ export function ShopeeDatafeedConsole({
           setPreviewResult(await previewShopeeDatafeedAction(input));
           setTab("discovery");
         } else {
-          setImportResult(await confirmShopeeDatafeedImportAction(input));
+          const result = await confirmShopeeDatafeedImportAction(input);
+          setImportResult(result);
+          if (result.ok) {
+            setPendingOffers(result.offerState.pendingOffers);
+            setOfferCounts(result.offerState.offerCounts);
+          }
           setTab("links");
         }
       } finally {
@@ -161,6 +170,10 @@ export function ShopeeDatafeedConsole({
                 errorCode: result.errorCode,
               },
         );
+        if (result.ok) {
+          setPendingOffers(result.offerState.pendingOffers);
+          setOfferCounts(result.offerState.offerCounts);
+        }
       } finally {
         activeOperation.current = false;
       }
@@ -516,8 +529,8 @@ export function ShopeeDatafeedConsole({
             {configuration.openApiConfigured
               ? "configurada"
               : "não configurada"}
-            . {configuration.offerCounts.ready} oferta(s) pronta(s) e{" "}
-            {configuration.offerCounts.pending} aguardando link.
+            . {offerCounts.ready} oferta(s) pronta(s) e {offerCounts.pending}{" "}
+            aguardando link.
           </Alert>
           {linkResult ? (
             <Alert
@@ -529,13 +542,13 @@ export function ShopeeDatafeedConsole({
               {linkResult.errorCode ? ` (${linkResult.errorCode})` : ""}
             </Alert>
           ) : null}
-          {configuration.pendingOffers.length === 0 ? (
+          {pendingOffers.length === 0 ? (
             <Alert tone="info" title="Nenhuma oferta pendente">
               As ofertas importadas com link válido aparecerão como prontas para
               publicação.
             </Alert>
           ) : (
-            configuration.pendingOffers.map((offer) => (
+            pendingOffers.map((offer) => (
               <Card key={offer.id}>
                 <CardContent className="grid gap-3 pt-5 sm:pt-6">
                   <div>

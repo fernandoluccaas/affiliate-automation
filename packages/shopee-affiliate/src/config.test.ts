@@ -113,6 +113,22 @@ describe("Shopee affiliate configuration", () => {
     });
   });
 
+  it("uses safe defaults for recent repetition and shop diversity", () => {
+    expect(resolveShopeeAffiliateConfiguration({})).toMatchObject({
+      recentSelectionWindowDays: 7,
+      maxPerShopPerSession: 2,
+    });
+    expect(
+      resolveShopeeAffiliateConfiguration({
+        SHOPEE_RECENT_SELECTION_WINDOW_DAYS: "invalid",
+        SHOPEE_MAX_PER_SHOP_PER_SESSION: "99",
+      }),
+    ).toMatchObject({
+      recentSelectionWindowDays: 7,
+      maxPerShopPerSession: 2,
+    });
+  });
+
   it("opens the attribution gate only through the exact flag", () => {
     const base = {
       SHOPEE_AFFILIATE_ENABLED: "true",

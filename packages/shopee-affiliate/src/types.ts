@@ -33,6 +33,8 @@ export type ShopeeAffiliateConfiguration = {
   openApiRateLimitPerHour: number;
   maxFileBytes: number;
   maxTrackedItems: number;
+  recentSelectionWindowDays: number;
+  maxPerShopPerSession: number;
   issues: string[];
 };
 
@@ -223,6 +225,7 @@ export type ShopeeRankedCandidate = {
   discountPercentage: number | null;
   itemRating: number | null;
   shopRating: number | null;
+  shopName?: string | null;
   imageUrl: string;
   sourceProductHost: string;
   candidateLinkHost: string | null;

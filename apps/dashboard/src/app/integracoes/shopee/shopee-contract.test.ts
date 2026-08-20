@@ -23,7 +23,7 @@ describe("Shopee dashboard architecture", () => {
     expect(source).not.toMatch(/router\.(push|replace|refresh)/);
     expect(source).not.toMatch(/window\.location/);
     expect(source).not.toMatch(/\bredirect\s*\(/);
-    expect(lib("shopee-datafeed-actions.ts")).toContain("revalidatePath");
+    expect(lib("shopee-datafeed-actions.ts")).not.toContain("revalidatePath");
   });
 
   it("uses localized pending and accessible live feedback", () => {

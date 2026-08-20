@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
 import { prisma, Prisma, type PrismaClient } from "@affiliate/database";
 import {
   ingestOfferInTransaction,
@@ -103,9 +105,86 @@ function safeCode(error: unknown) {
 function sessionChecksum(preview: ShopeeDatafeedPreviewResult) {
   const stable = {
     files: preview.files.map((file) => file.checksum).sort(),
-    selected: preview.selected.map((item) => item.itemId),
   };
   return createHash("sha256").update(JSON.stringify(stable)).digest("hex");
+}
+
+export async function loadRecentShopeeItemIds(input: {
+  database?: PrismaClient;
+  now?: Date;
+  windowDays: number;
+}) {
+  if (input.windowDays <= 0) return [];
+  const database = input.database ?? prisma;
+  const since = new Date(
+    (input.now ?? new Date()).getTime() - input.windowDays * 86_400_000,
+  );
+  const rows = await database.importJobItem.findMany({
+    where: {
+      createdAt: { gte: since },
+      sourceId: { not: null },
+      status: { not: "FAILED" },
+      importJob: { marketplace: "SHOPEE", importType: IMPORT_TYPE },
+    },
+    distinct: ["sourceId"],
+    select: { sourceId: true },
+  });
+  return rows.flatMap((row) => (row.sourceId ? [row.sourceId] : []));
+}
+
+export type ShopeeOperationalOfferState = {
+  offerCounts: { pending: number; ready: number };
+  pendingOffers: Array<{
+    id: string;
+    title: string;
+    externalProductId: string;
+    statusReason: string | null;
+  }>;
+};
+
+export async function loadShopeeOperationalOfferState(
+  database: PrismaClient = prisma,
+): Promise<ShopeeOperationalOfferState> {
+  const versions = await database.offer.findMany({
+    where: { marketplace: "SHOPEE" },
+    orderBy: [{ externalProductId: "asc" }, { version: "desc" }],
+    select: {
+      id: true,
+      title: true,
+      externalProductId: true,
+      status: true,
+      statusReason: true,
+      updatedAt: true,
+    },
+  });
+  const currentByItem = new Map<string, (typeof versions)[number]>();
+  for (const version of versions) {
+    if (!currentByItem.has(version.externalProductId)) {
+      currentByItem.set(version.externalProductId, version);
+    }
+  }
+  const current = [...currentByItem.values()];
+  return {
+    offerCounts: {
+      pending: current.filter(
+        (offer) => offer.status === "READY_FOR_AFFILIATE_LINK",
+      ).length,
+      ready: current.filter((offer) => offer.status === "READY_TO_PUBLISH")
+        .length,
+    },
+    pendingOffers: current
+      .filter((offer) => offer.status === "READY_FOR_AFFILIATE_LINK")
+      .sort(
+        (left, right) => right.updatedAt.getTime() - left.updatedAt.getTime(),
+      )
+      .slice(0, 20)
+      .map(({ id, title, externalProductId, statusReason }) => ({
+        id,
+        title,
+        externalProductId,
+        statusReason,
+      })),
+  };
 }
 
 function attributionLabel(
@@ -355,6 +434,7 @@ export async function importShopeeOperationalOffers(input: {
   now?: Date;
   persistence?: ShopeeOperationalPersistence;
   linkProvider?: ShopeeAffiliateLinkProvider;
+  recentItemIds?: string[];
 }): Promise<ShopeeOperationalImportResult> {
   const environment = input.environment ?? process.env;
   const configuration = resolveShopeeAffiliateConfiguration(environment);
@@ -364,12 +444,22 @@ export async function importShopeeOperationalOffers(input: {
   ) {
     throw new ShopeeOpenApiError("SHOPEE_DATAFEED_MODE_REQUIRED");
   }
+  const recentItemIds =
+    input.recentItemIds ??
+    (input.persistence
+      ? []
+      : await loadRecentShopeeItemIds({
+          windowDays: configuration.recentSelectionWindowDays,
+          ...(input.now ? { now: input.now } : {}),
+        }));
   const preview = await previewShopeeDatafeeds({
     files: input.files,
     environment,
     ...(input.categories ? { categories: input.categories } : {}),
     ...(input.filters ? { filters: input.filters } : {}),
     maxTotal: 12,
+    recentItemIds,
+    maxPerShop: configuration.maxPerShopPerSession,
   });
   const emptyMetrics: ShopeeOperationalMetrics = {
     selected: preview.selected.length,
@@ -654,11 +744,133 @@ export async function retryShopeeAffiliateLink(input: {
   });
 }
 
+export type ShopeeDnsResolver = (
+  hostname: string,
+) => Promise<Array<{ address: string; family: number }>>;
+
+function ipv4Octets(address: string) {
+  const octets = address.split(".").map(Number);
+  return octets.length === 4 && octets.every((octet) => octet >= 0 && octet <= 255)
+    ? octets
+    : null;
+}
+
+export function isPublicShopeeRedirectAddress(address: string) {
+  const version = isIP(address);
+  if (version === 4) {
+    const octets = ipv4Octets(address);
+    if (!octets) return false;
+    const [first = 0, second = 0, third = 0] = octets;
+    return !(
+      first === 0 ||
+      first === 10 ||
+      first === 127 ||
+      (first === 100 && second >= 64 && second <= 127) ||
+      (first === 169 && second === 254) ||
+      (first === 172 && second >= 16 && second <= 31) ||
+      (first === 192 && second === 0 && third <= 2) ||
+      (first === 192 && second === 168) ||
+      (first === 198 && (second === 18 || second === 19)) ||
+      (first === 198 && second === 51 && third === 100) ||
+      (first === 203 && second === 0 && third === 113) ||
+      first >= 224
+    );
+  }
+  if (version !== 6) return false;
+  const normalized = address.toLowerCase().split("%")[0] ?? "";
+  const mapped = normalized.match(/::ffff:(\d+\.\d+\.\d+\.\d+)$/u)?.[1];
+  if (mapped) return isPublicShopeeRedirectAddress(mapped);
+  const mappedHex = normalized.match(/::ffff:([a-f\d]{1,4}):([a-f\d]{1,4})$/u);
+  if (mappedHex?.[1] && mappedHex[2]) {
+    const high = Number.parseInt(mappedHex[1], 16);
+    const low = Number.parseInt(mappedHex[2], 16);
+    return isPublicShopeeRedirectAddress(
+      `${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`,
+    );
+  }
+  const first = Number.parseInt(normalized.split(":")[0] || "0", 16);
+  return (
+    first >= 0x2000 &&
+    first <= 0x3fff &&
+    !normalized.startsWith("2001:db8:") &&
+    !normalized.startsWith("2002:") &&
+    !normalized.startsWith("3fff:")
+  );
+}
+
+const MANUAL_REDIRECT_HOSTS = new Set([
+  "s.shopee.com.br",
+  "shopee.com.br",
+  "www.shopee.com.br",
+]);
+
+function isShopeeProductRedirectHost(hostname: string) {
+  const normalized = hostname.toLowerCase();
+  return normalized === "shopee.com.br" || normalized === "www.shopee.com.br";
+}
+
+const defaultShopeeDnsResolver: ShopeeDnsResolver = async (hostname) =>
+  lookup(hostname, { all: true, verbatim: true });
+
+async function assertSafeShopeeRedirectTarget(
+  value: string,
+  resolveDns: ShopeeDnsResolver,
+  signal: AbortSignal,
+) {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new ShopeeOpenApiError("SHOPEE_MANUAL_LINK_REDIRECT_REJECTED");
+  }
+  const hostname = url.hostname.toLowerCase();
+  if (
+    url.protocol !== "https:" ||
+    url.username ||
+    url.password ||
+    url.port ||
+    hostname === "localhost" ||
+    hostname.endsWith(".local") ||
+    !MANUAL_REDIRECT_HOSTS.has(hostname)
+  ) {
+    throw new ShopeeOpenApiError("SHOPEE_MANUAL_LINK_REDIRECT_REJECTED");
+  }
+  let addresses: Awaited<ReturnType<ShopeeDnsResolver>>;
+  try {
+    addresses = await new Promise((resolve, reject) => {
+      const abort = () => reject(new Error("SHOPEE_MANUAL_LINK_ABORTED"));
+      if (signal.aborted) return abort();
+      signal.addEventListener("abort", abort, { once: true });
+      resolveDns(hostname).then(
+        (result) => {
+          signal.removeEventListener("abort", abort);
+          resolve(result);
+        },
+        (error: unknown) => {
+          signal.removeEventListener("abort", abort);
+          reject(error);
+        },
+      );
+    });
+  } catch {
+    if (signal.aborted) throw new ShopeeOpenApiError("SHOPEE_MANUAL_LINK_TIMEOUT", true);
+    throw new ShopeeOpenApiError("SHOPEE_MANUAL_LINK_DNS_FAILED", true);
+  }
+  if (
+    addresses.length === 0 ||
+    addresses.some((entry) => !isPublicShopeeRedirectAddress(entry.address))
+  ) {
+    throw new ShopeeOpenApiError("SHOPEE_MANUAL_LINK_SSRF_BLOCKED");
+  }
+}
+
 export async function resolveManualShopeeShortLink(input: {
   shortLink: string;
   expectedItemId: string;
   fetch?: typeof fetch;
+  resolveDns?: ShopeeDnsResolver;
   timeoutMs?: number;
+  maxRedirects?: number;
 }) {
   const initial = validateShopeeGeneratedShortLink(input.shortLink);
   if (!initial.ok) throw new ShopeeOpenApiError(initial.code);
@@ -668,25 +880,52 @@ export async function resolveManualShopeeShortLink(input: {
     input.timeoutMs ?? 10_000,
   );
   let current = initial.normalizedUrl;
+  const visited = new Set<string>();
+  const resolveDns = input.resolveDns ?? defaultShopeeDnsResolver;
+  const maxRedirects = Math.max(1, Math.min(5, input.maxRedirects ?? 5));
   try {
-    for (let redirect = 0; redirect < 4; redirect += 1) {
+    for (let redirect = 0; redirect < maxRedirects; redirect += 1) {
+      if (visited.has(current)) {
+        throw new ShopeeOpenApiError("SHOPEE_MANUAL_LINK_REDIRECT_LOOP");
+      }
+      visited.add(current);
+      await assertSafeShopeeRedirectTarget(
+        current,
+        resolveDns,
+        controller.signal,
+      );
       const response = await (input.fetch ?? fetch)(current, {
         method: "HEAD",
         redirect: "manual",
         signal: controller.signal,
       });
+      if (response.status < 300 || response.status >= 400) {
+        throw new ShopeeOpenApiError(
+          "SHOPEE_MANUAL_LINK_REDIRECT_REJECTED",
+        );
+      }
       const location = response.headers.get("location");
       if (!location) {
-        const product = validateShopeeProductOrigin(
-          current,
-          input.expectedItemId,
-        );
-        if (!product.ok) throw new ShopeeOpenApiError(product.code);
-        return product.normalizedUrl;
+        throw new ShopeeOpenApiError("SHOPEE_MANUAL_LINK_DESTINATION_MISSING");
       }
       const next = new URL(location, current).toString();
+      if (visited.has(next)) {
+        throw new ShopeeOpenApiError("SHOPEE_MANUAL_LINK_REDIRECT_LOOP");
+      }
+      await assertSafeShopeeRedirectTarget(next, resolveDns, controller.signal);
       const product = validateShopeeProductOrigin(next, input.expectedItemId);
       if (product.ok) return product.normalizedUrl;
+      if (product.code === "SHOPEE_ORIGIN_ITEM_ID_MISMATCH") {
+        throw new ShopeeOpenApiError(
+          "SHOPEE_AFFILIATE_LINK_PRODUCT_MISMATCH",
+        );
+      }
+      if (
+        product.code === "SHOPEE_ORIGIN_ITEM_ID_MISSING" &&
+        isShopeeProductRedirectHost(new URL(next).hostname)
+      ) {
+        throw new ShopeeOpenApiError("SHOPEE_AFFILIATE_LINK_ITEM_ID_MISSING");
+      }
       const intermediate = validateShopeeGeneratedShortLink(next);
       if (!intermediate.ok) {
         throw new ShopeeOpenApiError("SHOPEE_MANUAL_LINK_REDIRECT_REJECTED");
@@ -709,6 +948,8 @@ export async function applyManualShopeeAffiliateLink(input: {
   affiliateUrl: string;
   database?: PrismaClient;
   fetch?: typeof fetch;
+  resolveDns?: ShopeeDnsResolver;
+  ingestOffer?: typeof ingestOfferInTransaction;
   now?: Date;
 }) {
   const shortLink = validateShopeeGeneratedShortLink(input.affiliateUrl);
@@ -738,11 +979,12 @@ export async function applyManualShopeeAffiliateLink(input: {
     shortLink: shortLink.normalizedUrl,
     expectedItemId: offer.externalProductId,
     ...(input.fetch ? { fetch: input.fetch } : {}),
+    ...(input.resolveDns ? { resolveDns: input.resolveDns } : {}),
   });
   const winner = winnerFromOffer(offer);
   return database.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`shopee:${offer.externalProductId}`}))`;
-    return ingestOfferInTransaction(
+    return (input.ingestOffer ?? ingestOfferInTransaction)(
       tx,
       offerInput(winner, {
         affiliateUrl: shortLink.normalizedUrl,

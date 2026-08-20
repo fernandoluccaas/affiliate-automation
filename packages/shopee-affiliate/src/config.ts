@@ -74,6 +74,22 @@ export function resolveShopeeAffiliateConfiguration(
     "SHOPEE_OPEN_API_RATE_LIMIT_INVALID",
     issues,
   );
+  const recentSelectionWindowDays = boundedInteger(
+    environment.SHOPEE_RECENT_SELECTION_WINDOW_DAYS,
+    7,
+    0,
+    90,
+    "SHOPEE_RECENT_SELECTION_WINDOW_INVALID",
+    issues,
+  );
+  const maxPerShopPerSession = boundedInteger(
+    environment.SHOPEE_MAX_PER_SHOP_PER_SESSION,
+    2,
+    1,
+    12,
+    "SHOPEE_MAX_PER_SHOP_INVALID",
+    issues,
+  );
   if (enabled && requestedMode === "OFF") {
     issues.push("SHOPEE_ENABLED_WITH_OFF_MODE");
   }
@@ -119,6 +135,8 @@ export function resolveShopeeAffiliateConfiguration(
     openApiRateLimitPerHour,
     maxFileBytes,
     maxTrackedItems,
+    recentSelectionWindowDays,
+    maxPerShopPerSession,
     issues,
   };
 }

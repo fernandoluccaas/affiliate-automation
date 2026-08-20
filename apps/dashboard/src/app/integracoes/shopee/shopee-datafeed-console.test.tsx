@@ -48,6 +48,8 @@ const configuration: ShopeeDashboardConfigurationDto = {
   operationalWritesEnabled: true,
   openApiTimeoutMs: 10_000,
   openApiRateLimitPerHour: 1_000,
+  recentSelectionWindowDays: 7,
+  maxPerShopPerSession: 2,
   maxFileBytes: 536_870_912,
   maxTrackedItems: 2_000_000,
   issues: [],
@@ -138,9 +140,18 @@ describe("ShopeeDatafeedConsole", () => {
         publicationsCreated: 0,
         messagesSent: 0,
       },
+      offerState: { offerCounts: { pending: 0, ready: 0 }, pendingOffers: [] },
     });
-    retryAction.mockResolvedValue({ ok: true, message: "Link gerado." });
-    manualAction.mockResolvedValue({ ok: true, message: "Link aplicado." });
+    retryAction.mockResolvedValue({
+      ok: true,
+      message: "Link gerado.",
+      offerState: { offerCounts: { pending: 0, ready: 1 }, pendingOffers: [] },
+    });
+    manualAction.mockResolvedValue({
+      ok: true,
+      message: "Link aplicado.",
+      offerState: { offerCounts: { pending: 0, ready: 1 }, pendingOffers: [] },
+    });
   });
 
   it("switches tabs without navigation or losing local form state", () => {
@@ -214,6 +225,60 @@ describe("ShopeeDatafeedConsole", () => {
     expect(importAction).toHaveBeenCalledOnce();
   });
 
+  it("updates the pending-offer island after import without navigation", async () => {
+    const pathname = window.location.pathname;
+    Object.defineProperty(window, "scrollY", {
+      configurable: true,
+      value: 360,
+    });
+    importAction.mockResolvedValueOnce({
+      ok: true,
+      message: "Importação concluída.",
+      data: {
+        status: "SUCCEEDED_WITH_ERRORS",
+        preview: previewSuccess().data,
+        importJobId: "job-safe",
+        metrics: {
+          selected: 1,
+          created: 1,
+          updated: 0,
+          linksGenerated: 0,
+          linksReused: 0,
+          readyToPublish: 0,
+          pendingAffiliateLink: 1,
+          failed: 0,
+        },
+        stateModified: true,
+        publicationsCreated: 0,
+        messagesSent: 0,
+      },
+      offerState: {
+        offerCounts: { pending: 1, ready: 0 },
+        pendingOffers: [
+          {
+            id: "offer-new",
+            title: "Produto recém-importado",
+            externalProductId: "100002",
+            statusReason: "AFFILIATE_LINK_REQUIRED",
+          },
+        ],
+      },
+    });
+    render(<ShopeeDatafeedConsole configuration={configuration} />);
+    setFile();
+    fireEvent.click(screen.getByRole("tab", { name: "Descoberta" }));
+    fireEvent.click(screen.getByRole("button", { name: "Executar preview" }));
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Confirmar importação dos vencedores",
+      }),
+    );
+
+    expect(await screen.findByText("Produto recém-importado")).toBeInTheDocument();
+    expect(window.location.pathname).toBe(pathname);
+    expect(window.scrollY).toBe(360);
+  });
+
   it("offers controlled Open API retry for pending offers", async () => {
     render(
       <ShopeeDatafeedConsole
@@ -272,6 +337,8 @@ describe("ShopeeDatafeedConsole", () => {
       offerId: "offer-safe",
       affiliateUrl: "https://s.shopee.com.br/fixture",
     });
+    expect(screen.queryByText("Produto de teste")).not.toBeInTheDocument();
+    expect(screen.getByText(/1 oferta\(s\) pronta\(s\) e 0 aguardando link/)).toBeInTheDocument();
   });
 
   it("prevents a duplicate click while inspect is pending", async () => {

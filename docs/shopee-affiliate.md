@@ -9,8 +9,10 @@ de shortlinks pelo contrato GraphQL oficial `generateShortLink`.
 
 Não há scraping, login automatizado, browser ou download remoto do feed. Somente
 uma confirmação explícita pode criar `Product`, versões de `Offer`,
-`AffiliateLink`, `ImportJob` e `ImportJobItem`. O fluxo termina em
-`READY_TO_PUBLISH`: nunca cria `Publication` nem envia mensagens.
+`ImportJob` e `ImportJobItem`. Um `AffiliateLink` só é criado depois da geração
+Open API ou da validação do shortlink manual. O fluxo pode terminar em
+`READY_FOR_AFFILIATE_LINK` ou `READY_TO_PUBLISH`: nunca cria `Publication` nem
+envia mensagens.
 
 ## Modos
 
@@ -31,6 +33,8 @@ SHOPEE_OPEN_API_RATE_LIMIT_PER_HOUR="1000"
 SHOPEE_DATAFEED_LINKS_VERIFIED="false"
 SHOPEE_DATAFEED_MAX_FILE_BYTES="536870912"
 SHOPEE_DATAFEED_MAX_TRACKED_ITEMS="2000000"
+SHOPEE_RECENT_SELECTION_WINDOW_DAYS="7"
+SHOPEE_MAX_PER_SHOP_PER_SESSION="2"
 ```
 
 Valores ausentes ou desconhecidos falham de forma fechada. O projeto nunca
@@ -108,6 +112,12 @@ uma confirmação explícita permite que `DATAFEED` persista os vencedores ainda
 pendentes; `HYBRID` persiste primeiro a oferta pendente e envia somente a URL de
 produto validada à operação `generateShortLink`.
 
+No ambiente operacional atual, sem App ID e Secret, `OPEN_API` e `HYBRID`
+permanecem fail-closed. O modo `DATAFEED` não exige credenciais, não instancia o
+cliente externo e importa somente os vencedores como
+`READY_FOR_AFFILIATE_LINK`. O `product_short link` com host `shope.ee` jamais é
+promovido para `AffiliateLink`.
+
 O endpoint de produção é fixo em
 `https://open-api.affiliate.shopee.com.br/graphql`. O corpo é serializado uma
 vez e a mesma sequência de bytes é usada em
@@ -166,6 +176,12 @@ seleciona o primeiro candidato de cada categoria antes do segundo. Sem backfill,
 uma categoria sem mínimo impede a segunda rodada; com backfill, as demais ainda
 podem avançar até o máximo individual. O total nunca ultrapassa 12 por padrão.
 
+O componente de desconto satura em 60%; valores extremos não recebem peso
+adicional. A seleção também exclui itens escolhidos no período recente
+configurável (sete dias por padrão) e limita a duas ofertas da mesma loja por
+sessão. Loja ausente permanece neutra. Esses limites são determinísticos e não
+inventam histórico externo de preços.
+
 ## CLI
 
 Ative `DATAFEED` no ambiente e informe caminhos explicitamente:
@@ -193,8 +209,9 @@ para a memória do browser.
 
 As interfaces `ShopeeOfferProvider`, `ShopeeAffiliateLinkProvider` e
 `ShopeeConversionProvider` mantêm descoberta, links e conversões separadas. O
-checksum da sessão combina os arquivos e vencedores; reimportações idênticas não
-duplicam estado. Cada item usa lock consultivo PostgreSQL. Antes de chamar a API,
+checksum da sessão combina os checksums dos arquivos; reimportações dos mesmos
+arquivos não duplicam estado, mesmo que a janela de repetição altere a seleção.
+Cada item usa lock consultivo PostgreSQL. Antes de chamar a API,
 o serviço procura um `AffiliateLink` ativo para a mesma origem e hash dos SubIds.
 
 Sucesso gera a versão comercial com link, `AffiliateLink.destination` e, depois
@@ -202,7 +219,16 @@ de reexecutar validação e score mínimo, status `READY_TO_PUBLISH`. API desati
 credenciais ausentes ou erro mantém `READY_FOR_AFFILIATE_LINK` e registra somente
 código sanitizado no item do job. O dashboard permite retry explícito e fallback
 manual. O shortlink manual é validado e seus redirects são seguidos manualmente,
-limitados a hosts oficiais, até confirmar o mesmo `itemId`.
+limitados a hosts oficiais, até confirmar o mesmo `itemId`. Somente HTTPS e o
+host exato `s.shopee.com.br`, sem credenciais ou porta, são aceitos na entrada.
+Cada hop é limitado, validado e resolvido por DNS; localhost, redes privadas,
+link-local, endereços especiais IPv4/IPv6, loops e hosts fora da allowlist são
+rejeitados. O resolvedor não lê HTML nem usa navegador.
+
+O dashboard consulta apenas a versão comercial mais recente de cada item. As
+Server Actions retornam um DTO sanitizado com as contagens e ofertas pendentes;
+o Client Island atualiza o estado local, preservando tab, formulário e scroll,
+sem `revalidatePath` ou `router.refresh`.
 
 O redirect `/go/[slug]` continua consultando exclusivamente
 `AffiliateLink.destination`; URL do produto, candidato do Datafeed e `shope.ee`
