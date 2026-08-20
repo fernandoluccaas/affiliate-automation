@@ -171,7 +171,7 @@ describe("Shopee operational Datafeed import", () => {
       confirmImport: true,
       persistence: storage,
       linkProvider: generatedProvider,
-      subIds: ["source_datafeed"],
+      subIds: ["sourcedatafeed"],
     });
     expect(result.status).toBe("SUCCEEDED");
     expect(result.metrics.selected).toBeGreaterThan(0);
@@ -182,6 +182,11 @@ describe("Shopee operational Datafeed import", () => {
     expect(result.metrics.linksGenerated).toBe(result.metrics.selected);
     expect(result.metrics.readyToPublish).toBe(result.metrics.selected);
     expect(result.publicationsCreated).toBe(0);
+    expect(result.messagesSent).toBe(0);
+    expect(generatedProvider.resolve).toHaveBeenCalledWith(
+      expect.any(Object),
+      { subIds: ["sourcedatafeed"] },
+    );
     expect(storage.finishImport).toHaveBeenCalledWith(
       expect.objectContaining({
         status: "SUCCEEDED",

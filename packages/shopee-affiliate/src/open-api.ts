@@ -47,15 +47,10 @@ export function sanitizeShopeeSubIds(values: readonly string[] | undefined) {
   if (values.length > 5)
     throw new ShopeeOpenApiError("SHOPEE_SUB_IDS_LIMIT_EXCEEDED");
   return values.map((value) => {
-    const normalized = value.trim().toLowerCase();
-    if (
-      !normalized ||
-      normalized.length > 64 ||
-      !/^[a-z0-9][a-z0-9_-]*$/.test(normalized)
-    ) {
+    if (!value || value.length > 64 || !/^[A-Za-z0-9]+$/.test(value)) {
       throw new ShopeeOpenApiError("SHOPEE_SUB_ID_INVALID");
     }
-    return normalized;
+    return value;
   });
 }
 
@@ -144,6 +139,10 @@ export class ShopeeOpenApiClient {
     }
     const origin = validateShopeeProductOrigin(input.originUrl, input.itemId);
     if (!origin.ok) throw new ShopeeOpenApiError(origin.code);
+    const payload = createGenerateShortLinkPayload({
+      originUrl: origin.normalizedUrl,
+      ...(input.subIds ? { subIds: input.subIds } : {}),
+    });
     const now = this.dependencies.now?.() ?? new Date();
     const timestamp = Math.floor(now.getTime() / 1_000);
     const windowStart = timestamp - 3_600;
@@ -157,10 +156,6 @@ export class ShopeeOpenApiClient {
       throw new ShopeeOpenApiError("SHOPEE_OPEN_API_LOCAL_RATE_LIMITED", true);
     }
     this.calls.push(timestamp);
-    const payload = createGenerateShortLinkPayload({
-      originUrl: origin.normalizedUrl,
-      ...(input.subIds ? { subIds: input.subIds } : {}),
-    });
     const signature = createShopeeOpenApiSignature({
       appId: this.credentials.appId,
       timestamp,

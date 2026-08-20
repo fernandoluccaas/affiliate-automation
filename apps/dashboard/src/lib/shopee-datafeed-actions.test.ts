@@ -144,7 +144,7 @@ describe("Shopee dashboard Server Actions", () => {
     expect(operationalImport).toHaveBeenCalledWith(
       expect.objectContaining({
         confirmImport: true,
-        subIds: ["source_datafeed", "phase_6a3"],
+        subIds: ["sourcedatafeed", "phase6a3"],
       }),
     );
     expect(JSON.stringify(operationalImport.mock.calls[0])).not.toMatch(
@@ -162,9 +162,32 @@ describe("Shopee dashboard Server Actions", () => {
     expect(result).toMatchObject({ ok: true });
     expect(retryLink).toHaveBeenCalledWith({
       offerId: "offer-safe",
-      subIds: ["source_datafeed", "retry"],
+      subIds: ["sourcedatafeed", "retry"],
     });
+    expect(JSON.stringify(retryLink.mock.calls)).not.toContain("source_datafeed");
     expect(offerState).toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toMatch(/secret|authorization|cookie/i);
+  });
+
+  it("returns a specific sanitized message for an Open API GraphQL error", async () => {
+    retryLink.mockRejectedValue(new Error("SHOPEE_OPEN_API_GRAPHQL_ERROR"));
+    const result = await retryShopeeAffiliateLinkAction("offer-safe");
+    expect(result).toEqual({
+      ok: false,
+      errorCode: "SHOPEE_OPEN_API_GRAPHQL_ERROR",
+      message: "Não foi possível gerar o link pela Open API da Shopee.",
+    });
+    expect(JSON.stringify(result)).not.toMatch(/secret|authorization|cookie/i);
+  });
+
+  it("returns a specific sanitized message for an invalid SubId", async () => {
+    retryLink.mockRejectedValue(new Error("SHOPEE_SUB_ID_INVALID"));
+    const result = await retryShopeeAffiliateLinkAction("offer-safe");
+    expect(result).toEqual({
+      ok: false,
+      errorCode: "SHOPEE_SUB_ID_INVALID",
+      message: "Os identificadores de rastreamento do link são inválidos.",
+    });
     expect(JSON.stringify(result)).not.toMatch(/secret|authorization|cookie/i);
   });
 
