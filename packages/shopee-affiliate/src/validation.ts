@@ -53,6 +53,13 @@ export function extractShopeeItemId(url: URL) {
   ) {
     return segments[2]!;
   }
+  if (segments[0]?.toLowerCase() === "opaanlp") {
+    return segments.length === 3 &&
+      /^\d+$/.test(segments[1] ?? "") &&
+      /^\d+$/.test(segments[2] ?? "")
+      ? segments[2]!
+      : null;
+  }
   const queryItemId =
     url.searchParams.get("itemId") ?? url.searchParams.get("item_id");
   return queryItemId && /^\d+$/.test(queryItemId) ? queryItemId : null;

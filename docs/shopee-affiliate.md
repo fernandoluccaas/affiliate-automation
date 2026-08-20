@@ -143,6 +143,12 @@ legítimo, não conter credenciais/porta e carregar o mesmo `itemId` do Datafeed
 `shope.ee`, `/go` e domínios semelhantes são rejeitados. A resposta automática
 aceita apenas `https://s.shopee.com.br/...`.
 
+O parser de origem reconhece estritamente os formatos oficiais
+`<slug>-i.<shopId>.<itemId>`, `/product/<shopId>/<itemId>` e
+`/opaanlp/<shopId>/<itemId>`, além dos parâmetros legados `itemId` e `item_id`.
+No formato `opaanlp`, os dois IDs devem ser numéricos e não são aceitos
+segmentos adicionais ambíguos.
+
 Até cinco SubIds opcionais são aceitos. O sistema usa identificadores não
 sensíveis como `source_datafeed`, fase e retry; valores vazios, PII implícita,
 caracteres fora de `[a-z0-9_-]` ou mais de cinco entradas são recusados.

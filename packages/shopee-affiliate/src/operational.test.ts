@@ -264,13 +264,14 @@ describe("Shopee manual affiliate fallback", () => {
       offer: {
         findUnique: vi.fn(async () => ({
           marketplace: "SHOPEE",
-          externalProductId: "456",
+          externalProductId: "52511551718",
           title: "Produto",
           description: null,
           category: "CASA",
           sourceCategoryId: "10",
           imageUrl: "https://cf.shopee.com.br/image",
-          productUrl: "https://shopee.com.br/produto-i.123.456",
+          productUrl:
+            "https://shopee.com.br/produto-i.344381236.52511551718",
           originalPrice: 120,
           currentPrice: 100,
           discountPercentage: 16.67,
@@ -291,14 +292,15 @@ describe("Shopee manual affiliate fallback", () => {
     await expect(
       applyManualShopeeAffiliateLink({
         offerId: "offer-v1",
-        affiliateUrl: "https://s.shopee.com.br/fixture",
+        affiliateUrl: "https://s.shopee.com.br/2qTd2QTWJk",
         database: database as never,
         fetch: vi.fn(
           async () =>
             new Response(null, {
               status: 302,
               headers: {
-                location: "https://shopee.com.br/produto-i.123.456",
+                location:
+                  "https://shopee.com.br/opaanlp/344381236/52511551718?utm_medium=affiliates&utm_source=example",
               },
             }),
         ),
@@ -310,46 +312,98 @@ describe("Shopee manual affiliate fallback", () => {
       transaction,
       expect.objectContaining({
         marketplace: "SHOPEE",
-        externalProductId: "456",
-        productUrl: "https://shopee.com.br/produto-i.123.456",
-        affiliateUrl: "https://s.shopee.com.br/fixture",
+        externalProductId: "52511551718",
+        productUrl:
+          "https://shopee.com.br/produto-i.344381236.52511551718",
+        affiliateUrl: "https://s.shopee.com.br/2qTd2QTWJk",
       }),
       expect.objectContaining({ minScore: 70 }),
     );
   });
 
-  it("validates the final product itemId without following the short link in tests", async () => {
-    const request = vi.fn(
-      async () =>
-        new Response(null, {
-          status: 302,
-          headers: {
-            location: "https://shopee.com.br/produto-i.123.456",
-          },
-        }),
-    );
-    await expect(
-      resolveManualShopeeShortLink({
-        shortLink: "https://s.shopee.com.br/fixture",
-        expectedItemId: "456",
-        fetch: request,
-        resolveDns: publicDns,
-      }),
-    ).resolves.toBe("https://shopee.com.br/produto-i.123.456");
-    expect(request).toHaveBeenCalledOnce();
-  });
+  it("does not invoke ingestion when an opaanlp destination mismatches", async () => {
+    const transaction = vi.fn();
+    const ingestOffer = vi.fn();
+    const database = {
+      offer: {
+        findUnique: vi.fn(async () => ({
+          marketplace: "SHOPEE",
+          externalProductId: "52511551718",
+          title: "Produto",
+          description: null,
+          category: "CASA",
+          sourceCategoryId: "10",
+          imageUrl: "https://cf.shopee.com.br/image",
+          productUrl:
+            "https://shopee.com.br/produto-i.344381236.52511551718",
+          originalPrice: 120,
+          currentPrice: 100,
+          discountPercentage: 16.67,
+          rating: 4.8,
+        })),
+      },
+      $transaction: transaction,
+    };
 
-  it("rejects manual fallback that resolves to another item", async () => {
     await expect(
-      resolveManualShopeeShortLink({
-        shortLink: "https://s.shopee.com.br/fixture",
-        expectedItemId: "456",
+      applyManualShopeeAffiliateLink({
+        offerId: "offer-v1",
+        affiliateUrl: "https://s.shopee.com.br/2qTd2QTWJk",
+        database: database as never,
         fetch: vi.fn(
           async () =>
             new Response(null, {
               status: 302,
               headers: {
-                location: "https://shopee.com.br/produto-i.123.999",
+                location:
+                  "https://shopee.com.br/opaanlp/344381236/99999999999",
+              },
+            }),
+        ),
+        resolveDns: publicDns,
+        ingestOffer: ingestOffer as never,
+      }),
+    ).rejects.toThrow("SHOPEE_AFFILIATE_LINK_PRODUCT_MISMATCH");
+    expect(transaction).not.toHaveBeenCalled();
+    expect(ingestOffer).not.toHaveBeenCalled();
+  });
+
+  it("accepts the observed opaanlp redirect when the itemId matches", async () => {
+    const request = vi.fn(
+      async () =>
+        new Response(null, {
+          status: 302,
+          headers: {
+            location:
+              "https://shopee.com.br/opaanlp/344381236/52511551718?utm_medium=affiliates&utm_source=example",
+          },
+        }),
+    );
+    await expect(
+      resolveManualShopeeShortLink({
+        shortLink: "https://s.shopee.com.br/2qTd2QTWJk",
+        expectedItemId: "52511551718",
+        fetch: request,
+        resolveDns: publicDns,
+      }),
+    ).resolves.toBe(
+      "https://shopee.com.br/opaanlp/344381236/52511551718?utm_medium=affiliates&utm_source=example",
+    );
+    expect(request).toHaveBeenCalledOnce();
+  });
+
+  it("rejects an opaanlp redirect that resolves to another item", async () => {
+    await expect(
+      resolveManualShopeeShortLink({
+        shortLink: "https://s.shopee.com.br/2qTd2QTWJk",
+        expectedItemId: "52511551718",
+        fetch: vi.fn(
+          async () =>
+            new Response(null, {
+              status: 302,
+              headers: {
+                location:
+                  "https://shopee.com.br/opaanlp/344381236/99999999999",
               },
             }),
           ),

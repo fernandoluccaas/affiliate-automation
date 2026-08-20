@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { ShopeeBrazilRow, ShopeeOfficialBrRow } from "./types";
-import { normalizeShopeeDatafeedRow, validateShopeeUrl } from "./validation";
+import {
+  extractShopeeItemId,
+  normalizeShopeeDatafeedRow,
+  validateShopeeProductOrigin,
+  validateShopeeUrl,
+} from "./validation";
 
 function brazil(overrides: Partial<ShopeeBrazilRow> = {}): ShopeeBrazilRow {
   return {
@@ -190,5 +195,55 @@ describe("Shopee datafeed normalization", () => {
     expect(validateShopeeUrl("http://shopee.com.br/item", "PRODUCT")).toBe(
       false,
     );
+  });
+});
+
+describe("Shopee product itemId extraction", () => {
+  it.each([
+    [
+      "https://shopee.com.br/opaanlp/344381236/52511551718",
+      "52511551718",
+    ],
+    [
+      "https://shopee.com.br/opaanlp/344381236/52511551718?utm_medium=affiliates&utm_source=fixture",
+      "52511551718",
+    ],
+    [
+      "https://shopee.com.br/OPAANLP/344381236/52511551718",
+      "52511551718",
+    ],
+    ["https://shopee.com.br/product/344381236/52511551718", "52511551718"],
+    [
+      "https://shopee.com.br/produto-i.344381236.52511551718",
+      "52511551718",
+    ],
+    ["https://shopee.com.br/item?itemId=52511551718", "52511551718"],
+    ["https://shopee.com.br/item?item_id=52511551718", "52511551718"],
+  ])("extracts the itemId from supported URL %s", (value, expected) => {
+    expect(extractShopeeItemId(new URL(value))).toBe(expected);
+  });
+
+  it.each([
+    "https://shopee.com.br/opaanlp//52511551718",
+    "https://shopee.com.br/opaanlp/344381236",
+    "https://shopee.com.br/opaanlp/shop/52511551718",
+    "https://shopee.com.br/opaanlp/344381236/item",
+    "https://shopee.com.br/opaanlp/344381236/52511551718/extra",
+    "https://shopee.com.br/opaanlp/344381236/52511551718/extra?itemId=52511551718",
+  ])("rejects an ambiguous or malformed opaanlp path %s", (value) => {
+    expect(extractShopeeItemId(new URL(value))).toBeNull();
+    expect(validateShopeeProductOrigin(value, "52511551718")).toEqual({
+      ok: false,
+      code: "SHOPEE_ORIGIN_ITEM_ID_MISSING",
+    });
+  });
+
+  it("keeps an opaanlp itemId mismatch fail-closed", () => {
+    expect(
+      validateShopeeProductOrigin(
+        "https://shopee.com.br/opaanlp/344381236/99999999999",
+        "52511551718",
+      ),
+    ).toEqual({ ok: false, code: "SHOPEE_ORIGIN_ITEM_ID_MISMATCH" });
   });
 });
