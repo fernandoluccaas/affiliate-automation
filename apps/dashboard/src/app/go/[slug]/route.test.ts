@@ -23,7 +23,7 @@ import { GET } from "./route";
 const affiliateLink = {
   id: "link-1",
   offerId: "offer-1",
-  destination: "https://shopee.com.br/product/fixture",
+  destination: "https://s.shopee.com.br/fixture",
   marketplace: "SHOPEE",
   active: true,
 };

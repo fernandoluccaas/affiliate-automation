@@ -6,7 +6,7 @@ export type TrackingMarketplace = "MERCADO_LIVRE" | "SHOPEE";
 
 const DESTINATION_DOMAINS: Record<TrackingMarketplace, readonly string[]> = {
   MERCADO_LIVRE: ["meli.la", "mercadolivre.com.br", "mercadolibre.com"],
-  SHOPEE: ["shopee.com.br"],
+  SHOPEE: ["s.shopee.com.br"],
 };
 
 function boundedInteger(value: string | undefined, fallback: number, min: number, max: number) {

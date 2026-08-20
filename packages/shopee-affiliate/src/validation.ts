@@ -7,7 +7,7 @@ import type {
 
 type RawRow = ShopeeOfficialBrRow | ShopeeBrazilRow;
 
-const PRODUCT_DOMAINS = ["shopee.com.br", "shopee.com"];
+const PRODUCT_DOMAINS = ["shopee.com.br"];
 const SHORT_LINK_DOMAINS = ["shope.ee", "s.shopee.com.br"];
 const IMAGE_DOMAINS = ["susercontent.com", "shopee.com.br", "shopee.com"];
 
@@ -23,7 +23,10 @@ export function validateShopeeUrl(
 ) {
   try {
     const url = new URL(value);
-    if (url.protocol !== "https:" || url.username || url.password) return false;
+    if (url.protocol !== "https:" || url.username || url.password || url.port)
+      return false;
+    if (kind === "PRODUCT" && url.hostname.toLowerCase() === "s.shopee.com.br")
+      return false;
     const domains =
       kind === "PRODUCT"
         ? PRODUCT_DOMAINS
@@ -33,6 +36,76 @@ export function validateShopeeUrl(
     return hostAllowed(url.hostname.toLowerCase(), domains);
   } catch {
     return false;
+  }
+}
+
+export type ShopeeProductUrlValidation =
+  | { ok: true; normalizedUrl: string; itemId: string }
+  | { ok: false; code: string };
+
+export function extractShopeeItemId(url: URL) {
+  const pathMatch = url.pathname.match(/-i\.\d+\.(\d+)(?:\/|$)/i);
+  if (pathMatch?.[1]) return pathMatch[1];
+  const segments = url.pathname.split("/").filter(Boolean);
+  if (
+    segments[0]?.toLowerCase() === "product" &&
+    /^\d+$/.test(segments[2] ?? "")
+  ) {
+    return segments[2]!;
+  }
+  if (segments[0]?.toLowerCase() === "opaanlp") {
+    return segments.length === 3 &&
+      /^\d+$/.test(segments[1] ?? "") &&
+      /^\d+$/.test(segments[2] ?? "")
+      ? segments[2]!
+      : null;
+  }
+  const queryItemId =
+    url.searchParams.get("itemId") ?? url.searchParams.get("item_id");
+  return queryItemId && /^\d+$/.test(queryItemId) ? queryItemId : null;
+}
+
+export function validateShopeeProductOrigin(
+  value: string,
+  expectedItemId: string,
+): ShopeeProductUrlValidation {
+  if (!validateShopeeUrl(value, "PRODUCT")) {
+    return { ok: false, code: "SHOPEE_ORIGIN_URL_INVALID" };
+  }
+  const url = new URL(value);
+  if (url.pathname === "/go" || url.pathname.startsWith("/go/")) {
+    return { ok: false, code: "SHOPEE_ORIGIN_INTERNAL_TRACKING_REJECTED" };
+  }
+  const itemId = extractShopeeItemId(url);
+  if (!itemId) return { ok: false, code: "SHOPEE_ORIGIN_ITEM_ID_MISSING" };
+  if (itemId !== expectedItemId) {
+    return { ok: false, code: "SHOPEE_ORIGIN_ITEM_ID_MISMATCH" };
+  }
+  return { ok: true, normalizedUrl: url.toString(), itemId };
+}
+
+export type ShopeeShortLinkValidation =
+  { ok: true; normalizedUrl: string } | { ok: false; code: string };
+
+export function validateShopeeGeneratedShortLink(
+  value: string,
+): ShopeeShortLinkValidation {
+  try {
+    const url = new URL(value);
+    if (
+      url.protocol !== "https:" ||
+      url.username ||
+      url.password ||
+      url.port ||
+      url.hostname.toLowerCase() !== "s.shopee.com.br" ||
+      url.pathname === "/go" ||
+      url.pathname.startsWith("/go/")
+    ) {
+      return { ok: false, code: "SHOPEE_SHORT_LINK_INVALID" };
+    }
+    return { ok: true, normalizedUrl: url.toString() };
+  } catch {
+    return { ok: false, code: "SHOPEE_SHORT_LINK_INVALID" };
   }
 }
 

@@ -15,15 +15,15 @@ describe("Shopee dashboard architecture", () => {
     const page = app("page.tsx");
     expect(page).not.toMatch(/^\s*["']use client["']/);
     expect(page).toContain("<ShopeeDatafeedConsole");
-    expect(page).toContain("Gate de atribuição fechado");
+    expect(page).toContain("Links do Datafeed não verificados");
   });
 
   it("does not reload or navigate for local actions", () => {
-    const source = `${app("shopee-datafeed-console.tsx")}\n${lib("shopee-datafeed-actions.ts")}`;
+    const source = app("shopee-datafeed-console.tsx");
     expect(source).not.toMatch(/router\.(push|replace|refresh)/);
     expect(source).not.toMatch(/window\.location/);
     expect(source).not.toMatch(/\bredirect\s*\(/);
-    expect(source).not.toContain("revalidatePath");
+    expect(lib("shopee-datafeed-actions.ts")).not.toContain("revalidatePath");
   });
 
   it("uses localized pending and accessible live feedback", () => {
@@ -36,6 +36,14 @@ describe("Shopee dashboard architecture", () => {
   it("does not expose secret fields in client DTOs", () => {
     expect(app("shopee-types.ts")).not.toMatch(
       /secret|token|cookie|authorization|password/i,
+    );
+  });
+
+  it("shows only credential readiness and never credential values", () => {
+    const source = `${app("page.tsx")}\n${app("shopee-datafeed-console.tsx")}`;
+    expect(source).toContain("openApiConfigured");
+    expect(source).not.toMatch(
+      /SHOPEE_OPEN_API_(APP_ID|SECRET)|authorization/i,
     );
   });
 

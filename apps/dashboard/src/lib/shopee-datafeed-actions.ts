@@ -3,9 +3,14 @@
 import { z } from "zod";
 import {
   SHOPEE_CATEGORY_CATALOG,
+  applyManualShopeeAffiliateLink,
+  importShopeeOperationalOffers,
   inspectShopeeDatafeeds,
+  loadRecentShopeeItemIds,
+  loadShopeeOperationalOfferState,
   previewShopeeDatafeeds,
   resolveShopeeAffiliateConfiguration,
+  retryShopeeAffiliateLink,
   type ShopeeCategoryRule,
   type ShopeeLogicalCategory,
 } from "@affiliate/shopee-affiliate";
@@ -71,6 +76,20 @@ function messageFor(code: string) {
     SHOPEE_DATAFEED_ALREADY_PROCESSING:
       "Este arquivo já está sendo processado por outra operação.",
     SHOPEE_NOT_AUTHORIZED: "Seu perfil não pode ler arquivos do servidor.",
+    SHOPEE_MANUAL_LINK_DNS_FAILED:
+      "Não foi possível validar o destino do link com segurança.",
+    SHOPEE_MANUAL_LINK_SSRF_BLOCKED:
+      "O destino do link foi bloqueado pela política de rede.",
+    SHOPEE_MANUAL_LINK_REDIRECT_LOOP:
+      "O link contém um ciclo de redirecionamento.",
+    SHOPEE_MANUAL_LINK_REDIRECT_LIMIT:
+      "O link excede o limite seguro de redirecionamentos.",
+    SHOPEE_MANUAL_LINK_REDIRECT_REJECTED:
+      "O link redireciona para um destino não permitido.",
+    SHOPEE_AFFILIATE_LINK_PRODUCT_MISMATCH:
+      "O link pertence a outro produto.",
+    SHOPEE_AFFILIATE_LINK_ITEM_ID_MISSING:
+      "Não foi possível confirmar o item do link.",
   };
   return (
     messages[code] ?? "Não foi possível processar o Datafeed com segurança."
@@ -100,7 +119,7 @@ async function parseAuthorized(input: ShopeeDatafeedActionInput) {
   const parsed = inputSchema.safeParse(input);
   if (!parsed.success) throw new Error("SHOPEE_DATAFEED_INPUT_INVALID");
   const configuration = resolveShopeeAffiliateConfiguration();
-  if (configuration.mode !== "DATAFEED") {
+  if (!["DATAFEED", "HYBRID"].includes(configuration.mode)) {
     throw new Error("SHOPEE_DATAFEED_MODE_REQUIRED");
   }
   return parsed.data;
@@ -128,10 +147,16 @@ export async function previewShopeeDatafeedAction(
 ): Promise<ShopeePreviewActionResult> {
   try {
     const parsed = await parseAuthorized(input);
+    const configuration = resolveShopeeAffiliateConfiguration();
+    const recentItemIds = await loadRecentShopeeItemIds({
+      windowDays: configuration.recentSelectionWindowDays,
+    });
     const data = await previewShopeeDatafeeds({
       files: parsed.files,
       categories: categoriesFromInput(parsed),
       filters: parsed.filters,
+      recentItemIds,
+      maxPerShop: configuration.maxPerShopPerSession,
     });
     return {
       ok: true,
@@ -145,3 +170,76 @@ export async function previewShopeeDatafeedAction(
 }
 
 export type { ShopeeLogicalCategory };
+
+export async function confirmShopeeDatafeedImportAction(
+  input: ShopeeDatafeedActionInput,
+) {
+  try {
+    const parsed = await parseAuthorized(input);
+    const data = await importShopeeOperationalOffers({
+      files: parsed.files,
+      categories: categoriesFromInput(parsed),
+      filters: parsed.filters,
+      confirmImport: true,
+      subIds: ["source_datafeed", "phase_6a3"],
+    });
+    const offerState = await loadShopeeOperationalOfferState();
+    return {
+      ok: true as const,
+      data,
+      offerState,
+      message: `${data.metrics.readyToPublish} pronta(s), ${data.metrics.pendingAffiliateLink} aguardando link e ${data.metrics.failed} falha(s).`,
+    };
+  } catch (error) {
+    const errorCode = safeError(error);
+    return { ok: false as const, errorCode, message: messageFor(errorCode) };
+  }
+}
+
+const offerIdSchema = z.string().trim().min(1).max(100);
+
+export async function retryShopeeAffiliateLinkAction(offerId: string) {
+  try {
+    await authorize();
+    const data = await retryShopeeAffiliateLink({
+      offerId: offerIdSchema.parse(offerId),
+      subIds: ["source_datafeed", "retry"],
+    });
+    const offerState = await loadShopeeOperationalOfferState();
+    return {
+      ok: true as const,
+      data,
+      offerState,
+      message: "Link gerado e oferta revalidada.",
+    };
+  } catch (error) {
+    const errorCode = safeError(error);
+    return { ok: false as const, errorCode, message: messageFor(errorCode) };
+  }
+}
+
+export async function applyManualShopeeAffiliateLinkAction(input: {
+  offerId: string;
+  affiliateUrl: string;
+}) {
+  try {
+    await authorize();
+    const parsed = z
+      .object({
+        offerId: offerIdSchema,
+        affiliateUrl: z.string().trim().url().max(2_048),
+      })
+      .parse(input);
+    const data = await applyManualShopeeAffiliateLink(parsed);
+    const offerState = await loadShopeeOperationalOfferState();
+    return {
+      ok: true as const,
+      data,
+      offerState,
+      message: "Link manual validado e aplicado.",
+    };
+  } catch (error) {
+    const errorCode = safeError(error);
+    return { ok: false as const, errorCode, message: messageFor(errorCode) };
+  }
+}

@@ -17,7 +17,6 @@ describe("tracking destination validation", () => {
   it.each([
     ["MERCADO_LIVRE", "https://meli.la/fictitious"],
     ["MERCADO_LIVRE", "https://produto.mercadolivre.com.br/item"],
-    ["SHOPEE", "https://shopee.com.br/product/fictitious"],
     ["SHOPEE", "https://s.shopee.com.br/fictitious"],
   ] as const)("accepts a known HTTPS destination for %s", (marketplace, destination) => {
     expect(validateTrackingDestination({ marketplace, destination })).toMatchObject({ ok: true });
@@ -31,6 +30,13 @@ describe("tracking destination validation", () => {
     "https://user:password@meli.la/fictitious",
   ])("blocks unsafe destination %s", (destination) => {
     expect(validateTrackingDestination({ marketplace: "MERCADO_LIVRE", destination }).ok).toBe(false);
+  });
+
+  it("does not accept a Shopee product URL as an affiliate destination", () => {
+    expect(validateTrackingDestination({
+      marketplace: "SHOPEE",
+      destination: "https://shopee.com.br/produto-i.123.456",
+    })).toMatchObject({ ok: false, code: "DESTINATION_HOST_NOT_ALLOWED" });
   });
 
   it("allows local HTTP only outside production with an explicit flag", () => {

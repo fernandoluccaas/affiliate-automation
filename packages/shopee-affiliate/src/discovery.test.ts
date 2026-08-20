@@ -68,6 +68,7 @@ function candidate(
   id: string,
   category: ShopeeLogicalCategory,
   score = 80,
+  shopName: string | null = null,
 ): ShopeeRankedCandidate {
   return {
     itemId: id,
@@ -78,6 +79,7 @@ function candidate(
     discountPercentage: 20,
     itemRating: 4.8,
     shopRating: null,
+    shopName,
     imageUrl: "https://cf.shopee.com.br/image",
     sourceProductHost: "shopee.com.br",
     candidateLinkHost: "shope.ee",
@@ -224,6 +226,24 @@ describe("Shopee deterministic ranking", () => {
       scoreShopeeCandidate(product()).score - 10,
     );
   });
+
+  it("saturates the discount contribution at 60 percent", () => {
+    const atThreshold = scoreShopeeCandidate(
+      product({ discountPercentage: 60 }),
+    );
+    const extreme = scoreShopeeCandidate(product({ discountPercentage: 95 }));
+    expect(atThreshold.components.discountScore).toBe(100);
+    expect(extreme.components.discountScore).toBe(100);
+    expect(extreme.score).toBe(atThreshold.score);
+  });
+
+  it("uses an available shop rating without penalizing an absent rating", () => {
+    const wellRated = scoreShopeeCandidate(product({ shopRating: 5 }));
+    const poorlyRated = scoreShopeeCandidate(product({ shopRating: 2 }));
+    const absent = scoreShopeeCandidate(product({ shopRating: null }));
+    expect(wellRated.score).toBeGreaterThan(poorlyRated.score);
+    expect(absent.components.shopRatingScore).toBeNull();
+  });
 });
 
 describe("Shopee round robin", () => {
@@ -302,6 +322,39 @@ describe("Shopee round robin", () => {
       }).selected.map((item) => item.itemId),
     ).toEqual(["h1", "c1"]);
   });
+
+  it("limits repeated shops while keeping round-robin category balance", () => {
+    const categories = SHOPEE_CATEGORY_CATALOG.filter((item) =>
+      ["CELULARES", "CASA"].includes(item.id),
+    );
+    const shopPools = new Map<
+      ShopeeLogicalCategory,
+      ShopeeRankedCandidate[]
+    >([
+      [
+        "CELULARES",
+        [
+          candidate("c1", "CELULARES", 99, "Mesma Loja"),
+          candidate("c2", "CELULARES", 80, "Loja Celular"),
+        ],
+      ],
+      [
+        "CASA",
+        [
+          candidate("h1", "CASA", 98, "Mesma Loja"),
+          candidate("h2", "CASA", 79, "Loja Casa"),
+        ],
+      ],
+    ]);
+
+    expect(
+      selectShopeeRoundRobin({
+        pools: shopPools,
+        categories,
+        maxPerShop: 1,
+      }).selected.map((item) => item.itemId),
+    ).toEqual(["c1", "h2", "c2"]);
+  });
 });
 
 describe("Shopee read-only preview", () => {
@@ -359,6 +412,26 @@ describe("Shopee read-only preview", () => {
     expect(
       result.selected.every((item) => item.linkStatus === "NOT_VERIFIED"),
     ).toBe(true);
+  });
+
+  it("excludes recently selected items and records the reason", async () => {
+    const baseline = await previewShopeeDatafeeds({
+      files: [officialFixture, brazilFixture],
+      environment,
+    });
+    const recentItemId = baseline.selected[0]?.itemId;
+    expect(recentItemId).toBeDefined();
+
+    const result = await previewShopeeDatafeeds({
+      files: [officialFixture, brazilFixture],
+      environment,
+      recentItemIds: recentItemId ? [recentItemId] : [],
+    });
+
+    expect(result.selected.some((item) => item.itemId === recentItemId)).toBe(
+      false,
+    );
+    expect(result.rejectedByCode.RECENTLY_SELECTED).toBe(1);
   });
 
   it("returns an unverified result from the Datafeed link provider", async () => {

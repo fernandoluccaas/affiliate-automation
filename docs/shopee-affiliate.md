@@ -1,31 +1,40 @@
 # Shopee Affiliate — Datafeed discovery
 
-## Escopo da Fase 6A.2
+## Escopo das Fases 6A.2 e 6A.3
 
 A conta está aprovada no Programa de Afiliados Shopee e disponibiliza Datafeeds
-oficiais diários. A Affiliate Open API também existe, mas a conta ainda não
-possui AppID/Secret liberados. Por isso esta fase implementa somente leitura de
-arquivos locais, descoberta determinística e preview.
+oficiais diários. A Fase 6A.2 implementa leitura local, descoberta determinística
+e preview. A Fase 6A.3 adiciona a confirmação operacional e a geração automática
+de shortlinks pelo contrato GraphQL oficial `generateShortLink`.
 
-Não há scraping, login automatizado, browser, download de feed, chamada à Open
-API, escrita no banco, criação de `Product`, `Offer`, `AffiliateLink` ou
-`Publication`, nem envio de mensagens.
+Não há scraping, login automatizado, browser ou download remoto do feed. Somente
+uma confirmação explícita pode criar `Product`, versões de `Offer`,
+`ImportJob` e `ImportJobItem`. Um `AffiliateLink` só é criado depois da geração
+Open API ou da validação do shortlink manual. O fluxo pode terminar em
+`READY_FOR_AFFILIATE_LINK` ou `READY_TO_PUBLISH`: nunca cria `Publication` nem
+envia mensagens.
 
 ## Modos
 
 - `OFF`: padrão seguro; nenhum Datafeed é processado.
-- `DATAFEED`: permite `inspect` e `preview` de caminhos locais explícitos.
-- `OPEN_API`: `WAITING_FOR_OFFICIAL_ACCESS`, sem cliente HTTP ou assinatura.
-- `HYBRID`: `WAITING_FOR_OFFICIAL_ACCESS` até a Open API ser liberada.
+- `DATAFEED`: inspect, preview e importação confirmada; links permanecem pendentes.
+- `OPEN_API`: cliente de shortlink pronto apenas com App ID e Secret no servidor.
+- `HYBRID`: Datafeed operacional seguido de geração automática pela Open API.
 
 Configuração de exemplo:
 
 ```dotenv
 SHOPEE_AFFILIATE_ENABLED="false"
 SHOPEE_AFFILIATE_MODE="OFF"
+SHOPEE_OPEN_API_APP_ID=""
+SHOPEE_OPEN_API_SECRET=""
+SHOPEE_OPEN_API_TIMEOUT_MS="10000"
+SHOPEE_OPEN_API_RATE_LIMIT_PER_HOUR="1000"
 SHOPEE_DATAFEED_LINKS_VERIFIED="false"
 SHOPEE_DATAFEED_MAX_FILE_BYTES="536870912"
 SHOPEE_DATAFEED_MAX_TRACKED_ITEMS="2000000"
+SHOPEE_RECENT_SELECTION_WINDOW_DAYS="7"
+SHOPEE_MAX_PER_SHOP_PER_SESSION="2"
 ```
 
 Valores ausentes ou desconhecidos falham de forma fechada. O projeto nunca
@@ -89,7 +98,7 @@ Quando o mesmo item aparece nos dois feeds:
 O nome “Shopee Oficial BR” é somente a identificação do feed e não classifica
 automaticamente a loja como oficial.
 
-## Links e gate de atribuição
+## Links, Open API e gate de atribuição
 
 `product_link` vira `sourceProductUrl`. `product_short link` vira
 `candidateAffiliateUrl`. Ele só pode virar `verifiedAffiliateUrl` quando
@@ -97,10 +106,52 @@ automaticamente a loja como oficial.
 confirmação de atribuição.
 
 Com o padrão `false`, parsing, inspeção, ranking e preview continuam funcionando,
-mas os links aparecem como `NÃO VERIFICADO`. O pacote bloqueia qualquer tentativa
-operacional com `SHOPEE_DATAFEED_LINKS_NOT_VERIFIED`. Mesmo com o gate aberto, a
-Fase 6A.2 permanece preview-only e responde `SHOPEE_DATAFEED_PREVIEW_ONLY` para
-publicação.
+mas os links candidatos aparecem como `NÃO VERIFICADO` e nunca são promovidos a
+links de afiliado. A Fase 6A.2 permanece disponível para preview. Na Fase 6A.3,
+uma confirmação explícita permite que `DATAFEED` persista os vencedores ainda
+pendentes; `HYBRID` persiste primeiro a oferta pendente e envia somente a URL de
+produto validada à operação `generateShortLink`.
+
+No ambiente operacional atual, sem App ID e Secret, `OPEN_API` e `HYBRID`
+permanecem fail-closed. O modo `DATAFEED` não exige credenciais, não instancia o
+cliente externo e importa somente os vencedores como
+`READY_FOR_AFFILIATE_LINK`. O `product_short link` com host `shope.ee` jamais é
+promovido para `AffiliateLink`.
+
+O endpoint de produção é fixo em
+`https://open-api.affiliate.shopee.com.br/graphql`. O corpo é serializado uma
+vez e a mesma sequência de bytes é usada em
+`SHA256(AppId + Timestamp + Payload + Secret)` e no POST. O timestamp usa
+segundos Unix; o timeout padrão é 10 segundos e o limitador local padrão é
+1.000 chamadas/hora, sempre limitado ao teto oficial de 8.000/hora. Erros
+GraphQL `10000`, `10010`, `10020`, `10030` e `11000` são convertidos em códigos
+operacionais sem payload, header ou segredo.
+
+Contrato conferido no [Open API Explorer oficial da Shopee Brasil](https://open-api.affiliate.shopee.com.br/explorer/v2),
+sem informar credenciais ao Explorer. A implementação usa somente o contrato
+`generateShortLink` descrito acima; nenhuma operação não documentada foi criada.
+Por compatibilidade específica com o endpoint brasileiro, o payload segue a
+mutation anônima literal produzida pelo Explorer V2, com `originUrl` e SubIds
+validados e escapados, seleção de `shortLink` e `longLink` e envelope JSON
+contendo somente `query`. O formato anterior com `operationName` e `variables`
+foi rejeitado por esse endpoint com o código oficial `10010`; isso não implica
+uma limitação geral do padrão GraphQL. `longLink` é reconhecido na resposta,
+mas somente o `shortLink` validado é usado como destino afiliado.
+
+A URL de origem deve ser HTTPS, pertencer a `shopee.com.br` ou subdomínio
+legítimo, não conter credenciais/porta e carregar o mesmo `itemId` do Datafeed.
+`shope.ee`, `/go` e domínios semelhantes são rejeitados. A resposta automática
+aceita apenas `https://s.shopee.com.br/...`.
+
+O parser de origem reconhece estritamente os formatos oficiais
+`<slug>-i.<shopId>.<itemId>`, `/product/<shopId>/<itemId>` e
+`/opaanlp/<shopId>/<itemId>`, além dos parâmetros legados `itemId` e `item_id`.
+No formato `opaanlp`, os dois IDs devem ser numéricos e não são aceitos
+segmentos adicionais ambíguos.
+
+Até cinco SubIds opcionais são aceitos. O sistema usa identificadores não
+sensíveis como `source_datafeed`, fase e retry; valores vazios, PII implícita,
+caracteres fora de `[a-z0-9_-]` ou mais de cinco entradas são recusados.
 
 ## Categorias e filtros
 
@@ -131,6 +182,12 @@ seleciona o primeiro candidato de cada categoria antes do segundo. Sem backfill,
 uma categoria sem mínimo impede a segunda rodada; com backfill, as demais ainda
 podem avançar até o máximo individual. O total nunca ultrapassa 12 por padrão.
 
+O componente de desconto satura em 60%; valores extremos não recebem peso
+adicional. A seleção também exclui itens escolhidos no período recente
+configurável (sete dias por padrão) e limita a duas ofertas da mesma loja por
+sessão. Loja ausente permanece neutra. Esses limites são determinísticos e não
+inventam histórico externo de preços.
+
 ## CLI
 
 Ative `DATAFEED` no ambiente e informe caminhos explicitamente:
@@ -139,23 +196,70 @@ Ative `DATAFEED` no ambiente e informe caminhos explicitamente:
 npm run shopee:datafeed:status
 npm run shopee:datafeed:inspect -- --file "C:\caminho\feed.csv"
 npm run shopee:datafeed:preview -- --file "C:\caminho\feed1.csv" --file "C:\caminho\feed2.csv"
+npm run shopee:datafeed:import -- --file "C:\caminho\feed.csv"
+npm run shopee:datafeed:import -- --file "C:\caminho\feed.csv" --confirm-import
 ```
 
 `inspect` mostra schema, nome, tamanho, checksum, linhas, categorias, URLs,
 shortlinks candidatos, duração e pico aproximado de heap. `preview` mostra
 somente vencedores e métricas sanitizadas. Descrições e dumps de URLs não são
-impressos em lote.
+impressos em lote. Sem `--confirm-import`, o comando de importação também é
+preview-only e não grava estado.
 
 O dashboard em `/integracoes/shopee` oferece as mesmas operações com feedback
 inline, pending localizado, prevenção de duplo clique e preservação de tab,
 scroll e formulário. O arquivo continua no servidor; não há upload de 198 MB
 para a memória do browser.
 
-## Futuro Open API e atribuição
+## Persistência, idempotência e fallback
 
 As interfaces `ShopeeOfferProvider`, `ShopeeAffiliateLinkProvider` e
-`ShopeeConversionProvider` separam descoberta, links e conversões. A
-implementação atual é `DatafeedOfferProvider`; providers Open API não possuem
-base URL, headers, assinatura ou cliente HTTP e falham fechados até a liberação
-oficial das credenciais. Um modo híbrido poderá trocar providers sem acoplar o
-tracking ao formato `meli.la` do Mercado Livre.
+`ShopeeConversionProvider` mantêm descoberta, links e conversões separadas. O
+checksum da sessão combina os checksums dos arquivos; reimportações dos mesmos
+arquivos não duplicam estado, mesmo que a janela de repetição altere a seleção.
+Cada item usa lock consultivo PostgreSQL. Antes de chamar a API,
+o serviço procura um `AffiliateLink` ativo para a mesma origem e hash dos SubIds.
+
+Sucesso gera a versão comercial com link, `AffiliateLink.destination` e, depois
+de reexecutar validação e score mínimo, status `READY_TO_PUBLISH`. API desativada,
+credenciais ausentes ou erro mantém `READY_FOR_AFFILIATE_LINK` e registra somente
+código sanitizado no item do job. O dashboard permite retry explícito e fallback
+manual. O shortlink manual é validado e seus redirects são seguidos manualmente,
+limitados a hosts oficiais, até confirmar o mesmo `itemId`. Somente HTTPS e o
+host exato `s.shopee.com.br`, sem credenciais ou porta, são aceitos na entrada.
+Cada hop é limitado, validado e resolvido por DNS; localhost, redes privadas,
+link-local, endereços especiais IPv4/IPv6, loops e hosts fora da allowlist são
+rejeitados. O resolvedor não lê HTML nem usa navegador.
+
+O dashboard consulta apenas a versão comercial mais recente de cada item. As
+Server Actions retornam um DTO sanitizado com as contagens e ofertas pendentes;
+o Client Island atualiza o estado local, preservando tab, formulário e scroll,
+sem `revalidatePath` ou `router.refresh`.
+
+O redirect `/go/[slug]` continua consultando exclusivamente
+`AffiliateLink.destination`; URL do produto, candidato do Datafeed e `shope.ee`
+não são fallbacks de tracking.
+
+## Smoke test controlado da Open API
+
+O comando `shopee:open-api:smoke` serve exclusivamente para diagnosticar as
+credenciais com uma única chamada `GenerateShortLink`. Ele reutiliza o cliente
+produtivo, mas não importa Datafeed, não acessa PostgreSQL, Prisma ou Redis e não
+cria nenhum registro. Sem `--confirm-live-call`, encerra com
+`LIVE_CALL_NOT_CONFIRMED` antes de qualquer requisição.
+
+Configure `SHOPEE_AFFILIATE_ENABLED=true`, modo `OPEN_API` ou `HYBRID`,
+`SHOPEE_OPEN_API_APP_ID` e `SHOPEE_OPEN_API_SECRET` somente no ambiente do
+processo. Use valores reais apenas em uma sessão local controlada:
+
+```powershell
+npm run shopee:open-api:smoke -- --origin-url "https://shopee.com.br/produto-ficticio-i.123.456" --item-id "456" --sub-id "diagnostico" --confirm-live-call
+```
+
+A URL e o item devem ser fornecidos pelo operador e corresponder exatamente. Até
+cinco `--sub-id` podem ser repetidos. O resultado contém somente estado, número
+de tentativas e, no sucesso, o shortlink oficial necessário à conferência. App
+ID, Secret, assinatura, Authorization, payload e resposta bruta nunca são
+impressos. Não cole credenciais na linha de comando, documentação, logs,
+commits ou mensagens. Após o diagnóstico, remova as variáveis sensíveis da
+sessão do terminal.

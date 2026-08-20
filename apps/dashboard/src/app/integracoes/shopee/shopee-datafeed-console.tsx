@@ -1,7 +1,13 @@
 "use client";
 
 import React, { useMemo, useRef, useState, useTransition } from "react";
-import { FileSearch, FlaskConical, ShieldAlert } from "lucide-react";
+import {
+  FileSearch,
+  FlaskConical,
+  Link2,
+  RefreshCw,
+  ShieldAlert,
+} from "lucide-react";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -10,13 +16,17 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { StatusBadge } from "@/components/ui/status-badge";
 import {
+  applyManualShopeeAffiliateLinkAction,
+  confirmShopeeDatafeedImportAction,
   inspectShopeeDatafeedAction,
   previewShopeeDatafeedAction,
+  retryShopeeAffiliateLinkAction,
 } from "@/lib/shopee-datafeed-actions";
 import type {
   ShopeeDashboardConfigurationDto,
   ShopeeDatafeedActionInput,
   ShopeeInspectActionResult,
+  ShopeeImportActionResult,
   ShopeePreviewActionResult,
 } from "./shopee-types";
 
@@ -62,6 +72,18 @@ export function ShopeeDatafeedConsole({
     useState<ShopeeInspectActionResult | null>(null);
   const [previewResult, setPreviewResult] =
     useState<ShopeePreviewActionResult | null>(null);
+  const [importResult, setImportResult] =
+    useState<ShopeeImportActionResult | null>(null);
+  const [linkResult, setLinkResult] = useState<{
+    ok: boolean;
+    message: string;
+    errorCode?: string;
+  } | null>(null);
+  const [manualLinks, setManualLinks] = useState<Record<string, string>>({});
+  const [pendingOffers, setPendingOffers] = useState(
+    configuration.pendingOffers,
+  );
+  const [offerCounts, setOfferCounts] = useState(configuration.offerCounts);
   const [isPending, startTransition] = useTransition();
   const activeOperation = useRef(false);
 
@@ -101,7 +123,7 @@ export function ShopeeDatafeedConsole({
     ],
   );
 
-  function execute(kind: "inspect" | "preview") {
+  function execute(kind: "inspect" | "preview" | "import") {
     if (activeOperation.current || input.files.length === 0) return;
     activeOperation.current = true;
     startTransition(async () => {
@@ -109,9 +131,48 @@ export function ShopeeDatafeedConsole({
         if (kind === "inspect") {
           setInspectResult(await inspectShopeeDatafeedAction(input));
           setTab("datafeeds");
-        } else {
+        } else if (kind === "preview") {
           setPreviewResult(await previewShopeeDatafeedAction(input));
           setTab("discovery");
+        } else {
+          const result = await confirmShopeeDatafeedImportAction(input);
+          setImportResult(result);
+          if (result.ok) {
+            setPendingOffers(result.offerState.pendingOffers);
+            setOfferCounts(result.offerState.offerCounts);
+          }
+          setTab("links");
+        }
+      } finally {
+        activeOperation.current = false;
+      }
+    });
+  }
+
+  function executeLink(kind: "retry" | "manual", offerId: string) {
+    if (activeOperation.current) return;
+    activeOperation.current = true;
+    startTransition(async () => {
+      try {
+        const result =
+          kind === "retry"
+            ? await retryShopeeAffiliateLinkAction(offerId)
+            : await applyManualShopeeAffiliateLinkAction({
+                offerId,
+                affiliateUrl: manualLinks[offerId] ?? "",
+              });
+        setLinkResult(
+          result.ok
+            ? { ok: true, message: result.message }
+            : {
+                ok: false,
+                message: result.message,
+                errorCode: result.errorCode,
+              },
+        );
+        if (result.ok) {
+          setPendingOffers(result.offerState.pendingOffers);
+          setOfferCounts(result.offerState.offerCounts);
         }
       } finally {
         activeOperation.current = false;
@@ -221,7 +282,8 @@ export function ShopeeDatafeedConsole({
               loading={isPending}
               loadingLabel="Inspecionando..."
               disabled={
-                input.files.length === 0 || configuration.mode !== "DATAFEED"
+                input.files.length === 0 ||
+                !["DATAFEED", "HYBRID"].includes(configuration.mode)
               }
               onClick={() => execute("inspect")}
             >
@@ -292,7 +354,7 @@ export function ShopeeDatafeedConsole({
                   loadingLabel="Processando preview..."
                   disabled={
                     input.files.length === 0 ||
-                    configuration.mode !== "DATAFEED"
+                    !["DATAFEED", "HYBRID"].includes(configuration.mode)
                   }
                   onClick={() => execute("preview")}
                 >
@@ -351,7 +413,31 @@ export function ShopeeDatafeedConsole({
                   </CardContent>
                 </Card>
               ))}
+              <div className="md:col-span-2">
+                <Button
+                  type="button"
+                  loading={isPending}
+                  loadingLabel="Importando vencedores..."
+                  disabled={!configuration.operationalWritesEnabled}
+                  onClick={() => execute("import")}
+                >
+                  Confirmar importação dos vencedores
+                </Button>
+              </div>
             </div>
+          ) : null}
+          {importResult ? (
+            <Alert
+              live
+              tone={importResult.ok ? "success" : "danger"}
+              title={
+                importResult.ok ? "Importação concluída" : "Falha na importação"
+              }
+            >
+              {importResult.ok
+                ? `${importResult.data.metrics.readyToPublish} prontas; ${importResult.data.metrics.pendingAffiliateLink} aguardando link; nenhuma Publication criada.`
+                : `${importResult.message} (${importResult.errorCode})`}
+            </Alert>
           ) : null}
         </div>
       ) : null}
@@ -421,24 +507,91 @@ export function ShopeeDatafeedConsole({
       ) : null}
 
       {tab === "links" ? (
-        <Alert
-          tone={configuration.linksVerified ? "success" : "warning"}
-          title="Link fornecido pelo Datafeed"
-        >
-          <div className="flex flex-wrap items-center gap-2">
-            <StatusBadge
-              status={configuration.linksVerified ? "ACTIVE" : "WARNING"}
-              label={
-                configuration.linksVerified ? "VERIFICADO" : "NÃO VERIFICADO"
+        <div className="grid gap-4">
+          {importResult ? (
+            <Alert
+              live
+              tone={importResult.ok ? "success" : "danger"}
+              title={
+                importResult.ok ? "Importação concluída" : "Falha na importação"
               }
-            />
-            <span>
-              {configuration.linksVerified
-                ? "O gate foi habilitado explicitamente, mas a fase continua preview-only."
-                : "Atribuição ainda não verificada. O shortlink não é um AffiliateLink confirmado."}
-            </span>
-          </div>
-        </Alert>
+            >
+              {importResult.ok
+                ? `${importResult.data.metrics.readyToPublish} prontas; ${importResult.data.metrics.pendingAffiliateLink} aguardando link; nenhuma Publication criada.`
+                : `${importResult.message} (${importResult.errorCode})`}
+            </Alert>
+          ) : null}
+          <Alert
+            tone={configuration.openApiReady ? "success" : "warning"}
+            title="Geração de links"
+          >
+            Open API{" "}
+            {configuration.openApiConfigured
+              ? "configurada"
+              : "não configurada"}
+            . {offerCounts.ready} oferta(s) pronta(s) e {offerCounts.pending}{" "}
+            aguardando link.
+          </Alert>
+          {linkResult ? (
+            <Alert
+              live
+              tone={linkResult.ok ? "success" : "danger"}
+              title={linkResult.ok ? "Operação concluída" : "Operação recusada"}
+            >
+              {linkResult.message}
+              {linkResult.errorCode ? ` (${linkResult.errorCode})` : ""}
+            </Alert>
+          ) : null}
+          {pendingOffers.length === 0 ? (
+            <Alert tone="info" title="Nenhuma oferta pendente">
+              As ofertas importadas com link válido aparecerão como prontas para
+              publicação.
+            </Alert>
+          ) : (
+            pendingOffers.map((offer) => (
+              <Card key={offer.id}>
+                <CardContent className="grid gap-3 pt-5 sm:pt-6">
+                  <div>
+                    <h3 className="font-semibold">{offer.title}</h3>
+                    <p className="text-xs text-[var(--muted-foreground)]">
+                      Item {offer.externalProductId} · {offer.statusReason}
+                    </p>
+                  </div>
+                  <div className="grid gap-2 sm:grid-cols-[auto_minmax(16rem,1fr)_auto]">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      loading={isPending}
+                      disabled={!configuration.openApiReady}
+                      onClick={() => executeLink("retry", offer.id)}
+                    >
+                      <RefreshCw aria-hidden="true" size={16} /> Tentar Open API
+                    </Button>
+                    <Input
+                      aria-label={`Link manual para ${offer.title}`}
+                      value={manualLinks[offer.id] ?? ""}
+                      onChange={(event) =>
+                        setManualLinks((current) => ({
+                          ...current,
+                          [offer.id]: event.target.value,
+                        }))
+                      }
+                      placeholder="https://s.shopee.com.br/..."
+                    />
+                    <Button
+                      type="button"
+                      loading={isPending}
+                      disabled={!manualLinks[offer.id]?.trim()}
+                      onClick={() => executeLink("manual", offer.id)}
+                    >
+                      <Link2 aria-hidden="true" size={16} /> Aplicar link manual
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            ))
+          )}
+        </div>
       ) : null}
 
       {tab === "diagnostics" ? (
@@ -452,7 +605,10 @@ export function ShopeeDatafeedConsole({
           <CardContent className="grid gap-3 text-sm">
             <p>Parser streaming: csv-parse</p>
             <p>Schemas reconhecidos: OFFICIAL_BR e BRAZIL</p>
-            <p>Open API e REMOTE_URL: fail-closed</p>
+            <p>
+              Open API: {configuration.openApiReady ? "pronta" : "fail-closed"};
+              REMOTE_URL: fail-closed
+            </p>
             {inspectResult?.ok ? (
               <p>
                 Erros por código:{" "}

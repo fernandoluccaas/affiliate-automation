@@ -58,11 +58,51 @@ export function resolveShopeeAffiliateConfiguration(
     "SHOPEE_MAX_TRACKED_ITEMS_INVALID",
     issues,
   );
+  const openApiTimeoutMs = boundedInteger(
+    environment.SHOPEE_OPEN_API_TIMEOUT_MS,
+    10_000,
+    1_000,
+    30_000,
+    "SHOPEE_OPEN_API_TIMEOUT_INVALID",
+    issues,
+  );
+  const openApiRateLimitPerHour = boundedInteger(
+    environment.SHOPEE_OPEN_API_RATE_LIMIT_PER_HOUR,
+    1_000,
+    1,
+    8_000,
+    "SHOPEE_OPEN_API_RATE_LIMIT_INVALID",
+    issues,
+  );
+  const recentSelectionWindowDays = boundedInteger(
+    environment.SHOPEE_RECENT_SELECTION_WINDOW_DAYS,
+    7,
+    0,
+    90,
+    "SHOPEE_RECENT_SELECTION_WINDOW_INVALID",
+    issues,
+  );
+  const maxPerShopPerSession = boundedInteger(
+    environment.SHOPEE_MAX_PER_SHOP_PER_SESSION,
+    2,
+    1,
+    12,
+    "SHOPEE_MAX_PER_SHOP_INVALID",
+    issues,
+  );
   if (enabled && requestedMode === "OFF") {
     issues.push("SHOPEE_ENABLED_WITH_OFF_MODE");
   }
   const configurationValid = issues.length === 0;
   const effectiveMode = configurationValid ? mode : "OFF";
+  const openApiConfigured = Boolean(
+    environment.SHOPEE_OPEN_API_APP_ID?.trim() &&
+    environment.SHOPEE_OPEN_API_SECRET?.trim(),
+  );
+  const openApiMode =
+    effectiveMode === "OPEN_API" || effectiveMode === "HYBRID";
+  const openApiReady =
+    configurationValid && enabled && openApiMode && openApiConfigured;
   return {
     enabled: configurationValid && enabled && effectiveMode !== "OFF",
     requestedMode,
@@ -71,17 +111,32 @@ export function resolveShopeeAffiliateConfiguration(
       ? "INVALID_CONFIGURATION"
       : effectiveMode === "DATAFEED"
         ? "READY_FOR_DATAFEED"
-        : effectiveMode === "OPEN_API" || effectiveMode === "HYBRID"
-          ? "WAITING_FOR_OFFICIAL_ACCESS"
-          : "DISABLED",
+        : effectiveMode === "OPEN_API"
+          ? openApiConfigured
+            ? "READY_FOR_OPEN_API"
+            : "OPEN_API_NOT_CONFIGURED"
+          : effectiveMode === "HYBRID"
+            ? openApiConfigured
+              ? "READY_FOR_HYBRID"
+              : "OPEN_API_NOT_CONFIGURED"
+            : "DISABLED",
     configurationValid,
     linksVerified:
       effectiveMode === "DATAFEED" &&
       environment.SHOPEE_DATAFEED_LINKS_VERIFIED === "true",
-    externalRequestsEnabled: false,
-    operationalWritesEnabled: false,
+    openApiConfigured,
+    openApiReady,
+    externalRequestsEnabled: openApiReady,
+    operationalWritesEnabled:
+      configurationValid &&
+      enabled &&
+      (effectiveMode === "DATAFEED" || effectiveMode === "HYBRID"),
+    openApiTimeoutMs,
+    openApiRateLimitPerHour,
     maxFileBytes,
     maxTrackedItems,
+    recentSelectionWindowDays,
+    maxPerShopPerSession,
     issues,
   };
 }
