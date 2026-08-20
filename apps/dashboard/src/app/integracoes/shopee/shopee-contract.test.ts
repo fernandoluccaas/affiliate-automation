@@ -47,10 +47,10 @@ describe("Shopee dashboard architecture", () => {
     );
   });
 
-  it("exposes the remote discovery source as fail-closed without automatic calls", () => {
+  it("exposes the official remote discovery contract without automatic calls", () => {
     const source = `${app("page.tsx")}\n${app("shopee-datafeed-console.tsx")}`;
     expect(source).toContain("remoteDiscoveryContract");
-    expect(source).toContain("Contrato oficial ainda não comprovado");
+    expect(source).toContain("Contrato oficial disponível");
     expect(source).toContain("Consultar feeds oficiais");
     expect(source).not.toMatch(/useEffect\s*\(/);
   });

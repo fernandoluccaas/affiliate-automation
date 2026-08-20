@@ -155,12 +155,13 @@ function crossBorder(value: string | undefined) {
   return null;
 }
 
-export function normalizeShopeeDatafeedRow(input: {
+export function normalizeShopeeDatafeedRecord(input: {
   schema: ShopeeDatafeedSchema;
-  row: RawRow;
+  record: RawRow;
   linksVerified: boolean;
+  source?: ShopeeDatafeedProduct["source"];
 }): { ok: true; product: ShopeeDatafeedProduct } | { ok: false; code: string } {
-  const row = input.row;
+  const row = input.record;
   const itemId = row.itemid.trim();
   if (!itemId || !/^\d+$/.test(itemId))
     return { ok: false, code: "INVALID_ITEM_ID" };
@@ -261,10 +262,22 @@ export function normalizeShopeeDatafeedRow(input: {
       modelNames: list(official?.model_names),
       commissionAvailable: false,
       salesCountAvailable: false,
-      source: input.schema,
-      sources: [input.schema],
+      source: input.source ?? input.schema,
+      sources: [input.source ?? input.schema],
     },
   };
+}
+
+export function normalizeShopeeDatafeedRow(input: {
+  schema: ShopeeDatafeedSchema;
+  row: RawRow;
+  linksVerified: boolean;
+}) {
+  return normalizeShopeeDatafeedRecord({
+    schema: input.schema,
+    record: input.row,
+    linksVerified: input.linksVerified,
+  });
 }
 
 export function urlHost(value: string | null) {

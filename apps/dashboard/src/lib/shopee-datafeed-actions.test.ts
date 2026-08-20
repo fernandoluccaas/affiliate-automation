@@ -10,6 +10,9 @@ const configuration = vi.hoisted(() => vi.fn());
 const recentItems = vi.hoisted(() => vi.fn());
 const offerState = vi.hoisted(() => vi.fn());
 const bulkLinks = vi.hoisted(() => vi.fn());
+const listRemoteFeeds = vi.hoisted(() => vi.fn());
+const previewRemote = vi.hoisted(() => vi.fn());
+const runRemote = vi.hoisted(() => vi.fn());
 
 vi.mock("./session", () => ({ requireSession }));
 vi.mock("@affiliate/shopee-affiliate", async (importOriginal) => {
@@ -26,15 +29,21 @@ vi.mock("@affiliate/shopee-affiliate", async (importOriginal) => {
     loadRecentShopeeItemIds: recentItems,
     loadShopeeOperationalOfferState: offerState,
     generateShopeeAffiliateLinksBulk: bulkLinks,
+    listShopeeOfficialFeeds: listRemoteFeeds,
+    previewShopeeRemoteDiscovery: previewRemote,
+    runShopeeAutomatedDiscovery: runRemote,
   };
 });
 
 import {
   applyManualShopeeAffiliateLinkAction,
   confirmShopeeDatafeedImportAction,
+  confirmShopeeRemoteImportAction,
   generatePendingShopeeAffiliateLinksAction,
   inspectShopeeDatafeedAction,
+  listShopeeOfficialFeedsAction,
   previewShopeeDatafeedAction,
+  previewShopeeRemoteDiscoveryAction,
   retryShopeeAffiliateLinkAction,
 } from "./shopee-datafeed-actions";
 
@@ -73,12 +82,87 @@ describe("Shopee dashboard Server Actions", () => {
       mode: "DATAFEED",
       recentSelectionWindowDays: 7,
       maxPerShopPerSession: 2,
+      remoteDiscoveryReady: false,
     });
     recentItems.mockResolvedValue([]);
     offerState.mockResolvedValue({
       offerCounts: { pending: 0, ready: 1 },
       pendingOffers: [],
     });
+  });
+
+  it("keeps remote actions explicit, authenticated and mock-only", async () => {
+    const notConfirmed = await listShopeeOfficialFeedsAction({
+      confirmLiveCall: false,
+    });
+    expect(notConfirmed).toMatchObject({
+      ok: false,
+      errorCode: "SHOPEE_REMOTE_DISCOVERY_NOT_CONFIRMED",
+    });
+    expect(listRemoteFeeds).not.toHaveBeenCalled();
+
+    configuration.mockReturnValue({
+      mode: "HYBRID",
+      recentSelectionWindowDays: 7,
+      remoteDiscoveryReady: true,
+    });
+    listRemoteFeeds.mockResolvedValue({
+      status: "SUCCEEDED",
+      feeds: [],
+      externalRequests: 1,
+      writes: 0,
+      stateModified: false,
+    });
+    await expect(
+      listShopeeOfficialFeedsAction({ confirmLiveCall: true }),
+    ).resolves.toMatchObject({ ok: true });
+    expect(listRemoteFeeds).toHaveBeenCalledWith({
+      confirmLiveCall: true,
+      feedMode: "FULL",
+    });
+  });
+
+  it("previews and imports remote winners through shared services", async () => {
+    configuration.mockReturnValue({
+      mode: "HYBRID",
+      recentSelectionWindowDays: 7,
+      remoteDiscoveryReady: true,
+    });
+    const remoteInput = {
+      confirmLiveCall: true as const,
+      referenceIds: ["reference-safe"],
+      pageSize: 3,
+      maxPages: 1,
+      maxItems: 3,
+    };
+    previewRemote.mockResolvedValue({
+      status: "PREVIEW_COMPLETED",
+      complete: true,
+      selected: [],
+      pagesFetched: 1,
+    });
+    runRemote.mockResolvedValue({
+      status: "IMPORTED",
+      importResult: { metrics: { created: 1, updated: 0 } },
+    });
+    await expect(
+      previewShopeeRemoteDiscoveryAction(remoteInput),
+    ).resolves.toMatchObject({ ok: true });
+    expect(previewRemote).toHaveBeenCalledWith(
+      expect.objectContaining({
+        referenceIds: ["reference-safe"],
+        recentItemIds: [],
+      }),
+    );
+    await expect(
+      confirmShopeeRemoteImportAction({
+        ...remoteInput,
+        confirmImport: true,
+      }),
+    ).resolves.toMatchObject({ ok: true });
+    expect(runRemote).toHaveBeenCalledWith(
+      expect.objectContaining({ confirmImport: true, recentItemIds: [] }),
+    );
   });
 
   it("requires an authenticated authorized session", async () => {

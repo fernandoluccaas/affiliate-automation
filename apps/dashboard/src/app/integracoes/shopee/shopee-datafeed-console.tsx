@@ -20,7 +20,10 @@ import {
   confirmShopeeDatafeedImportAction,
   generatePendingShopeeAffiliateLinksAction,
   inspectShopeeDatafeedAction,
+  listShopeeOfficialFeedsAction,
   previewShopeeDatafeedAction,
+  previewShopeeRemoteDiscoveryAction,
+  confirmShopeeRemoteImportAction,
   retryShopeeAffiliateLinkAction,
 } from "@/lib/shopee-datafeed-actions";
 import type {
@@ -30,6 +33,8 @@ import type {
   ShopeeImportActionResult,
   ShopeeBulkLinkActionResult,
   ShopeePreviewActionResult,
+  ShopeeRemoteFeedsActionResult,
+  ShopeeRemotePreviewActionResult,
 } from "./shopee-types";
 
 type Tab =
@@ -83,6 +88,18 @@ export function ShopeeDatafeedConsole({
   } | null>(null);
   const [bulkResult, setBulkResult] =
     useState<ShopeeBulkLinkActionResult | null>(null);
+  const [remoteFeedsResult, setRemoteFeedsResult] =
+    useState<ShopeeRemoteFeedsActionResult | null>(null);
+  const [remotePreviewResult, setRemotePreviewResult] =
+    useState<ShopeeRemotePreviewActionResult | null>(null);
+  const [remoteImportResult, setRemoteImportResult] = useState<{
+    ok: boolean;
+    message: string;
+    errorCode?: string;
+  } | null>(null);
+  const [remoteReferenceIds, setRemoteReferenceIds] = useState<string[]>(
+    configuration.remoteDiscoveryReferenceIds,
+  );
   const [manualLinks, setManualLinks] = useState<Record<string, string>>({});
   const [pendingOffers, setPendingOffers] = useState(
     configuration.pendingOffers,
@@ -211,6 +228,68 @@ export function ShopeeDatafeedConsole({
     });
   }
 
+  function executeRemote(kind: "feeds" | "preview" | "import") {
+    if (activeOperation.current || !configuration.remoteDiscoveryReady) return;
+    if (kind !== "feeds" && remoteReferenceIds.length === 0) return;
+    const warning =
+      kind === "import"
+        ? "Consultar os feeds oficiais e importar somente os vencedores? Nenhuma Publication ou mensagem será criada."
+        : "Consultar agora a Shopee Affiliate Open API? A ação é somente leitura.";
+    if (!window.confirm(warning)) return;
+    activeOperation.current = true;
+    startTransition(async () => {
+      try {
+        if (kind === "feeds") {
+          const response = await listShopeeOfficialFeedsAction({
+            confirmLiveCall: true,
+          });
+          setRemoteFeedsResult(response);
+          if (response.ok) {
+            const allowed = new Set(configuration.remoteDiscoveryReferenceIds);
+            setRemoteReferenceIds(
+              response.data.feeds
+                .map((feed) => feed.referenceId)
+                .filter((referenceId) => allowed.has(referenceId)),
+            );
+          }
+          return;
+        }
+        const remoteInput = {
+          confirmLiveCall: true as const,
+          referenceIds: remoteReferenceIds,
+          pageSize: configuration.remoteDiscoveryPageSize,
+          maxPages: configuration.remoteDiscoveryMaxPages,
+          maxItems: configuration.remoteDiscoveryMaxItems,
+        };
+        if (kind === "preview") {
+          setRemotePreviewResult(
+            await previewShopeeRemoteDiscoveryAction(remoteInput),
+          );
+          return;
+        }
+        const response = await confirmShopeeRemoteImportAction({
+          ...remoteInput,
+          confirmImport: true,
+        });
+        setRemoteImportResult(
+          response.ok
+            ? { ok: true, message: response.message }
+            : {
+                ok: false,
+                message: response.message,
+                errorCode: response.errorCode,
+              },
+        );
+        if (response.ok) {
+          setPendingOffers(response.offerState.pendingOffers);
+          setOfferCounts(response.offerState.offerCounts);
+        }
+      } finally {
+        activeOperation.current = false;
+      }
+    });
+  }
+
   const latestError =
     inspectResult && !inspectResult.ok
       ? inspectResult
@@ -290,7 +369,7 @@ export function ShopeeDatafeedConsole({
                     Contrato
                   </span>
                   <p className="font-medium">
-                    {configuration.remoteDiscoveryContract}
+                    {configuration.remoteDiscoveryState}
                   </p>
                 </div>
                 <div>
@@ -312,21 +391,126 @@ export function ShopeeDatafeedConsole({
                 </div>
               </div>
               <Alert
-                tone="warning"
-                title="Contrato oficial ainda não comprovado"
+                tone={
+                  configuration.remoteDiscoveryReady ? "success" : "warning"
+                }
+                title={
+                  configuration.remoteDiscoveryReady
+                    ? "Contrato oficial disponível"
+                    : "Feed remoto desativado pela configuração"
+                }
               >
-                O cliente autenticado está preparado para receber o adaptador de
-                feed, mas nenhuma query será enviada até que operação, inputs,
-                paginação e resposta sejam confirmados no Explorer oficial.
+                listItemFeeds e getItemFeedData usam o transporte oficial
+                assinado. As consultas ocorrem somente por ação explícita; FULL
+                está disponível e DELTA permanece bloqueado.
               </Alert>
               <div className="flex flex-wrap gap-2">
-                <Button type="button" variant="outline" disabled>
+                <Button
+                  type="button"
+                  variant="outline"
+                  loading={isPending}
+                  disabled={!configuration.remoteDiscoveryReady}
+                  onClick={() => executeRemote("feeds")}
+                >
                   Consultar feeds oficiais
                 </Button>
-                <Button type="button" variant="outline" disabled>
+                <Button
+                  type="button"
+                  variant="outline"
+                  loading={isPending}
+                  disabled={
+                    !configuration.remoteDiscoveryReady ||
+                    remoteReferenceIds.length === 0
+                  }
+                  onClick={() => executeRemote("preview")}
+                >
                   Executar preview pela Open API
                 </Button>
               </div>
+              {remoteFeedsResult ? (
+                <Alert
+                  live
+                  tone={remoteFeedsResult.ok ? "success" : "danger"}
+                  title={
+                    remoteFeedsResult.ok
+                      ? "Feeds oficiais consultados"
+                      : "Falha ao consultar feeds"
+                  }
+                >
+                  {remoteFeedsResult.ok
+                    ? remoteFeedsResult.message
+                    : `${remoteFeedsResult.message} (${remoteFeedsResult.errorCode})`}
+                </Alert>
+              ) : null}
+              {remoteFeedsResult?.ok &&
+              remoteFeedsResult.data.status === "SUCCEEDED" ? (
+                <div className="grid gap-2">
+                  {remoteFeedsResult.data.feeds.map((feed) => (
+                    <Checkbox
+                      key={feed.datafeedId}
+                      label={feed.name}
+                      description={`${feed.referenceId} · ${feed.totalCount} itens · ${feed.date} · ${feed.feedMode}`}
+                      checked={remoteReferenceIds.includes(feed.referenceId)}
+                      onChange={(event) =>
+                        setRemoteReferenceIds((current) =>
+                          event.target.checked
+                            ? [...new Set([...current, feed.referenceId])]
+                            : current.filter(
+                                (referenceId) =>
+                                  referenceId !== feed.referenceId,
+                              ),
+                        )
+                      }
+                    />
+                  ))}
+                </div>
+              ) : null}
+              {remotePreviewResult ? (
+                <Alert
+                  live
+                  tone={
+                    remotePreviewResult.ok && remotePreviewResult.data.complete
+                      ? "success"
+                      : "warning"
+                  }
+                  title={
+                    remotePreviewResult.ok
+                      ? "Preview remoto concluído"
+                      : "Falha no preview remoto"
+                  }
+                >
+                  {remotePreviewResult.ok
+                    ? `${remotePreviewResult.data.itemsNormalized} normalizados, ${remotePreviewResult.data.itemsRejected} rejeitados, ${remotePreviewResult.data.duplicates} duplicados e ${remotePreviewResult.data.selected.length} selecionados; zero gravações.`
+                    : `${remotePreviewResult.message} (${remotePreviewResult.errorCode})`}
+                </Alert>
+              ) : null}
+              {remotePreviewResult?.ok && remotePreviewResult.data.complete ? (
+                <Button
+                  type="button"
+                  loading={isPending}
+                  loadingLabel="Importando vencedores remotos..."
+                  disabled={!configuration.operationalWritesEnabled}
+                  onClick={() => executeRemote("import")}
+                >
+                  Importar vencedores remotos
+                </Button>
+              ) : null}
+              {remoteImportResult ? (
+                <Alert
+                  live
+                  tone={remoteImportResult.ok ? "success" : "danger"}
+                  title={
+                    remoteImportResult.ok
+                      ? "Importação remota concluída"
+                      : "Falha na importação remota"
+                  }
+                >
+                  {remoteImportResult.message}
+                  {remoteImportResult.errorCode
+                    ? ` (${remoteImportResult.errorCode})`
+                    : ""}
+                </Alert>
+              ) : null}
             </CardContent>
           </Card>
           <Card>

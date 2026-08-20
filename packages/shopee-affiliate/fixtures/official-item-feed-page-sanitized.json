@@ -1,0 +1,14 @@
+{
+  "rows": [
+    {
+      "columns": "{\"description\":\"Fixture sanitizada\",\"discount_percentage\":\"20\",\"global_category1\":\"Home & Living\",\"global_category2\":\"Home Decor\",\"global_catid1\":\"100015\",\"global_catid2\":\"100087\",\"global_item_attributes\":\"{}\",\"image_link\":\"https://down-br.img.susercontent.com/file/fixture\",\"image_link_3\":\"https://down-br.img.susercontent.com/file/fixture-3\",\"item_rating\":\"4.86\",\"itemid\":\"3984825072\",\"price\":\"39.90\",\"product_link\":\"https://shopee.com.br/product/417683737/3984825072\",\"product_short link\":\"https://shopee.com.br/universal-link/product/417683737/3984825072?tracking=fixture\",\"sale_price\":\"31.90\",\"title\":\"Produto sanitizado\"}",
+      "updateType": null
+    }
+  ],
+  "pageInfo": {
+    "offset": 0,
+    "limit": 3,
+    "totalCount": 1,
+    "hasMore": false
+  }
+}

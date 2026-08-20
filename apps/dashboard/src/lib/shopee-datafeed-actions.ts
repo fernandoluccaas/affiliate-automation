@@ -12,6 +12,9 @@ import {
   previewShopeeDatafeeds,
   resolveShopeeAffiliateConfiguration,
   retryShopeeAffiliateLink,
+  listShopeeOfficialFeeds,
+  previewShopeeRemoteDiscovery,
+  runShopeeAutomatedDiscovery,
   type ShopeeCategoryRule,
   type ShopeeLogicalCategory,
 } from "@affiliate/shopee-affiliate";
@@ -19,6 +22,7 @@ import type {
   ShopeeDatafeedActionInput,
   ShopeeInspectActionResult,
   ShopeePreviewActionResult,
+  ShopeeRemoteActionInput,
 } from "@/app/integracoes/shopee/shopee-types";
 import { requireSession } from "./session";
 
@@ -100,6 +104,12 @@ function messageFor(code: string) {
       "A quantidade solicitada para geração de links é inválida.",
     SHOPEE_BULK_LINK_GLOBAL_FAILURE:
       "A geração foi interrompida por uma falha global da Open API.",
+    SHOPEE_REMOTE_DISCOVERY_NOT_READY:
+      "Ative OPEN_API_FEED e confirme a configuração da Open API.",
+    SHOPEE_REMOTE_DISCOVERY_NOT_CONFIRMED:
+      "Confirme explicitamente a consulta ao feed oficial.",
+    SHOPEE_REMOTE_IMPORT_NOT_CONFIRMED:
+      "Confirme explicitamente a importação remota.",
   };
   return (
     messages[code] ?? "Não foi possível processar o Datafeed com segurança."
@@ -211,6 +221,116 @@ const bulkLinkSchema = z.object({
   confirmGenerate: z.literal(true),
   maxItems: z.number().int().min(1).max(12),
 });
+
+const remoteInputSchema = z.object({
+  confirmLiveCall: z.literal(true),
+  referenceIds: z.array(z.string().trim().min(1).max(128)).min(1).max(20),
+  pageSize: z.number().int().min(1).max(500),
+  maxPages: z.number().int().min(1).max(500),
+  maxItems: z.number().int().min(1).max(500_000),
+});
+
+export async function listShopeeOfficialFeedsAction(input: {
+  confirmLiveCall: boolean;
+}) {
+  try {
+    await authorize();
+    if (input.confirmLiveCall !== true) {
+      throw new Error("SHOPEE_REMOTE_DISCOVERY_NOT_CONFIRMED");
+    }
+    if (!resolveShopeeAffiliateConfiguration().remoteDiscoveryReady) {
+      throw new Error("SHOPEE_REMOTE_DISCOVERY_NOT_READY");
+    }
+    const data = await listShopeeOfficialFeeds({
+      confirmLiveCall: true,
+      feedMode: "FULL",
+    });
+    if (data.status === "FAILED") throw new Error(data.errorCode);
+    const sanitized = {
+      ...data,
+      feeds: data.feeds.map((feed) => ({
+        referenceId: feed.referenceId,
+        datafeedId: feed.datafeedId,
+        name: feed.datafeedName,
+        totalCount: feed.totalCount,
+        date: feed.date,
+        feedMode: "FULL" as const,
+      })),
+    };
+    return {
+      ok: true as const,
+      data: sanitized,
+      message: `${sanitized.feeds.length} feed(s) FULL localizado(s).`,
+    };
+  } catch (error) {
+    const errorCode = safeError(error);
+    return { ok: false as const, errorCode, message: messageFor(errorCode) };
+  }
+}
+
+export async function previewShopeeRemoteDiscoveryAction(
+  input: ShopeeRemoteActionInput,
+) {
+  try {
+    await authorize();
+    const parsed = remoteInputSchema.parse(input);
+    const configuration = resolveShopeeAffiliateConfiguration();
+    if (!configuration.remoteDiscoveryReady) {
+      throw new Error("SHOPEE_REMOTE_DISCOVERY_NOT_READY");
+    }
+    const recentItemIds = await loadRecentShopeeItemIds({
+      windowDays: configuration.recentSelectionWindowDays,
+    });
+    const data = await previewShopeeRemoteDiscovery({
+      ...parsed,
+      recentItemIds,
+    });
+    if (data.status === "FAILED") throw new Error(data.errorCode ?? undefined);
+    return {
+      ok: true as const,
+      data,
+      message: `${data.selected.length} vencedor(es), ${data.pagesFetched} página(s), zero gravações.`,
+    };
+  } catch (error) {
+    const errorCode = safeError(error);
+    return { ok: false as const, errorCode, message: messageFor(errorCode) };
+  }
+}
+
+export async function confirmShopeeRemoteImportAction(
+  input: ShopeeRemoteActionInput & { confirmImport: boolean },
+) {
+  try {
+    await authorize();
+    if (input.confirmImport !== true) {
+      throw new Error("SHOPEE_REMOTE_IMPORT_NOT_CONFIRMED");
+    }
+    const parsed = remoteInputSchema.parse(input);
+    const configuration = resolveShopeeAffiliateConfiguration();
+    if (!configuration.remoteDiscoveryReady) {
+      throw new Error("SHOPEE_REMOTE_DISCOVERY_NOT_READY");
+    }
+    const recentItemIds = await loadRecentShopeeItemIds({
+      windowDays: configuration.recentSelectionWindowDays,
+    });
+    const data = await runShopeeAutomatedDiscovery({
+      ...parsed,
+      recentItemIds,
+      confirmImport: true,
+    });
+    if (data.status === "FAILED") throw new Error(data.errorCode ?? undefined);
+    const offerState = await loadShopeeOperationalOfferState();
+    return {
+      ok: true as const,
+      data,
+      offerState,
+      message: `${data.importResult?.metrics.created ?? 0} criada(s), ${data.importResult?.metrics.updated ?? 0} atualizada(s), zero Publications.`,
+    };
+  } catch (error) {
+    const errorCode = safeError(error);
+    return { ok: false as const, errorCode, message: messageFor(errorCode) };
+  }
+}
 
 export async function generatePendingShopeeAffiliateLinksAction(input: {
   confirmGenerate: boolean;

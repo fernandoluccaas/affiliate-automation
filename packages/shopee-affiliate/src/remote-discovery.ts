@@ -15,7 +15,17 @@ import {
   mergeShopeeDatafeedProducts,
   selectShopeeRoundRobin,
 } from "./discovery";
-import { ShopeeOpenApiError } from "./open-api";
+import {
+  SHOPEE_ITEM_FEED_MAX_PAGE_SIZE,
+  SHOPEE_OFFICIAL_FEED_CONTRACT,
+  ShopeeGetItemFeedDataResponseSchema,
+  ShopeeListItemFeedsResponseSchema,
+  parseShopeeOfficialFeedColumns,
+  type ShopeeFeedMode,
+  type ShopeeItemFeedPage,
+  type ShopeeOfficialFeed,
+} from "./official-feed-contract";
+import { ShopeeOpenApiClient, ShopeeOpenApiError } from "./open-api";
 import {
   generateShopeeAffiliateLinksBulk,
   persistShopeeOperationalWinners,
@@ -30,30 +40,23 @@ import type {
   ShopeeRankedCandidate,
   ShopeeRankingWeights,
 } from "./types";
-import { validateShopeeProductOrigin, validateShopeeUrl } from "./validation";
 
-export const SHOPEE_REMOTE_FEED_CONTRACT_STATUS =
-  "WAITING_FOR_OFFICIAL_CONTRACT" as const;
+export const SHOPEE_REMOTE_FEED_CONTRACT_STATUS = SHOPEE_OFFICIAL_FEED_CONTRACT;
+const CANDIDATE_POOL_LIMIT = 100;
 
-export type ShopeeRemoteFeed = {
-  feedId: string;
-  name: string;
-  updatedAt: string | null;
-  status: string | null;
-};
-
-export type ShopeeRemoteFeedPage = {
-  feedId: string;
-  items: unknown[];
-  nextCursor: string | null;
-};
+export type ShopeeRemoteFeed = ShopeeOfficialFeed;
+export type ShopeeRemoteFeedPage = ShopeeItemFeedPage;
 
 export interface ShopeeRemoteFeedClient {
   readonly contractAvailable: boolean;
-  listFeeds(input: { signal?: AbortSignal }): Promise<unknown>;
+  listFeeds(input: {
+    feedMode?: ShopeeFeedMode;
+    signal?: AbortSignal;
+  }): Promise<unknown>;
   getFeedPage(input: {
-    feedId: string;
-    cursor: string | null;
+    datafeedId: string;
+    offset: number;
+    limit: number;
     signal?: AbortSignal;
   }): Promise<unknown>;
 }
@@ -78,13 +81,21 @@ export type ShopeeRemoteFeedListResult =
 export type ShopeeRemoteDiscoveryResult = {
   status: "PREVIEW_COMPLETED" | "PARTIAL" | "FAILED";
   source: "OPEN_API_FEED";
+  complete: boolean;
   feed: ShopeeRemoteFeed | null;
+  feeds: ShopeeRemoteFeed[];
+  feedsDiscovered: number;
+  feedsSelected: number;
   feedsProcessed: number;
+  currentFeed: string | null;
+  feedTotalCount: number | null;
   pagesFetched: number;
   itemsReceived: number;
   itemsNormalized: number;
   itemsRejected: number;
   duplicates: number;
+  eligible: number;
+  candidatePoolSize: number;
   eligibleByCategory: Record<string, number>;
   selected: ShopeeRankedCandidate[];
   apiRequests: number;
@@ -116,16 +127,36 @@ export type ShopeeAutomatedDiscoveryResult = {
   errorCode: string | null;
 };
 
-export class UnavailableShopeeRemoteFeedClient implements ShopeeRemoteFeedClient {
-  readonly contractAvailable = false;
+export class OfficialShopeeRemoteFeedClient implements ShopeeRemoteFeedClient {
+  readonly contractAvailable = true;
 
-  async listFeeds(): Promise<never> {
-    throw new ShopeeOpenApiError("SHOPEE_OPEN_API_FEED_CONTRACT_UNAVAILABLE");
+  constructor(private readonly client: ShopeeOpenApiClient) {}
+
+  listFeeds(input: { feedMode?: ShopeeFeedMode }) {
+    return this.client.listItemFeeds(input.feedMode);
   }
 
-  async getFeedPage(): Promise<never> {
-    throw new ShopeeOpenApiError("SHOPEE_OPEN_API_FEED_CONTRACT_UNAVAILABLE");
+  getFeedPage(input: { datafeedId: string; offset: number; limit: number }) {
+    return this.client.getItemFeedData(input);
   }
+}
+
+export function createOfficialShopeeRemoteFeedClient(
+  environment: NodeJS.ProcessEnv = process.env,
+) {
+  const configuration = resolveShopeeAffiliateConfiguration(environment);
+  return new OfficialShopeeRemoteFeedClient(
+    new ShopeeOpenApiClient(
+      {
+        appId: environment.SHOPEE_OPEN_API_APP_ID ?? "",
+        secret: environment.SHOPEE_OPEN_API_SECRET ?? "",
+      },
+      {
+        timeoutMs: configuration.openApiTimeoutMs,
+        rateLimitPerHour: configuration.openApiRateLimitPerHour,
+      },
+    ),
+  );
 }
 
 function safeCode(error: unknown) {
@@ -136,221 +167,34 @@ function safeCode(error: unknown) {
     : "SHOPEE_REMOTE_DISCOVERY_FAILED";
 }
 
-function validateFeedId(value: unknown) {
+function validIdentifier(value: unknown) {
   return typeof value === "string" &&
     value.length > 0 &&
-    value.length <= 128 &&
+    value.length <= 256 &&
     /^[A-Za-z0-9_-]+$/.test(value)
     ? value
     : null;
 }
 
-function parseFeed(value: unknown): ShopeeRemoteFeed | null {
-  if (!value || typeof value !== "object") return null;
-  const record = value as Record<string, unknown>;
-  const feedId = validateFeedId(record.feedId);
-  if (!feedId || typeof record.name !== "string" || !record.name.trim()) {
-    return null;
-  }
-  if (
-    record.updatedAt !== null &&
-    record.updatedAt !== undefined &&
-    typeof record.updatedAt !== "string"
-  ) {
-    return null;
-  }
-  if (
-    record.status !== null &&
-    record.status !== undefined &&
-    typeof record.status !== "string"
-  ) {
-    return null;
-  }
-  return {
-    feedId,
-    name: record.name.trim().slice(0, 160),
-    updatedAt:
-      typeof record.updatedAt === "string"
-        ? record.updatedAt.slice(0, 64)
-        : null,
-    status:
-      typeof record.status === "string" ? record.status.slice(0, 64) : null,
-  };
-}
-
 function parseFeedList(value: unknown) {
-  if (!value || typeof value !== "object") {
+  const parsed = ShopeeListItemFeedsResponseSchema.safeParse(value);
+  if (!parsed.success) {
     throw new ShopeeOpenApiError("SHOPEE_OPEN_API_SCHEMA_MISMATCH");
   }
-  const feeds = (value as { feeds?: unknown }).feeds;
-  if (!Array.isArray(feeds)) {
-    throw new ShopeeOpenApiError("SHOPEE_OPEN_API_SCHEMA_MISMATCH");
-  }
-  const parsed = feeds.map(parseFeed);
-  if (parsed.some((feed) => feed === null)) {
-    throw new ShopeeOpenApiError("SHOPEE_OPEN_API_SCHEMA_MISMATCH");
-  }
-  return (parsed as ShopeeRemoteFeed[]).sort(
+  return parsed.data.feeds.sort(
     (left, right) =>
-      left.feedId.localeCompare(right.feedId) ||
-      left.name.localeCompare(right.name),
+      left.referenceId.localeCompare(right.referenceId) ||
+      right.date.localeCompare(left.date) ||
+      left.datafeedId.localeCompare(right.datafeedId),
   );
 }
 
-function parsePage(
-  value: unknown,
-  expectedFeedId: string,
-): ShopeeRemoteFeedPage {
-  if (!value || typeof value !== "object") {
+function parsePage(value: unknown) {
+  const parsed = ShopeeGetItemFeedDataResponseSchema.safeParse(value);
+  if (!parsed.success) {
     throw new ShopeeOpenApiError("SHOPEE_OPEN_API_SCHEMA_MISMATCH");
   }
-  const record = value as Record<string, unknown>;
-  if (record.feedId !== expectedFeedId || !Array.isArray(record.items)) {
-    throw new ShopeeOpenApiError("SHOPEE_OPEN_API_SCHEMA_MISMATCH");
-  }
-  if (record.nextCursor !== null && typeof record.nextCursor !== "string") {
-    throw new ShopeeOpenApiError("SHOPEE_OPEN_API_SCHEMA_MISMATCH");
-  }
-  return {
-    feedId: expectedFeedId,
-    items: record.items,
-    nextCursor: record.nextCursor as string | null,
-  };
-}
-
-function nullableString(value: unknown) {
-  return value === null
-    ? null
-    : typeof value === "string"
-      ? value.trim() || null
-      : undefined;
-}
-
-function nullableNumber(value: unknown, minimum: number, maximum: number) {
-  return value === null
-    ? null
-    : typeof value === "number" &&
-        Number.isFinite(value) &&
-        value >= minimum &&
-        value <= maximum
-      ? value
-      : undefined;
-}
-
-function nullableStringList(value: unknown) {
-  return value === null
-    ? null
-    : Array.isArray(value) && value.every((item) => typeof item === "string")
-      ? value.map((item) => item.trim()).filter(Boolean)
-      : undefined;
-}
-
-function parseNormalizedProduct(value: unknown): ShopeeDatafeedProduct {
-  if (!value || typeof value !== "object") {
-    throw new ShopeeOpenApiError("SHOPEE_OPEN_API_SCHEMA_MISMATCH");
-  }
-  const record = value as Partial<ShopeeDatafeedProduct>;
-  if (
-    typeof record.itemId !== "string" ||
-    !/^\d+$/.test(record.itemId) ||
-    typeof record.title !== "string" ||
-    !record.title.trim() ||
-    typeof record.salePrice !== "number" ||
-    !Number.isFinite(record.salePrice) ||
-    record.salePrice <= 0 ||
-    typeof record.category1 !== "string" ||
-    typeof record.imageUrl !== "string" ||
-    typeof record.sourceProductUrl !== "string"
-  ) {
-    throw new ShopeeOpenApiError("SHOPEE_OPEN_API_SCHEMA_MISMATCH");
-  }
-  const description = nullableString(record.description);
-  const originalPrice = nullableNumber(record.originalPrice, 0, 1_000_000_000);
-  const discountPercentage = nullableNumber(record.discountPercentage, 0, 100);
-  const itemRating = nullableNumber(record.itemRating, 0, 5);
-  const shopRating = nullableNumber(record.shopRating, 0, 5);
-  const likeCount = nullableNumber(
-    record.likeCount,
-    0,
-    Number.MAX_SAFE_INTEGER,
-  );
-  const condition = nullableString(record.condition);
-  const category1Id = nullableString(record.category1Id);
-  const category2 = nullableString(record.category2);
-  const category2Id = nullableString(record.category2Id);
-  const category3 = nullableString(record.category3);
-  const category3Id = nullableString(record.category3Id);
-  const shopName = nullableString(record.shopName);
-  const secondaryImageUrl = nullableString(record.secondaryImageUrl);
-  const modelIds = nullableStringList(record.modelIds);
-  const modelNames = nullableStringList(record.modelNames);
-  if (
-    [
-      description,
-      originalPrice,
-      discountPercentage,
-      itemRating,
-      shopRating,
-      likeCount,
-      condition,
-      category1Id,
-      category2,
-      category2Id,
-      category3,
-      category3Id,
-      shopName,
-      secondaryImageUrl,
-      modelIds,
-      modelNames,
-    ].some((item) => item === undefined) ||
-    (record.crossBorder !== null && typeof record.crossBorder !== "boolean") ||
-    (secondaryImageUrl !== null &&
-      !validateShopeeUrl(secondaryImageUrl as string, "IMAGE"))
-  ) {
-    throw new ShopeeOpenApiError("SHOPEE_OPEN_API_SCHEMA_MISMATCH");
-  }
-  const origin = validateShopeeProductOrigin(
-    record.sourceProductUrl,
-    record.itemId,
-  );
-  if (!origin.ok || !validateShopeeUrl(record.imageUrl, "IMAGE")) {
-    throw new ShopeeOpenApiError("SHOPEE_OPEN_API_SCHEMA_MISMATCH");
-  }
-  const safeOriginalPrice = originalPrice as number | null;
-  return {
-    itemId: record.itemId,
-    title: record.title.trim(),
-    description: description as string | null,
-    originalPrice:
-      safeOriginalPrice !== null && safeOriginalPrice >= record.salePrice
-        ? safeOriginalPrice
-        : null,
-    salePrice: record.salePrice,
-    discountPercentage: discountPercentage as number | null,
-    itemRating: itemRating as number | null,
-    shopRating: shopRating as number | null,
-    likeCount: likeCount as number | null,
-    condition: condition as string | null,
-    crossBorder: record.crossBorder,
-    category1: record.category1,
-    category1Id: category1Id as string | null,
-    category2: category2 as string | null,
-    category2Id: category2Id as string | null,
-    category3: category3 as string | null,
-    category3Id: category3Id as string | null,
-    shopName: shopName as string | null,
-    imageUrl: record.imageUrl,
-    secondaryImageUrl: secondaryImageUrl as string | null,
-    sourceProductUrl: origin.normalizedUrl,
-    modelIds: modelIds as string[] | null,
-    modelNames: modelNames as string[] | null,
-    commissionAvailable: false,
-    salesCountAvailable: false,
-    source: "OPEN_API_FEED",
-    sources: ["OPEN_API_FEED"],
-    candidateAffiliateUrl: null,
-    verifiedAffiliateUrl: null,
-  };
+  return parsed.data;
 }
 
 function preflight(environment: NodeJS.ProcessEnv) {
@@ -366,6 +210,7 @@ function preflight(environment: NodeJS.ProcessEnv) {
 
 export async function listShopeeOfficialFeeds(input: {
   confirmLiveCall: boolean;
+  feedMode?: ShopeeFeedMode;
   environment?: NodeJS.ProcessEnv;
   client?: ShopeeRemoteFeedClient;
   signal?: AbortSignal;
@@ -375,17 +220,25 @@ export async function listShopeeOfficialFeeds(input: {
     if (!input.confirmLiveCall) {
       throw new ShopeeOpenApiError("SHOPEE_REMOTE_DISCOVERY_NOT_CONFIRMED");
     }
-    preflight(input.environment ?? process.env);
-    const client = input.client ?? new UnavailableShopeeRemoteFeedClient();
+    if (input.feedMode === "DELTA") {
+      throw new ShopeeOpenApiError(
+        "SHOPEE_REMOTE_DISCOVERY_DELTA_NOT_SUPPORTED",
+      );
+    }
+    const environment = input.environment ?? process.env;
+    preflight(environment);
+    const client =
+      input.client ?? createOfficialShopeeRemoteFeedClient(environment);
     if (!client.contractAvailable) {
       throw new ShopeeOpenApiError("SHOPEE_OPEN_API_FEED_CONTRACT_UNAVAILABLE");
     }
     externalRequests += 1;
     const feeds = parseFeedList(
       await client.listFeeds({
+        feedMode: input.feedMode ?? "FULL",
         ...(input.signal ? { signal: input.signal } : {}),
       }),
-    );
+    ).filter((feed) => feed.feedMode === "FULL");
     return {
       status: "SUCCEEDED",
       feeds,
@@ -409,13 +262,21 @@ function emptyResult(startedAt: number): ShopeeRemoteDiscoveryResult {
   return {
     status: "FAILED",
     source: "OPEN_API_FEED",
+    complete: false,
     feed: null,
+    feeds: [],
+    feedsDiscovered: 0,
+    feedsSelected: 0,
     feedsProcessed: 0,
+    currentFeed: null,
+    feedTotalCount: null,
     pagesFetched: 0,
     itemsReceived: 0,
     itemsNormalized: 0,
     itemsRejected: 0,
     duplicates: 0,
+    eligible: 0,
+    candidatePoolSize: 0,
     eligibleByCategory: {},
     selected: [],
     apiRequests: 0,
@@ -428,8 +289,14 @@ function emptyResult(startedAt: number): ShopeeRemoteDiscoveryResult {
   };
 }
 
-export async function prepareShopeeRemoteDiscovery(input: {
-  feedId: string;
+type PrepareInput = {
+  feedId?: string;
+  feedIds?: readonly string[];
+  referenceIds?: readonly string[];
+  feedMode?: ShopeeFeedMode;
+  pageSize?: number;
+  maxPages?: number;
+  maxItems?: number;
   confirmLiveCall: boolean;
   environment?: NodeJS.ProcessEnv;
   client?: ShopeeRemoteFeedClient;
@@ -440,95 +307,141 @@ export async function prepareShopeeRemoteDiscovery(input: {
   recentItemIds?: readonly string[];
   maxTotal?: number;
   maxPerShop?: number;
-}): Promise<PreparedShopeeRemoteDiscovery> {
+};
+
+function uniqueIdentifiers(values: readonly string[]) {
+  const unique = [...new Set(values)];
+  if (unique.length > 20 || unique.some((value) => !validIdentifier(value))) {
+    throw new ShopeeOpenApiError("SHOPEE_REMOTE_FEED_ID_INVALID");
+  }
+  return unique;
+}
+
+function currentFeedsForReferences(
+  feeds: readonly ShopeeRemoteFeed[],
+  referenceIds: readonly string[],
+) {
+  return referenceIds.map((referenceId) => {
+    const current = feeds
+      .filter(
+        (feed) => feed.referenceId === referenceId && feed.feedMode === "FULL",
+      )
+      .sort(
+        (left, right) =>
+          right.date.localeCompare(left.date) ||
+          right.datafeedId.localeCompare(left.datafeedId),
+      )[0];
+    if (!current) {
+      throw new ShopeeOpenApiError("SHOPEE_REMOTE_REFERENCE_ID_NOT_FOUND");
+    }
+    return current;
+  });
+}
+
+function manualFeed(datafeedId: string): ShopeeRemoteFeed {
+  return {
+    datafeedId,
+    referenceId: datafeedId,
+    datafeedName: datafeedId,
+    description: "",
+    totalCount: 0,
+    date: "19700101",
+    feedMode: "FULL",
+  };
+}
+
+function validateLimits(input: {
+  pageSize: number;
+  maxPages: number;
+  maxItems: number;
+}) {
+  if (
+    !Number.isSafeInteger(input.pageSize) ||
+    input.pageSize < 1 ||
+    input.pageSize > SHOPEE_ITEM_FEED_MAX_PAGE_SIZE ||
+    !Number.isSafeInteger(input.maxPages) ||
+    input.maxPages < 1 ||
+    input.maxPages > 500 ||
+    !Number.isSafeInteger(input.maxItems) ||
+    input.maxItems < 1 ||
+    input.maxItems > 500_000
+  ) {
+    throw new ShopeeOpenApiError("SHOPEE_REMOTE_DISCOVERY_LIMIT_INVALID");
+  }
+}
+
+export async function prepareShopeeRemoteDiscovery(
+  input: PrepareInput,
+): Promise<PreparedShopeeRemoteDiscovery> {
   const startedAt = performance.now();
   const result = emptyResult(startedAt);
-  const products = new Map<string, ShopeeDatafeedProduct>();
+  const winnersByItem = new Map<string, ShopeeDatafeedProduct>();
   const conflicts = new Map<string, number>();
+  const seenItemIds = new Set<string>();
   try {
     if (!input.confirmLiveCall) {
       throw new ShopeeOpenApiError("SHOPEE_REMOTE_DISCOVERY_NOT_CONFIRMED");
     }
-    const configuration = preflight(input.environment ?? process.env);
-    const feedId = validateFeedId(input.feedId);
-    if (!feedId) throw new ShopeeOpenApiError("SHOPEE_REMOTE_FEED_ID_INVALID");
-    if (
-      configuration.remoteDiscoveryFeedIds.length > 0 &&
-      !configuration.remoteDiscoveryFeedIds.includes(feedId)
-    ) {
-      throw new ShopeeOpenApiError("SHOPEE_REMOTE_FEED_NOT_ENABLED");
+    if (input.feedMode === "DELTA") {
+      throw new ShopeeOpenApiError(
+        "SHOPEE_REMOTE_DISCOVERY_DELTA_NOT_SUPPORTED",
+      );
     }
-    const client = input.client ?? new UnavailableShopeeRemoteFeedClient();
+    const environment = input.environment ?? process.env;
+    const configuration = preflight(environment);
+    const client =
+      input.client ?? createOfficialShopeeRemoteFeedClient(environment);
     if (!client.contractAvailable) {
       throw new ShopeeOpenApiError("SHOPEE_OPEN_API_FEED_CONTRACT_UNAVAILABLE");
     }
-    let cursor: string | null = null;
-    const cursors = new Set<string>();
-    let reachedLimit = false;
-    let paginationError: string | null = null;
-    do {
-      if (result.pagesFetched >= configuration.remoteDiscoveryMaxPages) {
-        reachedLimit = true;
-        break;
+    const pageSize = input.pageSize ?? configuration.remoteDiscoveryPageSize;
+    const maxPages = input.maxPages ?? configuration.remoteDiscoveryMaxPages;
+    const maxItems = input.maxItems ?? configuration.remoteDiscoveryMaxItems;
+    validateLimits({ pageSize, maxPages, maxItems });
+
+    const explicitFeedIds = uniqueIdentifiers([
+      ...(input.feedId ? [input.feedId] : []),
+      ...(input.feedIds ?? []),
+    ]);
+    const explicitReferences = uniqueIdentifiers(input.referenceIds ?? []);
+    if (explicitFeedIds.length > 0 && explicitReferences.length > 0) {
+      throw new ShopeeOpenApiError("SHOPEE_REMOTE_FEED_SELECTION_AMBIGUOUS");
+    }
+    const references =
+      explicitReferences.length > 0
+        ? explicitReferences
+        : explicitFeedIds.length === 0
+          ? configuration.remoteDiscoveryReferenceIds
+          : [];
+    let feeds: ShopeeRemoteFeed[];
+    if (references.length > 0) {
+      result.apiRequests += 1;
+      const discovered = parseFeedList(
+        await client.listFeeds({
+          feedMode: "FULL",
+          ...(input.signal ? { signal: input.signal } : {}),
+        }),
+      );
+      result.feedsDiscovered = discovered.length;
+      feeds = currentFeedsForReferences(discovered, references);
+    } else {
+      const legacyIds = configuration.remoteDiscoveryFeedIds;
+      const selectedIds =
+        explicitFeedIds.length > 0 ? explicitFeedIds : legacyIds;
+      if (selectedIds.length === 0) {
+        throw new ShopeeOpenApiError("SHOPEE_REMOTE_FEED_SELECTION_REQUIRED");
       }
-      let rawPage: unknown;
-      for (let attempt = 1; attempt <= 2; attempt += 1) {
-        result.apiRequests += 1;
-        try {
-          rawPage = await client.getFeedPage({
-            feedId,
-            cursor,
-            ...(input.signal ? { signal: input.signal } : {}),
-          });
-          break;
-        } catch (error) {
-          const retryable =
-            error instanceof ShopeeOpenApiError &&
-            error.retryable &&
-            ![
-              "SHOPEE_OPEN_API_RATE_LIMITED",
-              "SHOPEE_OPEN_API_LOCAL_RATE_LIMITED",
-            ].includes(error.code);
-          if (retryable && attempt === 1) continue;
-          if (result.pagesFetched > 0) {
-            paginationError = safeCode(error);
-            break;
-          }
-          throw error;
-        }
+      if (
+        legacyIds.length > 0 &&
+        explicitFeedIds.some((id) => !legacyIds.includes(id))
+      ) {
+        throw new ShopeeOpenApiError("SHOPEE_REMOTE_FEED_NOT_ENABLED");
       }
-      if (paginationError) break;
-      const page = parsePage(rawPage, feedId);
-      result.pagesFetched += 1;
-      result.feedsProcessed = 1;
-      result.itemsReceived += page.items.length;
-      for (const raw of page.items) {
-        if (products.size >= configuration.remoteDiscoveryMaxItems) {
-          reachedLimit = true;
-          break;
-        }
-        const product = parseNormalizedProduct(raw);
-        result.itemsNormalized += 1;
-        const previous = products.get(product.itemId);
-        if (previous) {
-          result.duplicates += 1;
-          products.set(
-            product.itemId,
-            mergeShopeeDatafeedProducts(previous, product, conflicts),
-          );
-        } else {
-          products.set(product.itemId, product);
-        }
-      }
-      if (reachedLimit) break;
-      cursor = page.nextCursor;
-      if (cursor) {
-        if (cursors.has(cursor)) {
-          throw new ShopeeOpenApiError("SHOPEE_REMOTE_DISCOVERY_CURSOR_LOOP");
-        }
-        cursors.add(cursor);
-      }
-    } while (cursor);
+      feeds = selectedIds.map(manualFeed);
+    }
+    result.feeds = feeds;
+    result.feed = feeds[0] ?? null;
+    result.feedsSelected = feeds.length;
 
     const categories = input.categories ?? [...SHOPEE_CATEGORY_CATALOG];
     const filters = { ...DEFAULT_SHOPEE_FILTERS, ...input.filters };
@@ -538,29 +451,156 @@ export async function prepareShopeeRemoteDiscovery(input: {
       categories.filter((item) => item.enabled).map((item) => [item.id, []]),
     );
     const eligible = new Map<string, number>();
-    for (const product of products.values()) {
-      const category = matchShopeeCategory(product, categories);
-      if (!category || recent.has(product.itemId)) {
-        result.itemsRejected += 1;
-        continue;
+    let paginationError: string | null = null;
+    let reachedLimit = false;
+
+    const consider = (product: ShopeeDatafeedProduct) => {
+      const duplicate = seenItemIds.has(product.itemId);
+      if (duplicate) result.duplicates += 1;
+      else seenItemIds.add(product.itemId);
+      const previous = winnersByItem.get(product.itemId);
+      if (duplicate && !previous) return;
+      const candidateProduct = previous
+        ? mergeShopeeDatafeedProducts(previous, product, conflicts)
+        : product;
+      const category = matchShopeeCategory(candidateProduct, categories);
+      if (!category || recent.has(candidateProduct.itemId)) {
+        if (!duplicate) result.itemsRejected += 1;
+        return;
       }
-      if (filterShopeeCandidate(product, filters)) {
-        result.itemsRejected += 1;
-        continue;
+      if (filterShopeeCandidate(candidateProduct, filters)) {
+        if (!duplicate) result.itemsRejected += 1;
+        return;
       }
-      eligible.set(category.id, (eligible.get(category.id) ?? 0) + 1);
+      if (!duplicate) {
+        eligible.set(category.id, (eligible.get(category.id) ?? 0) + 1);
+      }
+      for (const existingPool of pools.values()) {
+        const existingIndex = existingPool.findIndex(
+          (item) => item.itemId === product.itemId,
+        );
+        if (existingIndex >= 0) existingPool.splice(existingIndex, 1);
+      }
       const pool = pools.get(category.id) ?? [];
       pool.push(
         createShopeeRankedCandidate({
-          product,
+          product: candidateProduct,
           category: category.id,
           weights,
         }),
       );
       pool.sort(compareShopeeRankedCandidates);
-      pool.splice(Math.min(100, Math.max(category.maxPerCategory, 20)));
+      const removed = pool.splice(
+        Math.min(CANDIDATE_POOL_LIMIT, Math.max(category.maxPerCategory, 20)),
+      );
+      for (const candidate of removed) {
+        winnersByItem.delete(candidate.itemId);
+      }
       pools.set(category.id, pool);
+      if (pool.some((item) => item.itemId === candidateProduct.itemId)) {
+        winnersByItem.set(candidateProduct.itemId, candidateProduct);
+      } else {
+        winnersByItem.delete(candidateProduct.itemId);
+      }
+    };
+
+    for (const feed of feeds) {
+      result.currentFeed = feed.referenceId;
+      let offset = 0;
+      let expectedTotal: number | null = null;
+      const offsets = new Set<number>();
+      while (true) {
+        if (
+          result.pagesFetched >= maxPages ||
+          result.itemsReceived >= maxItems
+        ) {
+          reachedLimit = true;
+          break;
+        }
+        if (offsets.has(offset)) {
+          paginationError = "SHOPEE_REMOTE_DISCOVERY_OFFSET_LOOP";
+          break;
+        }
+        offsets.add(offset);
+        let rawPage: unknown;
+        for (let attempt = 1; attempt <= 2; attempt += 1) {
+          result.apiRequests += 1;
+          try {
+            rawPage = await client.getFeedPage({
+              datafeedId: feed.datafeedId,
+              offset,
+              limit: pageSize,
+              ...(input.signal ? { signal: input.signal } : {}),
+            });
+            break;
+          } catch (error) {
+            const retryable =
+              error instanceof ShopeeOpenApiError &&
+              error.retryable &&
+              ![
+                "SHOPEE_OPEN_API_RATE_LIMITED",
+                "SHOPEE_OPEN_API_LOCAL_RATE_LIMITED",
+              ].includes(error.code);
+            if (retryable && attempt === 1) continue;
+            paginationError = safeCode(error);
+            break;
+          }
+        }
+        if (paginationError) break;
+        const page = parsePage(rawPage);
+        if (
+          page.pageInfo.offset !== offset ||
+          page.pageInfo.limit > pageSize ||
+          (expectedTotal !== null &&
+            expectedTotal !== page.pageInfo.totalCount) ||
+          offset + page.rows.length > page.pageInfo.totalCount
+        ) {
+          paginationError = "SHOPEE_REMOTE_DISCOVERY_PAGINATION_INCONSISTENT";
+          break;
+        }
+        expectedTotal = page.pageInfo.totalCount;
+        result.feedTotalCount = expectedTotal;
+        result.pagesFetched += 1;
+        if (page.rows.some((row) => row.updateType !== null)) {
+          paginationError = "SHOPEE_REMOTE_DISCOVERY_DELTA_NOT_SUPPORTED";
+          break;
+        }
+        const remainingItems = maxItems - result.itemsReceived;
+        const rowsToProcess = page.rows.slice(0, remainingItems);
+        result.itemsReceived += rowsToProcess.length;
+        if (rowsToProcess.length < page.rows.length) reachedLimit = true;
+        for (const row of rowsToProcess) {
+          const normalized = parseShopeeOfficialFeedColumns(row.columns);
+          if (!normalized.ok) {
+            result.itemsRejected += 1;
+            continue;
+          }
+          result.itemsNormalized += 1;
+          consider(normalized.product);
+        }
+        if (reachedLimit) break;
+        if (!page.pageInfo.hasMore) {
+          if (offset + page.rows.length < page.pageInfo.totalCount) {
+            paginationError =
+              "SHOPEE_REMOTE_DISCOVERY_TOTAL_COUNT_INCONSISTENT";
+          }
+          break;
+        }
+        const nextOffset = page.pageInfo.offset + page.pageInfo.limit;
+        if (
+          nextOffset <= offset ||
+          page.rows.length === 0 ||
+          nextOffset >= Number.MAX_SAFE_INTEGER
+        ) {
+          paginationError = "SHOPEE_REMOTE_DISCOVERY_OFFSET_NO_PROGRESS";
+          break;
+        }
+        offset = nextOffset;
+      }
+      result.feedsProcessed += 1;
+      if (paginationError || reachedLimit) break;
     }
+
     const selection = selectShopeeRoundRobin({
       pools,
       categories,
@@ -571,15 +611,22 @@ export async function prepareShopeeRemoteDiscovery(input: {
       backfill: DEFAULT_SHOPEE_SELECTION.backfill,
       maxPerShop: input.maxPerShop ?? configuration.maxPerShopPerSession,
     });
-    result.feed = { feedId, name: feedId, updatedAt: null, status: null };
     result.eligibleByCategory = Object.fromEntries(
       [...eligible.entries()].sort(([left], [right]) =>
         left.localeCompare(right),
       ),
     );
+    result.eligible = [...eligible.values()].reduce(
+      (total, count) => total + count,
+      0,
+    );
+    result.candidatePoolSize = [...pools.values()].reduce(
+      (total, pool) => total + pool.length,
+      0,
+    );
     result.selected = selection.selected;
-    result.status =
-      reachedLimit || paginationError ? "PARTIAL" : "PREVIEW_COMPLETED";
+    result.complete = !reachedLimit && !paginationError;
+    result.status = result.complete ? "PREVIEW_COMPLETED" : "PARTIAL";
     result.errorCode =
       paginationError ??
       (reachedLimit ? "SHOPEE_REMOTE_DISCOVERY_LIMIT_REACHED" : null);
@@ -587,7 +634,7 @@ export async function prepareShopeeRemoteDiscovery(input: {
     return {
       result,
       winners: selection.selected.flatMap((candidate) => {
-        const product = products.get(candidate.itemId);
+        const product = winnersByItem.get(candidate.itemId);
         return product ? [{ candidate, product }] : [];
       }),
     };
@@ -599,9 +646,7 @@ export async function prepareShopeeRemoteDiscovery(input: {
   }
 }
 
-export async function previewShopeeRemoteDiscovery(
-  input: Parameters<typeof prepareShopeeRemoteDiscovery>[0],
-) {
+export async function previewShopeeRemoteDiscovery(input: PrepareInput) {
   return (await prepareShopeeRemoteDiscovery(input)).result;
 }
 
@@ -611,24 +656,18 @@ type AcquireDiscoveryLock = (
   options: { env: NodeJS.ProcessEnv; requireRedis: true },
 ) => Promise<LockHandle>;
 
-export async function runShopeeAutomatedDiscovery(input: {
-  feedId: string;
-  confirmLiveCall: boolean;
-  confirmImport: boolean;
-  environment?: NodeJS.ProcessEnv;
-  client?: ShopeeRemoteFeedClient;
-  signal?: AbortSignal;
-  categories?: ShopeeCategoryRule[];
-  filters?: Partial<ShopeeDiscoveryFilters>;
-  weights?: Partial<ShopeeRankingWeights>;
-  recentItemIds?: readonly string[];
-  persistence?: ShopeeOperationalPersistence;
-  bulkLinker?: typeof generateShopeeAffiliateLinksBulk;
-  acquireDiscoveryLock?: AcquireDiscoveryLock;
-}): Promise<ShopeeAutomatedDiscoveryResult> {
+export async function runShopeeAutomatedDiscovery(
+  input: PrepareInput & {
+    confirmImport: boolean;
+    persistence?: ShopeeOperationalPersistence;
+    bulkLinker?: typeof generateShopeeAffiliateLinksBulk;
+    acquireDiscoveryLock?: AcquireDiscoveryLock;
+  },
+): Promise<ShopeeAutomatedDiscoveryResult> {
   const environment = input.environment ?? process.env;
   if (!input.confirmLiveCall) {
-    const preview = await previewShopeeRemoteDiscovery(input);
+    const preview = emptyResult(performance.now());
+    preview.errorCode = "SHOPEE_REMOTE_DISCOVERY_NOT_CONFIRMED";
     return {
       status: "FAILED",
       preview,
@@ -638,7 +677,7 @@ export async function runShopeeAutomatedDiscovery(input: {
       publicationsCreated: 0,
       messagesSent: 0,
       stateModified: false,
-      errorCode: "SHOPEE_REMOTE_DISCOVERY_NOT_CONFIRMED",
+      errorCode: preview.errorCode,
     };
   }
   let lock: LockHandle | null = null;
@@ -670,7 +709,7 @@ export async function runShopeeAutomatedDiscovery(input: {
       }
     }
     const prepared = await prepareShopeeRemoteDiscovery(input);
-    if (prepared.result.status !== "PREVIEW_COMPLETED") {
+    if (!prepared.result.complete) {
       return {
         status: prepared.result.status === "PARTIAL" ? "PARTIAL" : "FAILED",
         preview: prepared.result,
@@ -700,7 +739,7 @@ export async function runShopeeAutomatedDiscovery(input: {
       .update(
         JSON.stringify({
           source: "OPEN_API_FEED",
-          feedId: input.feedId,
+          feeds: prepared.result.feeds.map((feed) => feed.datafeedId).sort(),
           items: prepared.winners
             .map(({ candidate, product }) => ({
               itemId: product.itemId,
@@ -717,11 +756,14 @@ export async function runShopeeAutomatedDiscovery(input: {
         }),
       )
       .digest("hex");
+    const sourceIds = prepared.result.feeds
+      .map((feed) => feed.referenceId)
+      .sort();
     const importResult = await persistShopeeOperationalWinners({
       winners: prepared.winners,
       selected: prepared.result.selected,
       checksum,
-      source: `OPEN_API_FEED:${input.feedId}`,
+      source: `OPEN_API_FEED:${sourceIds.join("+")}`,
       confirmImport: true,
       environment,
       subIds: ["sourceopenapi", "autolink"],

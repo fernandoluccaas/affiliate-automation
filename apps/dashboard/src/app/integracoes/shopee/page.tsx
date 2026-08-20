@@ -51,8 +51,8 @@ export default async function ShopeeIntegrationPage() {
             value={configuration.discoverySource}
             detail={
               configuration.remoteDiscoveryReady
-                ? "Open API Feed pronta"
-                : "Arquivo local preservado; feed remoto fail-closed"
+                ? "Open API Feed oficial pronta"
+                : "Arquivo local preservado; feed remoto desativado"
             }
             icon={FileSearch}
             tone={configuration.remoteDiscoveryReady ? "success" : "default"}
