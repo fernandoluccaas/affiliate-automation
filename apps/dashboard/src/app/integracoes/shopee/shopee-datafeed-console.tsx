@@ -18,6 +18,7 @@ import { StatusBadge } from "@/components/ui/status-badge";
 import {
   applyManualShopeeAffiliateLinkAction,
   confirmShopeeDatafeedImportAction,
+  generatePendingShopeeAffiliateLinksAction,
   inspectShopeeDatafeedAction,
   previewShopeeDatafeedAction,
   retryShopeeAffiliateLinkAction,
@@ -27,6 +28,7 @@ import type {
   ShopeeDatafeedActionInput,
   ShopeeInspectActionResult,
   ShopeeImportActionResult,
+  ShopeeBulkLinkActionResult,
   ShopeePreviewActionResult,
 } from "./shopee-types";
 
@@ -79,6 +81,8 @@ export function ShopeeDatafeedConsole({
     message: string;
     errorCode?: string;
   } | null>(null);
+  const [bulkResult, setBulkResult] =
+    useState<ShopeeBulkLinkActionResult | null>(null);
   const [manualLinks, setManualLinks] = useState<Record<string, string>>({});
   const [pendingOffers, setPendingOffers] = useState(
     configuration.pendingOffers,
@@ -170,6 +174,33 @@ export function ShopeeDatafeedConsole({
                 errorCode: result.errorCode,
               },
         );
+        if (result.ok) {
+          setPendingOffers(result.offerState.pendingOffers);
+          setOfferCounts(result.offerState.offerCounts);
+        }
+      } finally {
+        activeOperation.current = false;
+      }
+    });
+  }
+
+  function executeBulk() {
+    if (activeOperation.current || offerCounts.pending === 0) return;
+    const confirmed = window.confirm(
+      `Gerar links afiliados para ${Math.min(offerCounts.pending, configuration.autoLinkMaxPerRun)} ofertas?\n\nA Shopee Open API será chamada. Os links válidos serão aplicados às Offers. Nenhuma Publication será criada e nenhuma mensagem será enviada.`,
+    );
+    if (!confirmed) return;
+    activeOperation.current = true;
+    startTransition(async () => {
+      try {
+        const result = await generatePendingShopeeAffiliateLinksAction({
+          confirmGenerate: true,
+          maxItems: Math.min(
+            offerCounts.pending,
+            configuration.autoLinkMaxPerRun,
+          ),
+        });
+        setBulkResult(result);
         if (result.ok) {
           setPendingOffers(result.offerState.pendingOffers);
           setOfferCounts(result.offerState.offerCounts);
@@ -532,6 +563,79 @@ export function ShopeeDatafeedConsole({
             . {offerCounts.ready} oferta(s) pronta(s) e {offerCounts.pending}{" "}
             aguardando link.
           </Alert>
+          {offerCounts.pending > 0 ? (
+            <Card>
+              <CardContent className="grid gap-3 pt-5 sm:pt-6">
+                <div>
+                  <h3 className="font-semibold">
+                    {offerCounts.pending} aguardando link
+                  </h3>
+                  <p className="text-sm text-[var(--muted-foreground)]">
+                    A execução é sequencial, limitada e não cria Publications.
+                  </p>
+                </div>
+                <div>
+                  <Button
+                    type="button"
+                    loading={isPending}
+                    loadingLabel="Gerando links..."
+                    disabled={!configuration.openApiReady}
+                    onClick={executeBulk}
+                  >
+                    <Link2 aria-hidden="true" size={16} /> Gerar links das{" "}
+                    {Math.min(
+                      offerCounts.pending,
+                      configuration.autoLinkMaxPerRun,
+                    )}{" "}
+                    pendentes
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          ) : null}
+          {bulkResult ? (
+            <Alert
+              live
+              tone={
+                bulkResult.ok && bulkResult.data.status === "SUCCEEDED"
+                  ? "success"
+                  : bulkResult.ok &&
+                      bulkResult.data.status === "SUCCEEDED_WITH_ERRORS"
+                    ? "warning"
+                    : "danger"
+              }
+              title={
+                bulkResult.ok && bulkResult.data.status === "SUCCEEDED"
+                  ? "Geração concluída"
+                  : bulkResult.ok &&
+                      bulkResult.data.status === "SUCCEEDED_WITH_ERRORS"
+                    ? "Geração concluída com pendências"
+                    : bulkResult.ok
+                      ? "Geração interrompida"
+                      : "Geração recusada"
+              }
+            >
+              <p>{bulkResult.message}</p>
+              {bulkResult.ok ? (
+                <>
+                  <p>
+                    {bulkResult.data.linked} links gerados;{" "}
+                    {bulkResult.data.remainingPending} ofertas pendentes; 0
+                    publicações.
+                  </p>
+                  {bulkResult.data.items
+                    .filter((item) => item.errorCode)
+                    .map((item) => (
+                      <p key={item.offerId} className="text-xs">
+                        Item {item.itemId ?? "não localizado"}: {item.errorCode}
+                      </p>
+                    ))}
+                </>
+              ) : (
+                <p>{bulkResult.errorCode}</p>
+              )}
+            </Alert>
+          ) : null}
           {linkResult ? (
             <Alert
               live

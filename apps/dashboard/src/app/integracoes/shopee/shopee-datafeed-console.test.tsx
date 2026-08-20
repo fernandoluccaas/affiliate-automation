@@ -9,6 +9,7 @@ const previewAction = vi.hoisted(() => vi.fn());
 const importAction = vi.hoisted(() => vi.fn());
 const retryAction = vi.hoisted(() => vi.fn());
 const manualAction = vi.hoisted(() => vi.fn());
+const bulkAction = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/shopee-datafeed-actions", () => ({
   inspectShopeeDatafeedAction: inspectAction,
@@ -16,6 +17,7 @@ vi.mock("@/lib/shopee-datafeed-actions", () => ({
   confirmShopeeDatafeedImportAction: importAction,
   retryShopeeAffiliateLinkAction: retryAction,
   applyManualShopeeAffiliateLinkAction: manualAction,
+  generatePendingShopeeAffiliateLinksAction: bulkAction,
 }));
 
 const categories: ShopeeDashboardConfigurationDto["categories"] = [
@@ -50,6 +52,9 @@ const configuration: ShopeeDashboardConfigurationDto = {
   openApiRateLimitPerHour: 1_000,
   recentSelectionWindowDays: 7,
   maxPerShopPerSession: 2,
+  autoLinkAfterImport: false,
+  autoLinkMaxPerRun: 12,
+  autoLinkConcurrency: 1,
   maxFileBytes: 536_870_912,
   maxTrackedItems: 2_000_000,
   issues: [],
@@ -151,6 +156,17 @@ describe("ShopeeDatafeedConsole", () => {
       ok: true,
       message: "Link aplicado.",
       offerState: { offerCounts: { pending: 0, ready: 1 }, pendingOffers: [] },
+    });
+    bulkAction.mockResolvedValue({
+      ok: true,
+      message: "2 links aplicados; nenhuma Publication criada.",
+      data: {
+        status: "SUCCEEDED",
+        linked: 2,
+        remainingPending: 0,
+        items: [],
+      },
+      offerState: { offerCounts: { pending: 0, ready: 2 }, pendingOffers: [] },
     });
   });
 
@@ -274,7 +290,9 @@ describe("ShopeeDatafeedConsole", () => {
       }),
     );
 
-    expect(await screen.findByText("Produto recém-importado")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Produto recém-importado"),
+    ).toBeInTheDocument();
     expect(window.location.pathname).toBe(pathname);
     expect(window.scrollY).toBe(360);
   });
@@ -303,6 +321,234 @@ describe("ShopeeDatafeedConsole", () => {
     fireEvent.click(screen.getByRole("button", { name: /Tentar Open API/ }));
     expect(await screen.findByText("Link gerado.")).toBeInTheDocument();
     expect(retryAction).toHaveBeenCalledWith("offer-safe");
+  });
+
+  it("shows the pending counter and requires visual confirmation for bulk", () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    render(
+      <ShopeeDatafeedConsole
+        configuration={{
+          ...configuration,
+          mode: "HYBRID",
+          state: "READY_FOR_HYBRID",
+          openApiConfigured: true,
+          openApiReady: true,
+          externalRequestsEnabled: true,
+          offerCounts: { pending: 2, ready: 0 },
+          pendingOffers: [
+            {
+              id: "offer-1",
+              title: "Produto 1",
+              externalProductId: "1001",
+              statusReason: "AFFILIATE_LINK_REQUIRED",
+            },
+          ],
+        }}
+      />,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "Links" }));
+    const button = screen.getByRole("button", {
+      name: /Gerar links das 2 pendentes/,
+    });
+    fireEvent.click(button);
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("2 ofertas"));
+    expect(bulkAction).not.toHaveBeenCalled();
+    confirm.mockRestore();
+  });
+
+  it("renders partial bulk success and updates only the local Links island", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const pathname = window.location.pathname;
+    Object.defineProperty(window, "scrollY", {
+      configurable: true,
+      value: 275,
+    });
+    bulkAction.mockResolvedValueOnce({
+      ok: true,
+      message: "1 links aplicados; 1 ofertas ainda precisam de atenção.",
+      data: {
+        status: "SUCCEEDED_WITH_ERRORS",
+        linked: 1,
+        remainingPending: 1,
+        items: [
+          {
+            offerId: "offer-2",
+            itemId: "1002",
+            status: "FAILED",
+            attempts: 1,
+            errorCode: "SHOPEE_ORIGIN_URL_INVALID",
+          },
+        ],
+      },
+      offerState: {
+        offerCounts: { pending: 1, ready: 1 },
+        pendingOffers: [
+          {
+            id: "offer-2",
+            title: "Produto 2",
+            externalProductId: "1002",
+            statusReason: "AFFILIATE_LINK_REQUIRED",
+          },
+        ],
+      },
+    });
+    render(
+      <ShopeeDatafeedConsole
+        configuration={{
+          ...configuration,
+          mode: "HYBRID",
+          state: "READY_FOR_HYBRID",
+          openApiConfigured: true,
+          openApiReady: true,
+          externalRequestsEnabled: true,
+          offerCounts: { pending: 2, ready: 0 },
+          pendingOffers: [
+            {
+              id: "offer-1",
+              title: "Produto 1",
+              externalProductId: "1001",
+              statusReason: "AFFILIATE_LINK_REQUIRED",
+            },
+            {
+              id: "offer-2",
+              title: "Produto 2",
+              externalProductId: "1002",
+              statusReason: "AFFILIATE_LINK_REQUIRED",
+            },
+          ],
+        }}
+      />,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "Links" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /Gerar links das 2 pendentes/ }),
+    );
+    expect(
+      await screen.findByText("Geração concluída com pendências"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/1 links gerados; 1 ofertas pendentes/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/SHOPEE_ORIGIN_URL_INVALID/)).toBeInTheDocument();
+    expect(screen.queryByText("Produto 1")).not.toBeInTheDocument();
+    expect(screen.getByText("Produto 2")).toBeInTheDocument();
+    expect(window.location.pathname).toBe(pathname);
+    expect(window.scrollY).toBe(275);
+    expect(screen.getByRole("tab", { name: "Links" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(bulkAction).toHaveBeenCalledWith({
+      confirmGenerate: true,
+      maxItems: 2,
+    });
+    confirm.mockRestore();
+  });
+
+  it("prevents a duplicate bulk click while generation is pending", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    let resolve!: (value: unknown) => void;
+    bulkAction.mockReturnValue(new Promise((done) => (resolve = done)));
+    render(
+      <ShopeeDatafeedConsole
+        configuration={{
+          ...configuration,
+          mode: "HYBRID",
+          state: "READY_FOR_HYBRID",
+          openApiConfigured: true,
+          openApiReady: true,
+          offerCounts: { pending: 1, ready: 0 },
+          pendingOffers: [
+            {
+              id: "offer-1",
+              title: "Produto 1",
+              externalProductId: "1001",
+              statusReason: null,
+            },
+          ],
+        }}
+      />,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "Links" }));
+    const button = screen.getByRole("button", {
+      name: /Gerar links das 1 pendentes/,
+    });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(bulkAction).toHaveBeenCalledOnce();
+    resolve({
+      ok: true,
+      message: "Concluído.",
+      data: { status: "SUCCEEDED", linked: 1, remainingPending: 0, items: [] },
+      offerState: { offerCounts: { pending: 0, ready: 1 }, pendingOffers: [] },
+    });
+    await waitFor(() =>
+      expect(screen.getByText("Concluído.")).toBeInTheDocument(),
+    );
+    confirm.mockRestore();
+  });
+
+  it("shows a global bulk failure without removing the pending offer", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    bulkAction.mockResolvedValueOnce({
+      ok: true,
+      message: "A geração foi interrompida; 1 ofertas continuam pendentes.",
+      data: {
+        status: "FAILED",
+        linked: 0,
+        remainingPending: 1,
+        items: [
+          {
+            offerId: "offer-1",
+            itemId: "1001",
+            status: "NOT_ATTEMPTED",
+            attempts: 0,
+            errorCode: "SHOPEE_BULK_LINK_GLOBAL_FAILURE",
+          },
+        ],
+      },
+      offerState: {
+        offerCounts: { pending: 1, ready: 0 },
+        pendingOffers: [
+          {
+            id: "offer-1",
+            title: "Produto 1",
+            externalProductId: "1001",
+            statusReason: null,
+          },
+        ],
+      },
+    });
+    render(
+      <ShopeeDatafeedConsole
+        configuration={{
+          ...configuration,
+          mode: "HYBRID",
+          state: "READY_FOR_HYBRID",
+          openApiConfigured: true,
+          openApiReady: true,
+          offerCounts: { pending: 1, ready: 0 },
+          pendingOffers: [
+            {
+              id: "offer-1",
+              title: "Produto 1",
+              externalProductId: "1001",
+              statusReason: null,
+            },
+          ],
+        }}
+      />,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "Links" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /Gerar links das 1 pendentes/ }),
+    );
+    expect(await screen.findByText("Geração interrompida")).toBeInTheDocument();
+    expect(screen.getByText("Produto 1")).toBeInTheDocument();
+    expect(
+      screen.getByText(/SHOPEE_BULK_LINK_GLOBAL_FAILURE/),
+    ).toBeInTheDocument();
+    confirm.mockRestore();
   });
 
   it("keeps the manual affiliate-link fallback explicit", async () => {
@@ -338,7 +584,9 @@ describe("ShopeeDatafeedConsole", () => {
       affiliateUrl: "https://s.shopee.com.br/fixture",
     });
     expect(screen.queryByText("Produto de teste")).not.toBeInTheDocument();
-    expect(screen.getByText(/1 oferta\(s\) pronta\(s\) e 0 aguardando link/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/1 oferta\(s\) pronta\(s\) e 0 aguardando link/),
+    ).toBeInTheDocument();
   });
 
   it("prevents a duplicate click while inspect is pending", async () => {

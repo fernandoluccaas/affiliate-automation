@@ -2,6 +2,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import {
   applyManualShopeeAffiliateLink,
+  generateAndApplyShopeeAffiliateLink,
   importShopeeOperationalOffers,
   isPublicShopeeRedirectAddress,
   loadRecentShopeeItemIds,
@@ -39,23 +40,15 @@ function persistence(
     findDuplicateImport: vi.fn(async () => null),
     startImport: vi.fn(async () => ({ id: "job-fixture" })),
     persistWinner: vi.fn(async (input) => {
-      const resolved = input.linkProvider
-        ? await input.linkProvider.resolve(input.winner.product, {
-            subIds: input.subIds,
-          })
-        : null;
-      const ready = resolved?.status === "VERIFIED";
       return {
-        ok: ready,
+        ok: false,
         offerId: `offer-${input.winner.product.itemId}`,
         productId: `product-${input.winner.product.itemId}`,
-        status: ready
-          ? ("READY_TO_PUBLISH" as const)
-          : ("READY_FOR_AFFILIATE_LINK" as const),
-        statusReason: ready ? "READY" : "PENDING",
+        status: "READY_FOR_AFFILIATE_LINK" as const,
+        statusReason: "PENDING",
         productCreated: true,
         offerCreated: true,
-        linkStatus: ready ? ("GENERATED" as const) : ("PENDING" as const),
+        linkStatus: "PENDING" as const,
       } satisfies ShopeeWinnerPersistenceResult;
     }),
     recordFailure: vi.fn(async () => undefined),
@@ -163,7 +156,7 @@ describe("Shopee operational Datafeed import", () => {
     expect(storage.persistWinner).not.toHaveBeenCalled();
   });
 
-  it("persists only selected winners after explicit confirmation and generates links", async () => {
+  it("keeps auto-link disabled by default after a confirmed import", async () => {
     const storage = persistence();
     const result = await importShopeeOperationalOffers({
       files,
@@ -171,28 +164,157 @@ describe("Shopee operational Datafeed import", () => {
       confirmImport: true,
       persistence: storage,
       linkProvider: generatedProvider,
-      subIds: ["sourcedatafeed"],
+      subIds: ["sourcedatafeed", "autolink"],
     });
-    expect(result.status).toBe("SUCCEEDED");
+    expect(result.status).toBe("SUCCEEDED_WITH_ERRORS");
     expect(result.metrics.selected).toBeGreaterThan(0);
     expect(result.metrics.selected).toBeLessThanOrEqual(12);
     expect(storage.persistWinner).toHaveBeenCalledTimes(
       result.metrics.selected,
     );
-    expect(result.metrics.linksGenerated).toBe(result.metrics.selected);
-    expect(result.metrics.readyToPublish).toBe(result.metrics.selected);
+    expect(result.metrics.linksGenerated).toBe(0);
+    expect(result.metrics.readyToPublish).toBe(0);
+    expect(result.metrics.pendingAffiliateLink).toBe(result.metrics.selected);
     expect(result.publicationsCreated).toBe(0);
     expect(result.messagesSent).toBe(0);
-    expect(generatedProvider.resolve).toHaveBeenCalledWith(
-      expect.any(Object),
-      { subIds: ["sourcedatafeed"] },
-    );
+    expect(generatedProvider.resolve).not.toHaveBeenCalled();
     expect(storage.finishImport).toHaveBeenCalledWith(
       expect.objectContaining({
-        status: "SUCCEEDED",
+        status: "SUCCEEDED_WITH_ERRORS",
         summary: expect.objectContaining({ publicationsCreated: 0 }),
       }),
     );
+  });
+
+  it("runs auto-link after committed persistence when the flag and HYBRID are ready", async () => {
+    const storage = persistence();
+    const bulkLinker = vi.fn(async (input: { offerIds?: string[] }) => ({
+      status: "SUCCEEDED" as const,
+      source: "IMPORT" as const,
+      requested: input.offerIds?.length ?? 0,
+      eligible: input.offerIds?.length ?? 0,
+      attempted: input.offerIds?.length ?? 0,
+      linked: input.offerIds?.length ?? 0,
+      alreadyLinked: 0,
+      failed: 0,
+      notAttempted: 0,
+      readyToPublish: input.offerIds?.length ?? 0,
+      remainingPending: 0,
+      linksRequested: input.offerIds?.length ?? 0,
+      linksGenerated: input.offerIds?.length ?? 0,
+      linksReused: 0,
+      linksFailed: 0,
+      linksSkipped: 0,
+      apiAttempts: input.offerIds?.length ?? 0,
+      retryAttempts: 0,
+      durationMs: 1,
+      externalRequests: input.offerIds?.length ?? 0,
+      writes: input.offerIds?.length ?? 0,
+      publicationsCreated: 0 as const,
+      messagesSent: 0 as const,
+      items: [],
+    }));
+    const result = await importShopeeOperationalOffers({
+      files,
+      environment: {
+        ...hybridEnvironment,
+        SHOPEE_AUTO_LINK_AFTER_IMPORT: "true",
+      },
+      confirmImport: true,
+      persistence: storage,
+      linkProvider: generatedProvider,
+      bulkLinker,
+    });
+    expect(bulkLinker).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: "IMPORT",
+        confirmGenerate: true,
+        subIds: ["sourcedatafeed", "autolink"],
+      }),
+    );
+    expect(storage.persistWinner).toHaveBeenCalledTimes(
+      result.metrics.selected,
+    );
+    expect(
+      vi.mocked(storage.persistWinner).mock.invocationCallOrder.at(-1),
+    ).toBeLessThan(bulkLinker.mock.invocationCallOrder[0]!);
+    expect(result.metrics.readyToPublish).toBe(result.metrics.selected);
+    expect(result.metrics.pendingAffiliateLink).toBe(0);
+    expect(result.publicationsCreated).toBe(0);
+    expect(result.messagesSent).toBe(0);
+  });
+
+  it.each([
+    ["DATAFEED", datafeedEnvironment],
+    [
+      "HYBRID without credentials",
+      {
+        ...datafeedEnvironment,
+        SHOPEE_AFFILIATE_MODE: "HYBRID",
+        SHOPEE_AUTO_LINK_AFTER_IMPORT: "true",
+      },
+    ],
+  ])("does not auto-link in %s mode", async (_label, selectedEnvironment) => {
+    const bulkLinker = vi.fn();
+    const result = await importShopeeOperationalOffers({
+      files,
+      environment: {
+        ...selectedEnvironment,
+        SHOPEE_AUTO_LINK_AFTER_IMPORT: "true",
+      },
+      confirmImport: true,
+      persistence: persistence(),
+      bulkLinker,
+    });
+    expect(result.metrics.pendingAffiliateLink).toBe(result.metrics.selected);
+    expect(bulkLinker).not.toHaveBeenCalled();
+  });
+
+  it("does not roll back the import when post-import linking fails", async () => {
+    const storage = persistence();
+    const bulkLinker = vi.fn(async (input: { offerIds?: string[] }) => ({
+      status: "FAILED" as const,
+      source: "IMPORT" as const,
+      requested: input.offerIds?.length ?? 0,
+      eligible: input.offerIds?.length ?? 0,
+      attempted: 1,
+      linked: 0,
+      alreadyLinked: 0,
+      failed: 1,
+      notAttempted: Math.max(0, (input.offerIds?.length ?? 0) - 1),
+      readyToPublish: 0,
+      remainingPending: input.offerIds?.length ?? 0,
+      linksRequested: input.offerIds?.length ?? 0,
+      linksGenerated: 0,
+      linksReused: 0,
+      linksFailed: 1,
+      linksSkipped: Math.max(0, (input.offerIds?.length ?? 0) - 1),
+      apiAttempts: 1,
+      retryAttempts: 0,
+      durationMs: 1,
+      externalRequests: 1,
+      writes: 0,
+      publicationsCreated: 0 as const,
+      messagesSent: 0 as const,
+      items: [],
+    }));
+    const result = await importShopeeOperationalOffers({
+      files,
+      environment: {
+        ...hybridEnvironment,
+        SHOPEE_AUTO_LINK_AFTER_IMPORT: "true",
+      },
+      confirmImport: true,
+      persistence: storage,
+      bulkLinker,
+    });
+    expect(storage.persistWinner).toHaveBeenCalledTimes(
+      result.metrics.selected,
+    );
+    expect(storage.finishImport).toHaveBeenCalled();
+    expect(result.metrics.pendingAffiliateLink).toBe(result.metrics.selected);
+    expect(result.publicationsCreated).toBe(0);
+    expect(result.messagesSent).toBe(0);
   });
 
   it("keeps offers pending when Open API is disabled", async () => {
@@ -262,6 +384,111 @@ describe("Shopee operational Datafeed import", () => {
   });
 });
 
+describe("Shopee individual affiliate-link application", () => {
+  const currentOffer = {
+    id: "offer-v1",
+    marketplace: "SHOPEE",
+    externalProductId: "52511551718",
+    title: "Produto",
+    description: null,
+    category: "CASA",
+    sourceCategoryId: "10",
+    imageUrl: "https://cf.shopee.com.br/image",
+    productUrl: "https://shopee.com.br/product/344381236/52511551718",
+    affiliateUrl: null,
+    originalPrice: 120,
+    currentPrice: 100,
+    discountPercentage: 16.67,
+    rating: 4.8,
+    status: "READY_FOR_AFFILIATE_LINK",
+    version: 1,
+  };
+
+  it("does not call the API when the current offer is already linked", async () => {
+    const provider = { ...generatedProvider, resolve: vi.fn() };
+    const database = {
+      offer: {
+        findUnique: vi.fn(async () => ({
+          marketplace: "SHOPEE",
+          externalProductId: currentOffer.externalProductId,
+        })),
+        findFirst: vi.fn(async () => ({
+          ...currentOffer,
+          affiliateUrl: "https://s.shopee.com.br/existing",
+          status: "READY_TO_PUBLISH",
+        })),
+      },
+    };
+    await expect(
+      generateAndApplyShopeeAffiliateLink({
+        offerId: currentOffer.id,
+        linkProvider: provider,
+        database: database as never,
+      }),
+    ).resolves.toMatchObject({
+      status: "ALREADY_LINKED",
+      linkStatus: "EXISTING",
+      offerStatus: "READY_TO_PUBLISH",
+    });
+    expect(provider.resolve).not.toHaveBeenCalled();
+  });
+
+  it("rechecks under lock and avoids duplicate persistence after a race", async () => {
+    const provider = {
+      ...generatedProvider,
+      resolve: vi.fn(async () => ({
+        status: "VERIFIED" as const,
+        affiliateUrl: "https://s.shopee.com.br/generated",
+        provider: "SHOPEE_OPEN_API",
+      })),
+    };
+    const reusableTx = {
+      offer: { findFirst: vi.fn(async () => null) },
+    };
+    const raceTx = {
+      $executeRaw: vi.fn(async () => 1),
+      offer: {
+        findFirst: vi.fn(async () => ({
+          ...currentOffer,
+          id: "offer-v2",
+          version: 2,
+          affiliateUrl: "https://s.shopee.com.br/racewinner",
+          status: "READY_TO_PUBLISH",
+        })),
+      },
+      affiliateLink: { create: vi.fn() },
+    };
+    let transactions = 0;
+    const database = {
+      offer: {
+        findUnique: vi.fn(async () => ({
+          marketplace: "SHOPEE",
+          externalProductId: currentOffer.externalProductId,
+        })),
+        findFirst: vi.fn(async () => currentOffer),
+      },
+      $transaction: vi.fn(async (callback: (tx: never) => Promise<unknown>) => {
+        transactions += 1;
+        return callback((transactions === 1 ? reusableTx : raceTx) as never);
+      }),
+    };
+    await expect(
+      generateAndApplyShopeeAffiliateLink({
+        offerId: currentOffer.id,
+        subIds: ["sourcedatafeed", "bulk"],
+        linkProvider: provider,
+        database: database as never,
+      }),
+    ).resolves.toMatchObject({
+      status: "ALREADY_LINKED",
+      offerId: "offer-v2",
+      linkStatus: "EXISTING",
+    });
+    expect(provider.resolve).toHaveBeenCalledOnce();
+    expect(raceTx.affiliateLink.create).not.toHaveBeenCalled();
+  });
+});
+
 describe("Shopee manual affiliate fallback", () => {
   it("applies a matching manual link through the versioned ingestion pipeline", async () => {
     const transaction = { $executeRaw: vi.fn(async () => 1) };
@@ -275,8 +502,7 @@ describe("Shopee manual affiliate fallback", () => {
           category: "CASA",
           sourceCategoryId: "10",
           imageUrl: "https://cf.shopee.com.br/image",
-          productUrl:
-            "https://shopee.com.br/produto-i.344381236.52511551718",
+          productUrl: "https://shopee.com.br/produto-i.344381236.52511551718",
           originalPrice: 120,
           currentPrice: 100,
           discountPercentage: 16.67,
@@ -318,8 +544,7 @@ describe("Shopee manual affiliate fallback", () => {
       expect.objectContaining({
         marketplace: "SHOPEE",
         externalProductId: "52511551718",
-        productUrl:
-          "https://shopee.com.br/produto-i.344381236.52511551718",
+        productUrl: "https://shopee.com.br/produto-i.344381236.52511551718",
         affiliateUrl: "https://s.shopee.com.br/2qTd2QTWJk",
       }),
       expect.objectContaining({ minScore: 70 }),
@@ -339,8 +564,7 @@ describe("Shopee manual affiliate fallback", () => {
           category: "CASA",
           sourceCategoryId: "10",
           imageUrl: "https://cf.shopee.com.br/image",
-          productUrl:
-            "https://shopee.com.br/produto-i.344381236.52511551718",
+          productUrl: "https://shopee.com.br/produto-i.344381236.52511551718",
           originalPrice: 120,
           currentPrice: 100,
           discountPercentage: 16.67,
@@ -360,8 +584,7 @@ describe("Shopee manual affiliate fallback", () => {
             new Response(null, {
               status: 302,
               headers: {
-                location:
-                  "https://shopee.com.br/opaanlp/344381236/99999999999",
+                location: "https://shopee.com.br/opaanlp/344381236/99999999999",
               },
             }),
         ),
@@ -407,11 +630,10 @@ describe("Shopee manual affiliate fallback", () => {
             new Response(null, {
               status: 302,
               headers: {
-                location:
-                  "https://shopee.com.br/opaanlp/344381236/99999999999",
+                location: "https://shopee.com.br/opaanlp/344381236/99999999999",
               },
             }),
-          ),
+        ),
         resolveDns: publicDns,
       }),
     ).rejects.toThrow("SHOPEE_AFFILIATE_LINK_PRODUCT_MISMATCH");
@@ -456,9 +678,7 @@ describe("Shopee manual affiliate fallback", () => {
         shortLink: "https://s.shopee.com.br/fixture",
         expectedItemId: "456",
         fetch: request,
-        resolveDns: vi.fn(async () => [
-          { address: "192.168.1.5", family: 4 },
-        ]),
+        resolveDns: vi.fn(async () => [{ address: "192.168.1.5", family: 4 }]),
       }),
     ).rejects.toThrow("SHOPEE_MANUAL_LINK_SSRF_BLOCKED");
     expect(request).not.toHaveBeenCalled();

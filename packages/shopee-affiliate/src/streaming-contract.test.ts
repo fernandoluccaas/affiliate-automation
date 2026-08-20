@@ -36,9 +36,10 @@ describe("datafeed streaming architecture", () => {
     );
     expect(source).toContain("ingestOfferInTransaction");
     expect(source).toContain("reusableAffiliateUrl");
-    expect(source.indexOf("reusableAffiliateUrl(tx")).toBeLessThan(
-      source.indexOf("input.linkProvider.resolve"),
-    );
+    expect(
+      source.indexOf("const reusable = await database.$transaction"),
+    ).toBeLessThan(source.indexOf("const generated = await provider.resolve"));
+    expect(source).not.toContain("input.linkProvider.resolve");
     expect(source).not.toMatch(
       /(?:database|tx)\.publication\.(?:create|update)/i,
     );

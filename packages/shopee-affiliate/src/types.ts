@@ -35,6 +35,9 @@ export type ShopeeAffiliateConfiguration = {
   maxTrackedItems: number;
   recentSelectionWindowDays: number;
   maxPerShopPerSession: number;
+  autoLinkAfterImport: boolean;
+  autoLinkMaxPerRun: number;
+  autoLinkConcurrency: number;
   issues: string[];
 };
 
