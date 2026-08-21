@@ -507,7 +507,6 @@ export async function prepareShopeeRemoteDiscovery(
     for (const feed of feeds) {
       result.currentFeed = feed.referenceId;
       let offset = 0;
-      let expectedTotal: number | null = null;
       const offsets = new Set<number>();
       while (true) {
         if (
@@ -548,18 +547,20 @@ export async function prepareShopeeRemoteDiscovery(
         }
         if (paginationError) break;
         const page = parsePage(rawPage);
+        const nextOffset = page.pageInfo.offset + page.rows.length;
         if (
           page.pageInfo.offset !== offset ||
           page.pageInfo.limit > pageSize ||
-          (expectedTotal !== null &&
-            expectedTotal !== page.pageInfo.totalCount) ||
-          offset + page.rows.length > page.pageInfo.totalCount
+          page.rows.length > page.pageInfo.limit ||
+          page.rows.length > pageSize ||
+          page.pageInfo.offset > page.pageInfo.totalCount ||
+          !Number.isSafeInteger(nextOffset) ||
+          nextOffset > page.pageInfo.totalCount
         ) {
           paginationError = "SHOPEE_REMOTE_DISCOVERY_PAGINATION_INCONSISTENT";
           break;
         }
-        expectedTotal = page.pageInfo.totalCount;
-        result.feedTotalCount = expectedTotal;
+        result.feedTotalCount = page.pageInfo.totalCount;
         result.pagesFetched += 1;
         if (page.rows.some((row) => row.updateType !== null)) {
           paginationError = "SHOPEE_REMOTE_DISCOVERY_DELTA_NOT_SUPPORTED";
@@ -579,20 +580,30 @@ export async function prepareShopeeRemoteDiscovery(
           consider(normalized.product);
         }
         if (reachedLimit) break;
+
+        // Shopee may report hasMore=true on the last full page. The catalog is
+        // complete once the rows themselves reach the page's current boundary.
+        if (page.rows.length > 0 && nextOffset >= page.pageInfo.totalCount) {
+          break;
+        }
+
+        // The official terminal probe (offset === totalCount) is also valid.
+        if (
+          page.rows.length === 0 &&
+          page.pageInfo.offset === page.pageInfo.totalCount &&
+          !page.pageInfo.hasMore
+        ) {
+          break;
+        }
         if (!page.pageInfo.hasMore) {
-          if (offset + page.rows.length < page.pageInfo.totalCount) {
+          if (nextOffset < page.pageInfo.totalCount) {
             paginationError =
               "SHOPEE_REMOTE_DISCOVERY_TOTAL_COUNT_INCONSISTENT";
           }
           break;
         }
-        const nextOffset = page.pageInfo.offset + page.pageInfo.limit;
-        if (
-          nextOffset <= offset ||
-          page.rows.length === 0 ||
-          nextOffset >= Number.MAX_SAFE_INTEGER
-        ) {
-          paginationError = "SHOPEE_REMOTE_DISCOVERY_OFFSET_NO_PROGRESS";
+        if (page.rows.length === 0 || nextOffset <= offset) {
+          paginationError = "SHOPEE_REMOTE_DISCOVERY_PAGINATION_INCONSISTENT";
           break;
         }
         offset = nextOffset;

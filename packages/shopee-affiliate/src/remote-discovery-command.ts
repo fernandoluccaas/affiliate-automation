@@ -15,6 +15,23 @@ export type ShopeeRemoteDiscoveryCommandDependencies = {
   run?: typeof runShopeeAutomatedDiscovery;
 };
 
+export function getShopeeRemoteDiscoveryExitCode(
+  args: readonly string[],
+  result: { status?: unknown; errorCode?: unknown },
+) {
+  const command = args[0] ?? "status";
+  if (
+    command === "preview" &&
+    result.status === "PARTIAL" &&
+    result.errorCode === "SHOPEE_REMOTE_DISCOVERY_LIMIT_REACHED"
+  ) {
+    return 0;
+  }
+  if (result.status === "FAILED") return 2;
+  if (result.status === "PARTIAL") return 1;
+  return 0;
+}
+
 function value(args: readonly string[], name: string) {
   const index = args.indexOf(name);
   return index >= 0 ? args[index + 1] : undefined;

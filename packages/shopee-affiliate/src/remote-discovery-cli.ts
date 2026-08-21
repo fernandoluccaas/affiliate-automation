@@ -1,10 +1,14 @@
-import { runShopeeRemoteDiscoveryCommand } from "./remote-discovery-command";
+import {
+  getShopeeRemoteDiscoveryExitCode,
+  runShopeeRemoteDiscoveryCommand,
+} from "./remote-discovery-command";
 
-runShopeeRemoteDiscoveryCommand(process.argv.slice(2))
+const args = process.argv.slice(2);
+
+runShopeeRemoteDiscoveryCommand(args)
   .then((result) => {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-    if (result.status === "FAILED") process.exitCode = 2;
-    else if (result.status === "PARTIAL") process.exitCode = 1;
+    process.exitCode = getShopeeRemoteDiscoveryExitCode(args, result);
   })
   .catch((error: unknown) => {
     const message = error instanceof Error ? error.message : "";

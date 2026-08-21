@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { runShopeeRemoteDiscoveryCommand } from "./remote-discovery-command";
+import {
+  getShopeeRemoteDiscoveryExitCode,
+  runShopeeRemoteDiscoveryCommand,
+} from "./remote-discovery-command";
 
 const environment = {
   SHOPEE_AFFILIATE_ENABLED: "true",
@@ -9,6 +12,33 @@ const environment = {
 } as NodeJS.ProcessEnv;
 
 describe("Shopee remote discovery CLI contract", () => {
+  it("exits zero only for a deliberately limited partial preview", () => {
+    expect(
+      getShopeeRemoteDiscoveryExitCode(["preview", "--max-pages", "1"], {
+        status: "PARTIAL",
+        errorCode: "SHOPEE_REMOTE_DISCOVERY_LIMIT_REACHED",
+      }),
+    ).toBe(0);
+    expect(
+      getShopeeRemoteDiscoveryExitCode(["run", "--max-pages", "1"], {
+        status: "PARTIAL",
+        errorCode: "SHOPEE_REMOTE_DISCOVERY_LIMIT_REACHED",
+      }),
+    ).toBe(1);
+  });
+
+  it.each([
+    "SHOPEE_OPEN_API_SCHEMA_MISMATCH",
+    "SHOPEE_REMOTE_DISCOVERY_PAGINATION_INCONSISTENT",
+  ])("keeps %s non-zero for preview", (errorCode) => {
+    expect(
+      getShopeeRemoteDiscoveryExitCode(["preview"], {
+        status: "PARTIAL",
+        errorCode,
+      }),
+    ).toBe(1);
+  });
+
   it("returns a read-only fail-closed status without credentials", async () => {
     const result = await runShopeeRemoteDiscoveryCommand(["status"], {
       environment,

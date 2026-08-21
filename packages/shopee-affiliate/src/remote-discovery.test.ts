@@ -141,66 +141,132 @@ describe("Shopee official feed listing", () => {
 });
 
 describe("Shopee offset feed discovery", () => {
-  it("paginates 0, 500, 1000 and stops on hasMore=false", async () => {
+  it("completes on a full last page with hasMore=true without a terminal request", async () => {
     const remote = client({
       pages: {
-        "0": page({ offset: 0, ids: ["100"], totalCount: 1001, hasMore: true }),
-        "500": page({
-          offset: 500,
-          ids: ["101"],
-          totalCount: 1001,
+        "0": page({
+          offset: 0,
+          limit: 2,
+          ids: ["100", "101"],
+          totalCount: 4,
           hasMore: true,
         }),
-        "1000": page({ offset: 1000, ids: ["102"], totalCount: 1001 }),
+        "2": page({
+          offset: 2,
+          limit: 2,
+          ids: ["102", "103"],
+          totalCount: 4,
+          hasMore: true,
+        }),
       },
     });
     const result = await previewShopeeRemoteDiscovery({
       feedId: "feed-1",
       confirmLiveCall: true,
+      pageSize: 2,
       environment,
       client: remote,
     });
     expect(result).toMatchObject({
       status: "PREVIEW_COMPLETED",
       complete: true,
-      pagesFetched: 3,
-      itemsReceived: 3,
-      itemsNormalized: 3,
+      pagesFetched: 2,
+      itemsReceived: 4,
+      itemsNormalized: 4,
       databaseWrites: 0,
       publicationsCreated: 0,
     });
     expect(remote.getFeedPage.mock.calls.map(([call]) => call.offset)).toEqual([
-      0, 500, 1000,
+      0, 2,
     ]);
   });
 
-  it.each([
-    [
-      "repeated/regressive offset",
-      page({ offset: 0, ids: ["100"], totalCount: 501, hasMore: true }),
-      page({ offset: 0, ids: ["101"], totalCount: 501 }),
-      "SHOPEE_REMOTE_DISCOVERY_PAGINATION_INCONSISTENT",
-    ],
-    [
-      "hasMore without progress",
-      page({ offset: 0, ids: [], totalCount: 1, hasMore: true }),
-      undefined,
-      "SHOPEE_REMOTE_DISCOVERY_OFFSET_NO_PROGRESS",
-    ],
-    [
-      "changing totalCount",
-      page({ offset: 0, ids: ["100"], totalCount: 501, hasMore: true }),
-      page({ offset: 500, ids: ["101"], totalCount: 502 }),
-      "SHOPEE_REMOTE_DISCOVERY_PAGINATION_INCONSISTENT",
-    ],
-  ])("fails safely for %s", async (_label, first, second, errorCode) => {
+  it("accepts the official empty terminal page when totalCount is revalidated", async () => {
+    const remote = client({
+      pages: {
+        "0": page({
+          offset: 0,
+          limit: 2,
+          ids: ["100", "101"],
+          totalCount: 3,
+          hasMore: true,
+        }),
+        "2": page({ offset: 2, limit: 2, ids: [], totalCount: 2 }),
+      },
+    });
+    const result = await previewShopeeRemoteDiscovery({
+      feedId: "feed-1",
+      confirmLiveCall: true,
+      pageSize: 2,
+      environment,
+      client: remote,
+    });
+    expect(result).toMatchObject({
+      status: "PREVIEW_COMPLETED",
+      complete: true,
+      pagesFetched: 2,
+      itemsReceived: 2,
+    });
+    expect(remote.getFeedPage.mock.calls.map(([call]) => call.offset)).toEqual([
+      0, 2,
+    ]);
+  });
+
+  it("accepts hasMore=false on a partial-sized page that reaches totalCount", async () => {
     const result = await previewShopeeRemoteDiscovery({
       feedId: "feed-1",
       confirmLiveCall: true,
       environment,
       client: client({
-        pages: { "0": first, ...(second ? { "500": second } : {}) },
+        pages: {
+          "0": page({ offset: 0, ids: ["100", "101"], totalCount: 2 }),
+        },
       }),
+    });
+    expect(result).toMatchObject({
+      status: "PREVIEW_COMPLETED",
+      complete: true,
+    });
+  });
+
+  it.each([
+    [
+      "hasMore=true with empty rows before totalCount",
+      { "0": page({ offset: 0, ids: [], totalCount: 1, hasMore: true }) },
+      "SHOPEE_REMOTE_DISCOVERY_PAGINATION_INCONSISTENT",
+    ],
+    [
+      "a repeated offset without progress",
+      {
+        "0": page({ offset: 0, ids: ["100"], totalCount: 3, hasMore: true }),
+        "1": page({ offset: 0, ids: ["101"], totalCount: 3, hasMore: true }),
+      },
+      "SHOPEE_REMOTE_DISCOVERY_PAGINATION_INCONSISTENT",
+    ],
+    [
+      "a regressive offset",
+      {
+        "0": page({
+          offset: 0,
+          ids: ["100", "101"],
+          totalCount: 4,
+          hasMore: true,
+        }),
+        "2": page({ offset: 1, ids: ["102"], totalCount: 4, hasMore: true }),
+      },
+      "SHOPEE_REMOTE_DISCOVERY_PAGINATION_INCONSISTENT",
+    ],
+    [
+      "hasMore=false before the totalCount boundary",
+      { "0": page({ offset: 0, ids: ["100"], totalCount: 2 }) },
+      "SHOPEE_REMOTE_DISCOVERY_TOTAL_COUNT_INCONSISTENT",
+    ],
+  ])("fails safely for %s", async (_label, pages, errorCode) => {
+    const result = await previewShopeeRemoteDiscovery({
+      feedId: "feed-1",
+      confirmLiveCall: true,
+      environment,
+      client: client({ pages }),
     });
     expect(result).toMatchObject({
       status: "PARTIAL",
@@ -238,6 +304,33 @@ describe("Shopee offset feed discovery", () => {
     expect(remote.getFeedPage).toHaveBeenCalledWith(
       expect.objectContaining({ offset: 0, limit: 3 }),
     );
+  });
+
+  it("returns an expected partial preview when maxItems truncates a page", async () => {
+    const result = await previewShopeeRemoteDiscovery({
+      feedId: "feed-1",
+      confirmLiveCall: true,
+      maxItems: 2,
+      environment,
+      client: client({
+        pages: {
+          "0": page({
+            offset: 0,
+            ids: ["100", "101", "102"],
+            totalCount: 4,
+            hasMore: true,
+          }),
+        },
+      }),
+    });
+    expect(result).toMatchObject({
+      status: "PARTIAL",
+      complete: false,
+      errorCode: "SHOPEE_REMOTE_DISCOVERY_LIMIT_REACHED",
+      itemsReceived: 2,
+      databaseWrites: 0,
+      publicationsCreated: 0,
+    });
   });
 
   it("rejects invalid columns per item and preserves valid candidates", async () => {
@@ -415,7 +508,9 @@ describe("Shopee reference and multi-feed selection", () => {
   });
 
   it("keeps only a bounded candidate pool for a large conceptual feed", async () => {
-    const ids = Array.from({ length: 150 }, (_, index) => String(20_000 + index));
+    const ids = Array.from({ length: 150 }, (_, index) =>
+      String(20_000 + index),
+    );
     const result = await previewShopeeRemoteDiscovery({
       feedId: "feed-1",
       confirmLiveCall: true,

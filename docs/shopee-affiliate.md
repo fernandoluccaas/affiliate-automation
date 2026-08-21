@@ -238,11 +238,18 @@ podem ser processados sequencialmente na mesma sessão, sem hardcode de nomes ou
 IDs e com deduplicação global por `itemId`.
 
 `getItemFeedData` usa paginação por offset: começa em `0`, solicita de 1 a 500
-linhas e avança por `pageInfo.limit` enquanto `hasMore` for verdadeiro. Offset
-repetido/regressivo, ausência de progresso, mudança de `totalCount`, limite
-acima de 500, máximo de páginas ou máximo de itens encerram a leitura de forma
-segura. Preview parcial conserva métricas e zero escritas; import exige
-`complete=true` e nunca persiste vencedores de um catálogo truncado.
+linhas e avança pelo progresso real (`offset + rows.length`). Cada página
+revalida `totalCount`: quando o próximo offset atinge esse limite, a leitura
+termina mesmo que a Shopee ainda informe `hasMore=true` na última página cheia.
+A página terminal vazia (`offset === totalCount`, zero linhas e
+`hasMore=false`) também conclui normalmente. `hasMore=false` antes do limite,
+offset repetido/regressivo, ausência de progresso, linhas além do limite ou
+`totalCount` incompatível continuam bloqueados. Uma variação coerente de
+`totalCount` entre páginas é aceita sem criar snapshot ou ultrapassar o limite.
+Preview parcial por `maxPages`/`maxItems` conserva métricas, produz zero
+escritas e encerra a CLI com sucesso; outras falhas parciais continuam com exit
+code não zero. Import exige `complete=true` e nunca persiste vencedores de um
+catálogo truncado.
 
 Em FULL, `updateType` deve ser `null`. DELTA está reconhecido no contrato, mas
 fica bloqueado por `SHOPEE_REMOTE_DISCOVERY_DELTA_NOT_SUPPORTED`; NEW, UPDATE e
