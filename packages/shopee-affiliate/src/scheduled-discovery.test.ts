@@ -68,6 +68,21 @@ function store(initial: ShopeeScheduledRunRecord | null = null) {
         errorMessage: input.errorCode,
       });
     }),
+    finishAbandoned: vi.fn(async (input) => {
+      const current = latest;
+      if (!current || current.id !== input.id || current.status !== "RUNNING") {
+        return false;
+      }
+      latest = runRecord({
+        id: input.id,
+        status: "FAILED",
+        startedAt: current.startedAt,
+        finishedAt: input.finishedAt,
+        metrics: input.metrics,
+        errorMessage: input.errorCode,
+      });
+      return true;
+    }),
   };
   return { api, latest: () => latest };
 }
@@ -172,6 +187,21 @@ function dependencies(
 }
 
 describe("Shopee scheduled discovery cadence", () => {
+  it("is due immediately when no prior run exists", () => {
+    expect(
+      calculateShopeeScheduledDiscoveryDue({
+        now,
+        intervalMs: 86_400_000,
+        lastRun: null,
+      }),
+    ).toMatchObject({
+      due: true,
+      nextRunAt: null,
+      lastRunStale: false,
+      staleRunRecoveryAt: null,
+    });
+  });
+
   it("calculates deterministic due state with a fake clock", () => {
     const lastRun = runRecord({
       startedAt: new Date("2026-08-22T00:00:00.000Z"),
@@ -242,6 +272,321 @@ describe("Shopee scheduled discovery cadence", () => {
     });
     expect(result.status).toBe("SKIPPED_NOT_DUE");
     expect(deps.run).not.toHaveBeenCalled();
+  });
+
+  it("keeps a recent RUNNING lease not due without lock or recovery", async () => {
+    const running = runRecord({
+      status: "RUNNING",
+      startedAt: new Date(now.getTime() - 30 * 60_000),
+      finishedAt: null,
+    });
+    const state = store(running);
+    const deps = dependencies({ store: state });
+    const result = await runShopeeScheduledDiscoveryTick({
+      now,
+      environment: readyEnvironment(),
+      dependencies: deps.value,
+    });
+    expect(result).toMatchObject({
+      status: "SKIPPED_NOT_DUE",
+      due: false,
+      nextScheduledRunAt: new Date(
+        running.startedAt.getTime() + 60 * 60_000,
+      ).toISOString(),
+      externalRequests: 0,
+      writes: 0,
+      stateModified: false,
+    });
+    expect(deps.value.acquireDiscoveryLock).not.toHaveBeenCalled();
+    expect(state.api.finishAbandoned).not.toHaveBeenCalled();
+    expect(state.api.start).not.toHaveBeenCalled();
+    expect(deps.run).not.toHaveBeenCalled();
+  });
+
+  it("uses the exact lock TTL boundary for stale RUNNING eligibility", () => {
+    const startedAt = new Date("2026-08-22T05:49:49.069Z");
+    const running = runRecord({ status: "RUNNING", startedAt });
+    const staleAt = new Date(startedAt.getTime() + 60 * 60_000);
+    expect(
+      calculateShopeeScheduledDiscoveryDue({
+        now: new Date(staleAt.getTime() - 1),
+        intervalMs: 86_400_000,
+        lastRun: running,
+      }),
+    ).toMatchObject({
+      due: false,
+      lastRunStale: false,
+      nextRunAt: staleAt,
+      staleRunRecoveryAt: staleAt,
+    });
+    expect(
+      calculateShopeeScheduledDiscoveryDue({
+        now: staleAt,
+        intervalMs: 86_400_000,
+        lastRun: running,
+      }),
+    ).toMatchObject({
+      due: true,
+      lastRunStale: true,
+      nextRunAt: staleAt,
+      staleRunRecoveryAt: staleAt,
+    });
+  });
+
+  it.each(["SUCCEEDED", "PARTIAL", "FAILED"] as const)(
+    "keeps the normal daily cadence for a completed %s run",
+    (status) => {
+      const completed = runRecord({
+        status,
+        startedAt: new Date("2026-08-22T00:00:00.000Z"),
+      });
+      expect(
+        calculateShopeeScheduledDiscoveryDue({
+          now: new Date("2026-08-22T23:59:59.999Z"),
+          intervalMs: 86_400_000,
+          lastRun: completed,
+        }),
+      ).toMatchObject({
+        due: false,
+        lastRunStale: false,
+        staleRunRecoveryAt: null,
+      });
+      expect(
+        calculateShopeeScheduledDiscoveryDue({
+          now: new Date("2026-08-23T00:00:00.000Z"),
+          intervalMs: 86_400_000,
+          lastRun: completed,
+        }),
+      ).toMatchObject({ due: true, lastRunStale: false });
+    },
+  );
+
+  it("keeps a stale RUNNING record untouched while its lock is occupied", async () => {
+    const running = runRecord({
+      status: "RUNNING",
+      startedAt: new Date(now.getTime() - 60 * 60_000),
+      finishedAt: null,
+    });
+    const state = store(running);
+    const occupied = lock(false, "LOCK_ALREADY_HELD");
+    const deps = dependencies({ store: state, lock: occupied });
+    const result = await runShopeeScheduledDiscoveryTick({
+      now,
+      environment: readyEnvironment(),
+      dependencies: deps.value,
+    });
+    expect(result).toMatchObject({
+      status: "SKIPPED_LOCKED",
+      due: true,
+      externalRequests: 0,
+      writes: 0,
+    });
+    expect(state.latest()).toMatchObject({ id: running.id, status: "RUNNING" });
+    expect(state.api.finishAbandoned).not.toHaveBeenCalled();
+    expect(state.api.start).not.toHaveBeenCalled();
+    expect(deps.run).not.toHaveBeenCalled();
+  });
+
+  it("recovers the same stale RUNNING record under lock before one new discovery", async () => {
+    const running = runRecord({
+      id: "abandoned-run",
+      status: "RUNNING",
+      startedAt: new Date(now.getTime() - 60 * 60_000),
+      finishedAt: null,
+    });
+    const state = store(running);
+    const deps = dependencies({ store: state });
+    const result = await runShopeeScheduledDiscoveryTick({
+      now,
+      environment: readyEnvironment(),
+      dependencies: deps.value,
+    });
+    expect(state.api.findLatest).toHaveBeenCalledTimes(2);
+    expect(state.api.finishAbandoned).toHaveBeenCalledExactlyOnceWith({
+      id: "abandoned-run",
+      finishedAt: now,
+      metrics: expect.objectContaining({
+        abandoned: true,
+        abandonedRunsRecovered: 1,
+        errorCode: "SHOPEE_SCHEDULED_DISCOVERY_ABANDONED",
+        publicationsCreated: 0,
+        messagesSent: 0,
+      }),
+      errorCode: "SHOPEE_SCHEDULED_DISCOVERY_ABANDONED",
+    });
+    expect(state.api.start).toHaveBeenCalledWith({
+      idempotencyKey: expect.stringContaining(":recovery:abandoned-run"),
+      startedAt: now,
+    });
+    expect(
+      vi.mocked(state.api.finishAbandoned).mock.invocationCallOrder[0],
+    ).toBeLessThan(vi.mocked(state.api.start).mock.invocationCallOrder[0]!);
+    expect(deps.run).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({
+      status: "SUCCEEDED",
+      writes: 2,
+      stateModified: true,
+      publicationsCreated: 0,
+      messagesSent: 0,
+      metrics: {
+        abandonedRunsRecovered: 1,
+        writes: 2,
+        publicationsCreated: 0,
+        messagesSent: 0,
+      },
+    });
+    expect(deps.ownedLock.release).toHaveBeenCalledOnce();
+  });
+
+  it("does not abandon a run that completed before the post-lock reread", async () => {
+    const running = runRecord({
+      id: "racing-run",
+      status: "RUNNING",
+      startedAt: new Date(now.getTime() - 60 * 60_000),
+      finishedAt: null,
+    });
+    const completed = runRecord({
+      ...running,
+      status: "SUCCEEDED",
+      finishedAt: now,
+    });
+    const state = store(running);
+    vi.mocked(state.api.findLatest)
+      .mockResolvedValueOnce(running)
+      .mockResolvedValueOnce(completed);
+    const deps = dependencies({ store: state });
+    const result = await runShopeeScheduledDiscoveryTick({
+      now,
+      environment: readyEnvironment(),
+      dependencies: deps.value,
+    });
+    expect(result.status).toBe("SKIPPED_NOT_DUE");
+    expect(state.api.finishAbandoned).not.toHaveBeenCalled();
+    expect(state.api.start).not.toHaveBeenCalled();
+    expect(deps.run).not.toHaveBeenCalled();
+    expect(deps.ownedLock.release).toHaveBeenCalledOnce();
+  });
+
+  it("does not overwrite a different RUNNING record found after the lock", async () => {
+    const observed = runRecord({
+      id: "observed-stale-run",
+      status: "RUNNING",
+      startedAt: new Date(now.getTime() - 60 * 60_000),
+      finishedAt: null,
+    });
+    const replacement = runRecord({
+      id: "replacement-stale-run",
+      status: "RUNNING",
+      startedAt: observed.startedAt,
+      finishedAt: null,
+    });
+    const state = store(observed);
+    vi.mocked(state.api.findLatest)
+      .mockResolvedValueOnce(observed)
+      .mockResolvedValueOnce(replacement);
+    const deps = dependencies({ store: state });
+    const result = await runShopeeScheduledDiscoveryTick({
+      now,
+      environment: readyEnvironment(),
+      dependencies: deps.value,
+    });
+    expect(result).toMatchObject({
+      status: "SKIPPED_LOCKED",
+      errorCode: "SHOPEE_SCHEDULED_DISCOVERY_STATE_CHANGED",
+    });
+    expect(state.api.finishAbandoned).not.toHaveBeenCalled();
+    expect(state.api.start).not.toHaveBeenCalled();
+    expect(deps.run).not.toHaveBeenCalled();
+  });
+
+  it("handles a legitimate completion racing the conditional abandoned update", async () => {
+    const running = runRecord({
+      id: "conditional-race-run",
+      status: "RUNNING",
+      startedAt: new Date(now.getTime() - 60 * 60_000),
+      finishedAt: null,
+    });
+    const completed = runRecord({
+      ...running,
+      status: "SUCCEEDED",
+      finishedAt: now,
+    });
+    const state = store(running);
+    vi.mocked(state.api.findLatest)
+      .mockResolvedValueOnce(running)
+      .mockResolvedValueOnce(running)
+      .mockResolvedValueOnce(completed);
+    vi.mocked(state.api.finishAbandoned).mockResolvedValueOnce(false);
+    const deps = dependencies({ store: state });
+    const result = await runShopeeScheduledDiscoveryTick({
+      now,
+      environment: readyEnvironment(),
+      dependencies: deps.value,
+    });
+    expect(result.status).toBe("SKIPPED_NOT_DUE");
+    expect(state.api.finishAbandoned).toHaveBeenCalledOnce();
+    expect(state.api.start).not.toHaveBeenCalled();
+    expect(deps.run).not.toHaveBeenCalled();
+  });
+
+  it("fails safely and releases its lock when abandoned marking fails", async () => {
+    const running = runRecord({
+      id: "recovery-failure-run",
+      status: "RUNNING",
+      startedAt: new Date(now.getTime() - 60 * 60_000),
+      finishedAt: null,
+    });
+    const state = store(running);
+    vi.mocked(state.api.finishAbandoned).mockRejectedValueOnce(
+      new Error("database details"),
+    );
+    const deps = dependencies({ store: state });
+    const result = await runShopeeScheduledDiscoveryTick({
+      now,
+      environment: readyEnvironment(),
+      dependencies: deps.value,
+    });
+    expect(result).toMatchObject({
+      status: "FAILED",
+      errorCode: "SHOPEE_SCHEDULED_DISCOVERY_STALE_RECOVERY_FAILED",
+      externalRequests: 0,
+      writes: 0,
+      publicationsCreated: 0,
+      messagesSent: 0,
+      stateModified: false,
+    });
+    expect(JSON.stringify(result)).not.toContain("database details");
+    expect(state.api.start).not.toHaveBeenCalled();
+    expect(deps.run).not.toHaveBeenCalled();
+    expect(deps.ownedLock.release).toHaveBeenCalledOnce();
+  });
+
+  it("allows only one pipeline across two logical instances", async () => {
+    const running = runRecord({
+      id: "shared-abandoned-run",
+      status: "RUNNING",
+      startedAt: new Date(now.getTime() - 60 * 60_000),
+      finishedAt: null,
+    });
+    const state = store(running);
+    const first = dependencies({ store: state });
+    const firstResult = await runShopeeScheduledDiscoveryTick({
+      now,
+      environment: readyEnvironment(),
+      dependencies: first.value,
+    });
+    const second = dependencies({ store: state });
+    const secondResult = await runShopeeScheduledDiscoveryTick({
+      now: new Date(now.getTime() + 1),
+      environment: readyEnvironment(),
+      dependencies: second.value,
+    });
+    expect(firstResult.status).toBe("SUCCEEDED");
+    expect(secondResult.status).toBe("SKIPPED_NOT_DUE");
+    expect(first.run).toHaveBeenCalledOnce();
+    expect(second.run).not.toHaveBeenCalled();
+    expect(state.api.finishAbandoned).toHaveBeenCalledOnce();
+    expect(state.api.start).toHaveBeenCalledOnce();
   });
 
   it("runs one due FULL multi-reference discovery and preserves recent selection", async () => {
@@ -485,6 +830,37 @@ describe("Shopee scheduled discovery outcomes", () => {
 });
 
 describe("Shopee scheduled discovery status", () => {
+  it("reports stale RUNNING recovery eligibility without writes or Redis probes", async () => {
+    const startedAt = new Date(now.getTime() - 60 * 60_000);
+    const state = store(
+      runRecord({
+        status: "RUNNING",
+        startedAt,
+        finishedAt: null,
+      }),
+    );
+    const status = await getShopeeScheduledDiscoveryStatus({
+      now,
+      environment: readyEnvironment(),
+      store: state.api,
+    });
+    expect(status).toMatchObject({
+      due: true,
+      lastRunStatus: "RUNNING",
+      lastRunStale: true,
+      staleRunRecoveryAt: new Date(
+        startedAt.getTime() + 60 * 60_000,
+      ).toISOString(),
+      lockState: "CONFIGURED_NOT_PROBED",
+      externalRequests: 0,
+      writes: 0,
+      stateModified: false,
+    });
+    expect(state.api.start).not.toHaveBeenCalled();
+    expect(state.api.finish).not.toHaveBeenCalled();
+    expect(state.api.finishAbandoned).not.toHaveBeenCalled();
+  });
+
   it("is read-only and exposes persisted sanitized metrics", async () => {
     const state = store(
       runRecord({

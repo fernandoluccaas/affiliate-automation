@@ -12,6 +12,12 @@ export const SHOPEE_SCHEDULED_DISCOVERY_NAME =
 export const SHOPEE_SCHEDULED_DISCOVERY_LOCK_KEY =
   "shopee:remote-discovery" as const;
 export const SHOPEE_SCHEDULED_DISCOVERY_LOCK_TTL_MS = 60 * 60_000;
+export const SHOPEE_SCHEDULED_DISCOVERY_ABANDONED_ERROR =
+  "SHOPEE_SCHEDULED_DISCOVERY_ABANDONED" as const;
+export const SHOPEE_SCHEDULED_DISCOVERY_STALE_RECOVERY_FAILED =
+  "SHOPEE_SCHEDULED_DISCOVERY_STALE_RECOVERY_FAILED" as const;
+export const SHOPEE_SCHEDULED_DISCOVERY_STATE_CHANGED =
+  "SHOPEE_SCHEDULED_DISCOVERY_STATE_CHANGED" as const;
 
 type ScheduledRunStatus = "RUNNING" | "SUCCEEDED" | "PARTIAL" | "FAILED";
 
@@ -37,6 +43,12 @@ export interface ShopeeScheduledDiscoveryStore {
     metrics: Record<string, unknown>;
     errorCode: string | null;
   }): Promise<void>;
+  finishAbandoned(input: {
+    id: string;
+    finishedAt: Date;
+    metrics: Record<string, unknown>;
+    errorCode: typeof SHOPEE_SCHEDULED_DISCOVERY_ABANDONED_ERROR;
+  }): Promise<boolean>;
 }
 
 export type ShopeeScheduledDiscoveryMetrics = {
@@ -56,6 +68,7 @@ export type ShopeeScheduledDiscoveryMetrics = {
   messagesSent: 0;
   complete: boolean;
   errorCode: string | null;
+  abandonedRunsRecovered: number;
 };
 
 export type ShopeeScheduledDiscoveryStatus = {
@@ -68,6 +81,8 @@ export type ShopeeScheduledDiscoveryStatus = {
   lastScheduledRunAt: string | null;
   nextScheduledRunAt: string | null;
   lastRunStatus: ScheduledRunStatus | null;
+  lastRunStale: boolean;
+  staleRunRecoveryAt: string | null;
   lastRunDurationMs: number | null;
   lastFeedsProcessed: number;
   lastItemsReceived: number;
@@ -187,20 +202,47 @@ export function createPrismaShopeeScheduledDiscoveryStore(): ShopeeScheduledDisc
         },
       });
     },
+    async finishAbandoned(input) {
+      const result = await prisma.automationRun.updateMany({
+        where: { id: input.id, status: "RUNNING" },
+        data: {
+          status: "FAILED",
+          finishedAt: input.finishedAt,
+          metrics: input.metrics as Prisma.InputJsonValue,
+          errorMessage: input.errorCode,
+        },
+      });
+      return result.count === 1;
+    },
   };
 }
 
 export function calculateShopeeScheduledDiscoveryDue(input: {
   now: Date;
   intervalMs: number;
-  lastRun: Pick<ShopeeScheduledRunRecord, "startedAt"> | null;
+  lastRun: Pick<ShopeeScheduledRunRecord, "startedAt" | "status"> | null;
 }) {
+  if (input.lastRun?.status === "RUNNING") {
+    const staleRunRecoveryAt = new Date(
+      input.lastRun.startedAt.getTime() +
+        SHOPEE_SCHEDULED_DISCOVERY_LOCK_TTL_MS,
+    );
+    const lastRunStale = input.now >= staleRunRecoveryAt;
+    return {
+      due: lastRunStale,
+      nextRunAt: staleRunRecoveryAt,
+      lastRunStale,
+      staleRunRecoveryAt,
+    };
+  }
   const nextRunAt = input.lastRun
     ? new Date(input.lastRun.startedAt.getTime() + input.intervalMs)
     : null;
   return {
     due: !nextRunAt || input.now >= nextRunAt,
     nextRunAt,
+    lastRunStale: false,
+    staleRunRecoveryAt: null,
   };
 }
 
@@ -222,7 +264,23 @@ function emptyMetrics(errorCode: string | null = null) {
     messagesSent: 0 as const,
     complete: false,
     errorCode,
+    abandonedRunsRecovered: 0,
   } satisfies ShopeeScheduledDiscoveryMetrics;
+}
+
+function abandonedRunMetrics(input: { startedAt: Date; recoveredAt: Date }) {
+  return {
+    ...emptyMetrics(SHOPEE_SCHEDULED_DISCOVERY_ABANDONED_ERROR),
+    durationMs: Math.max(
+      0,
+      input.recoveredAt.getTime() - input.startedAt.getTime(),
+    ),
+    failed: 1,
+    writes: 1,
+    abandonedRunsRecovered: 1,
+    abandoned: true,
+    recoveredAt: input.recoveredAt.toISOString(),
+  };
 }
 
 function metricsFromDiscovery(
@@ -249,6 +307,7 @@ function metricsFromDiscovery(
     messagesSent: 0,
     complete: result.preview.complete,
     errorCode: result.errorCode,
+    abandonedRunsRecovered: 0,
   };
 }
 
@@ -297,6 +356,8 @@ export async function getShopeeScheduledDiscoveryStatus(
     lastScheduledRunAt: latest?.startedAt.toISOString() ?? null,
     nextScheduledRunAt: due.nextRunAt?.toISOString() ?? null,
     lastRunStatus: latest?.status ?? null,
+    lastRunStale: due.lastRunStale,
+    staleRunRecoveryAt: due.staleRunRecoveryAt?.toISOString() ?? null,
     lastRunDurationMs:
       latest && typeof metrics.durationMs === "number"
         ? nonNegativeInteger(metrics.durationMs)
@@ -420,6 +481,8 @@ export async function runShopeeScheduledDiscoveryTick(
   }
 
   let runId: string | null = null;
+  let recoveryWrites = 0;
+  let recoveredRunId: string | null = null;
   try {
     const latestAfterLock = await store.findLatest();
     const dueAfterLock = calculateShopeeScheduledDiscoveryDue({
@@ -427,6 +490,55 @@ export async function runShopeeScheduledDiscoveryTick(
       intervalMs: configuration.automatedDiscoveryIntervalMs,
       lastRun: latestAfterLock,
     });
+    const observedStaleRunId = due.lastRunStale ? latest?.id : null;
+    if (dueAfterLock.lastRunStale) {
+      if (!observedStaleRunId || latestAfterLock?.id !== observedStaleRunId) {
+        return skippedResult({
+          status: "SKIPPED_LOCKED",
+          autoRunReady: true,
+          due: true,
+          nextScheduledRunAt:
+            dueAfterLock.staleRunRecoveryAt?.toISOString() ?? null,
+          errorCode: SHOPEE_SCHEDULED_DISCOVERY_STATE_CHANGED,
+        });
+      }
+      let recovered = false;
+      try {
+        recovered = await store.finishAbandoned({
+          id: observedStaleRunId,
+          finishedAt: now,
+          metrics: abandonedRunMetrics({
+            startedAt: latestAfterLock.startedAt,
+            recoveredAt: now,
+          }),
+          errorCode: SHOPEE_SCHEDULED_DISCOVERY_ABANDONED_ERROR,
+        });
+      } catch {
+        throw new Error(SHOPEE_SCHEDULED_DISCOVERY_STALE_RECOVERY_FAILED);
+      }
+      if (!recovered) {
+        const latestAfterRecoveryRace = await store.findLatest();
+        const dueAfterRecoveryRace = calculateShopeeScheduledDiscoveryDue({
+          now,
+          intervalMs: configuration.automatedDiscoveryIntervalMs,
+          lastRun: latestAfterRecoveryRace,
+        });
+        return skippedResult({
+          status: dueAfterRecoveryRace.lastRunStale
+            ? "SKIPPED_LOCKED"
+            : "SKIPPED_NOT_DUE",
+          autoRunReady: true,
+          due: dueAfterRecoveryRace.lastRunStale,
+          nextScheduledRunAt:
+            dueAfterRecoveryRace.nextRunAt?.toISOString() ?? null,
+          ...(dueAfterRecoveryRace.lastRunStale
+            ? { errorCode: SHOPEE_SCHEDULED_DISCOVERY_STATE_CHANGED }
+            : {}),
+        });
+      }
+      recoveryWrites = 1;
+      recoveredRunId = observedStaleRunId;
+    }
     if (!dueAfterLock.due) {
       return skippedResult({
         status: "SKIPPED_NOT_DUE",
@@ -439,7 +551,9 @@ export async function runShopeeScheduledDiscoveryTick(
       now.getTime() / configuration.automatedDiscoveryIntervalMs,
     );
     const started = await store.start({
-      idempotencyKey: `${SHOPEE_SCHEDULED_DISCOVERY_NAME}:${bucket}`,
+      idempotencyKey: recoveredRunId
+        ? `${SHOPEE_SCHEDULED_DISCOVERY_NAME}:${bucket}:recovery:${recoveredRunId}`
+        : `${SHOPEE_SCHEDULED_DISCOVERY_NAME}:${bucket}`,
       startedAt: now,
     });
     runId = started.id;
@@ -469,7 +583,14 @@ export async function runShopeeScheduledDiscoveryTick(
       ...(input.signal ? { signal: input.signal } : {}),
       acquireDiscoveryLock: async () => delegatedLock,
     });
-    const metrics = metricsFromDiscovery(result);
+    const discoveryMetrics = metricsFromDiscovery(result);
+    const metrics = recoveryWrites
+      ? {
+          ...discoveryMetrics,
+          writes: discoveryMetrics.writes + recoveryWrites,
+          abandonedRunsRecovered: recoveryWrites,
+        }
+      : discoveryMetrics;
     const status = statusFromResult(result, metrics);
     const finishedAt = dependencies.finishedAt?.() ?? new Date();
     await store.finish({
@@ -492,12 +613,16 @@ export async function runShopeeScheduledDiscoveryTick(
       writes: metrics.writes,
       publicationsCreated: 0,
       messagesSent: 0,
-      stateModified: result.stateModified,
+      stateModified: result.stateModified || recoveryWrites > 0,
       errorCode: result.errorCode,
     };
   } catch (error) {
     const errorCode = safeErrorCode(error);
-    const metrics = emptyMetrics(errorCode);
+    const metrics = {
+      ...emptyMetrics(errorCode),
+      writes: recoveryWrites,
+      abandonedRunsRecovered: recoveryWrites,
+    };
     if (runId) {
       await store
         .finish({
@@ -519,10 +644,10 @@ export async function runShopeeScheduledDiscoveryTick(
       ).toISOString(),
       metrics,
       externalRequests: 0,
-      writes: 0,
+      writes: recoveryWrites,
       publicationsCreated: 0,
       messagesSent: 0,
-      stateModified: false,
+      stateModified: recoveryWrites > 0,
       errorCode,
     };
   } finally {

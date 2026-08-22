@@ -364,6 +364,25 @@ O idempotency key por janela, a rechecagem de due depois do lock e o lock Redis
 tem TTL defensivo de uma hora e é liberado em sucesso, partial, falha ou
 exceção.
 
+Um `AutomationRun` com status `RUNNING` não é tratado como execução concluída.
+Antes de completar uma hora desde `startedAt`, ele permanece potencialmente
+ativo: `due=false`, e `nextScheduledRunAt` aponta para o fim desse lease seguro.
+No instante exato `startedAt + SHOPEE_SCHEDULED_DISCOVERY_LOCK_TTL_MS`, o status
+read-only passa a informar `lastRunStale=true` e `staleRunRecoveryAt`, sem sondar
+Redis e sem escrever no banco.
+
+A recuperação acontece somente dentro do tick. Ele tenta adquirir normalmente o
+mesmo lock Redis, sem `DEL`, `UNLINK` ou bypass. Lock ocupado preserva o run
+anterior como `RUNNING`. Depois de adquirir o lock, o tick relê o latest e usa
+uma atualização condicional para marcar somente o mesmo registro ainda
+`RUNNING` como `FAILED`, com
+`SHOPEE_SCHEDULED_DISCOVERY_ABANDONED`, `finishedAt` no momento da recuperação e
+métricas sanitizadas. Se o run tiver concluído ou mudado durante a race, ele não
+é sobrescrito. Apenas após a recuperação persistida um novo run recebe uma
+idempotency key de recovery e pode iniciar. Assim, morte abrupta antes do
+`finally` não bloqueia por 24 horas, enquanto execuções legítimas continuam
+protegidas durante todo o TTL.
+
 O scheduler carrega os item IDs selecionados nos últimos sete dias pelo mesmo
 `ImportJobItem` usado no fluxo manual. Somente um preview com `complete=true`
 chega ao import. Limite de páginas/itens, schema drift, paginação inconsistente,
@@ -411,6 +430,10 @@ não ignoram a cadência. Um tick antecipado continua retornando
 `npm` pode apresentar uma falha de lifecycle com outro código genérico, mas ela
 permanece sempre não zero. O worker continua automático e não recebe esses
 gates de CLI.
+
+Não existem opções `--force`, `--recover-now`, `--ignore-lock` ou equivalentes.
+A CLI controlada usa exatamente as mesmas regras de stale, lock e cadência do
+worker.
 
 Ajuda segura no PowerShell, sem efeitos:
 

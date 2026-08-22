@@ -36,6 +36,7 @@ function tickResult(
       messagesSent: 0,
       complete: false,
       errorCode: null,
+      abandonedRunsRecovered: 0,
     },
     externalRequests: 0,
     writes: 0,
