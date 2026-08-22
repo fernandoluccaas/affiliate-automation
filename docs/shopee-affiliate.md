@@ -292,6 +292,7 @@ Configuração segura:
 ```dotenv
 SHOPEE_DISCOVERY_SOURCE="LOCAL_FILE"
 SHOPEE_AUTOMATED_DISCOVERY_ENABLED="false"
+SHOPEE_AUTOMATED_DISCOVERY_INTERVAL_HOURS="24"
 SHOPEE_REMOTE_DISCOVERY_REFERENCE_IDS=""
 SHOPEE_REMOTE_DISCOVERY_PAGE_SIZE="500"
 SHOPEE_REMOTE_DISCOVERY_MAX_PAGES="10"
@@ -330,6 +331,65 @@ esta fase cria zero Publications e envia zero mensagens.
 O dashboard consulta feeds apenas por clique autenticado. Ele mantém pending
 localizado, bloqueio de duplo clique, tab e scroll, e mostra somente metadata e
 métricas sanitizadas. Nenhuma chamada ocorre no carregamento da página.
+
+## Descoberta agendada — Fase 6A.6
+
+A execução manual continua disponível e exige `--confirm-live-call` e
+`--confirm-import`. A execução agendada reutiliza o componente `discovery` do
+worker contínuo; não cria timer, processo ou scheduler paralelo. O componente
+do worker pode acordar em sua cadência normal, mas o serviço Shopee só fica due
+depois do intervalo próprio, cujo default é 24 horas:
+
+```dotenv
+SHOPEE_AUTOMATED_DISCOVERY_ENABLED="false"
+SHOPEE_AUTOMATED_DISCOVERY_INTERVAL_HOURS="24"
+SHOPEE_REMOTE_DISCOVERY_REFERENCE_IDS="reference-id-estavel-1,reference-id-estavel-2"
+```
+
+`autoRunReady` exige simultaneamente integração habilitada, modo Open API
+compatível, credenciais configuradas, source `OPEN_API_FEED`, contrato
+`OFFICIAL_V2_FULL`, flag de automação igual a `true`, intervalo válido, pelo
+menos um `referenceId` estável e um backend Redis configurado. O status seguro
+não sonda Redis nem adquire lock: ele informa `CONFIGURED_NOT_PROBED`, e o tick
+confirma a disponibilidade real de modo fail-closed ao adquirir o lock. IDs
+reais de conta nunca são defaults do repositório. A cada execução,
+`listItemFeeds(FULL)` resolve o `datafeedId` atual
+de cada referência; IDs datados não são usados como identidade persistente.
+
+O último tick é persistido como `AutomationRun` com o nome
+`shopee-scheduled-discovery`. A decisão due usa `startedAt + intervalo`, então
+reiniciar o worker minutos depois não dispara novamente a leitura do catálogo.
+O idempotency key por janela, a rechecagem de due depois do lock e o lock Redis
+`shopee:remote-discovery` impedem ticks duplicados e workers concorrentes. O lock
+tem TTL defensivo de uma hora e é liberado em sucesso, partial, falha ou
+exceção.
+
+O scheduler carrega os item IDs selecionados nos últimos sete dias pelo mesmo
+`ImportJobItem` usado no fluxo manual. Somente um preview com `complete=true`
+chega ao import. Limite de páginas/itens, schema drift, paginação inconsistente,
+auth, GraphQL, rate limit ou timeout deixam o run como PARTIAL/FAILED, com zero
+import e zero auto-link. Para os dois feeds grandes, o operador deve configurar
+limites suficientes, por exemplo 500 itens por página, ao menos 220 páginas e
+110.000 itens; os hard caps permanecem 500 páginas e 500.000 itens.
+
+Após import completo, `SHOPEE_AUTO_LINK_AFTER_IMPORT=false` mantém as ofertas em
+`READY_FOR_AFFILIATE_LINK`. Com `true`, o pipeline já existente chama
+`generateShortLink`, isola falhas individuais e pode levar as ofertas válidas a
+`READY_TO_PUBLISH`. Esse é o boundary final: o planejador do worker exclui
+explicitamente marketplace Shopee, portanto esta fase cria zero `Publication`
+e envia zero Telegram/WhatsApp.
+
+Status seguro, sem API e sem escrita:
+
+```powershell
+npm run shopee:discovery:auto:status
+```
+
+O status mostra enabled/ready/due, intervalo, última e próxima execução, feeds,
+itens, seleção, import, links e erro sanitizado. Para uma validação real futura,
+o operador configura `.env`, verifica primeiro esse status e inicia o worker
+operacional controlado. Os comandos manuais continuam exigindo suas duas
+confirmações; `--help` nunca passa pelo gate live.
 
 ### Registro histórico — decisão fail-closed da Fase 6A.5 (substituída)
 

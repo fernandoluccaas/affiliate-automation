@@ -38,6 +38,11 @@ import {
 import { sanitizeMercadoLivreAffiliateError } from "@affiliate/marketplace-connectors";
 import { validateMarketplaceAffiliateUrl } from "@affiliate/validation";
 import {
+  resolveShopeeAffiliateConfiguration,
+  runShopeeScheduledDiscoveryTick,
+  type ShopeeScheduledDiscoveryTickResult,
+} from "@affiliate/shopee-affiliate";
+import {
   getWorkerCadences,
   runContinuousWorker,
   type ContinuousWorkerDependencies,
@@ -864,6 +869,7 @@ export async function scheduleReadyOffers(
   const [fallbackOffers, preferredOffers, channels] = await Promise.all([
     prisma.offer.findMany({
       where: {
+        marketplace: { not: "SHOPEE" },
         status: { in: ["READY_TO_PUBLISH", "SCHEDULED", "PUBLISHED"] },
       },
       orderBy: { publishedAt: "asc" },
@@ -874,6 +880,7 @@ export async function scheduleReadyOffers(
       ? prisma.offer.findMany({
           where: {
             id: { in: preferredOfferIds },
+            marketplace: { not: "SHOPEE" },
             status: { in: ["READY_TO_PUBLISH", "SCHEDULED", "PUBLISHED"] },
           },
           include: { affiliateLinks: true },
@@ -922,6 +929,8 @@ export async function scheduleReadyOffers(
   }
 
   for (const offer of prioritizedOffers) {
+    // Shopee automation deliberately stops at READY_TO_PUBLISH in Phase 6A.6.
+    if (offer.marketplace === "SHOPEE") continue;
     for (const channel of channels) {
       if (scheduledChannelIds.has(channel.id)) continue;
 
@@ -1545,6 +1554,7 @@ export async function expireInvalidOffers(now = new Date()) {
 type WorkerStageName =
   | "expire"
   | "discovery"
+  | "shopee-discovery"
   | "affiliate-links"
   | "refresh"
   | "schedule"
@@ -1587,6 +1597,7 @@ export type WorkerCycleMetrics = JobMetrics & {
   discovery: MercadoLivreDiscoveryCycleResult | null;
   affiliateLinks: MercadoLivreAffiliateCycleResult | null;
   refresh: MercadoLivreRefreshCycleMetrics | null;
+  shopeeDiscovery: ShopeeScheduledDiscoveryTickResult | null;
 };
 
 type WorkerCycleDependencies = {
@@ -1594,6 +1605,7 @@ type WorkerCycleDependencies = {
   collectMercadoLivreCandidates: typeof collectMercadoLivreCandidates;
   processAffiliateLinkJobs: typeof processAffiliateLinkJobs;
   refreshMercadoLivreOffers: typeof refreshMercadoLivreOffers;
+  runShopeeScheduledDiscoveryTick: typeof runShopeeScheduledDiscoveryTick;
   scheduleReadyOffers: typeof scheduleReadyOffers;
   retryFailedPublications: typeof retryFailedPublications;
   publishScheduledOffers: typeof publishScheduledOffers;
@@ -1606,6 +1618,7 @@ function emptyWorkerCycleMetrics(): WorkerCycleMetrics {
     discovery: null,
     affiliateLinks: null,
     refresh: null,
+    shopeeDiscovery: null,
   };
 }
 
@@ -1663,6 +1676,7 @@ export async function runWorkerCycle(
     collectMercadoLivreCandidates,
     processAffiliateLinkJobs,
     refreshMercadoLivreOffers,
+    runShopeeScheduledDiscoveryTick,
     scheduleReadyOffers,
     retryFailedPublications,
     publishScheduledOffers,
@@ -1772,6 +1786,42 @@ export async function runWorkerCycle(
   );
   if (discovery) {
     metrics.discovery = discovery;
+  }
+
+  const shopeeConfiguration = resolveShopeeAffiliateConfiguration();
+  if (
+    shopeeConfiguration.automatedDiscoveryEnabled ||
+    dependencyOverrides.runShopeeScheduledDiscoveryTick
+  ) {
+    const shopeeDiscovery = await runStage(
+      "shopee-discovery",
+      () => dependencies.runShopeeScheduledDiscoveryTick({ now }),
+      (result) => {
+        if (result.status === "FAILED") {
+          return {
+            status: "FAILED",
+            errorCode: result.errorCode ?? "SHOPEE_SCHEDULED_DISCOVERY_FAILED",
+            errorMessage: "Shopee scheduled discovery failed safely.",
+          };
+        }
+        if (result.status === "PARTIAL" || result.status === "NOT_READY") {
+          return {
+            status: "PARTIAL",
+            errorCode: result.errorCode ?? "SHOPEE_SCHEDULED_DISCOVERY_PARTIAL",
+            errorMessage: "Shopee scheduled discovery did not complete.",
+          };
+        }
+        if (
+          result.status === "DISABLED" ||
+          result.status === "SKIPPED_NOT_DUE" ||
+          result.status === "SKIPPED_LOCKED"
+        ) {
+          return { status: "SKIPPED" };
+        }
+        return { status: "SUCCEEDED" };
+      },
+    );
+    if (shopeeDiscovery) metrics.shopeeDiscovery = shopeeDiscovery;
   }
 
   const affiliateLinks = await runStage(
@@ -2140,28 +2190,54 @@ export async function startWorker(
   const rawDependencies: ContinuousWorkerDependencies =
     options.dependencies ?? {
       discovery: async (now) => {
-        const [discovery, , refresh] = (await independently([
+        const shopeeEnabled =
+          resolveShopeeAffiliateConfiguration().automatedDiscoveryEnabled;
+        const operations: Array<() => Promise<unknown>> = [
           () => collectMercadoLivreCandidates(now),
           () =>
             processAffiliateLinkJobs({
               limit: pendingAffiliateBatchLimit(),
             }),
           () => refreshMercadoLivreOffers(now),
-        ])) as [
+        ];
+        if (shopeeEnabled) {
+          operations.push(() => runShopeeScheduledDiscoveryTick({ now }));
+        }
+        const [discovery, , refresh, shopee] = (await independently(
+          operations,
+        )) as [
           MercadoLivreDiscoveryCycleResult,
           MercadoLivreAffiliateCycleResult,
           MercadoLivreRefreshCycleMetrics,
+          ShopeeScheduledDiscoveryTickResult | undefined,
         ];
+        const shopeeFailed =
+          shopee?.status === "FAILED" || shopee?.status === "NOT_READY";
+        const shopeePartial = shopee?.status === "PARTIAL";
+        const discoveryStatus =
+          discovery.status === "FAILED"
+            ? "FAILED"
+            : discovery.status === "PARTIAL" || shopeeFailed || shopeePartial
+              ? "PARTIAL"
+              : discovery.status;
         return {
-          discoveryStatus: discovery.status,
+          discoveryStatus,
+          ...(shopee ? { shopeeDiscovery: shopee } : {}),
           operationalMetrics: {
-            offersDiscovered: discovery.metrics.candidatesFound,
+            offersDiscovered:
+              discovery.metrics.candidatesFound +
+              (shopee?.metrics.selected ?? 0),
             offersUpdated:
               discovery.metrics.updatedOffers +
               discovery.metrics.newOfferVersions +
-              refresh.newVersions,
-            affiliateLinksGenerated: discovery.metrics.affiliateLinksGenerated,
-            affiliateLinksReused: discovery.metrics.affiliateLinksReused,
+              refresh.newVersions +
+              (shopee?.metrics.imported ?? 0),
+            affiliateLinksGenerated:
+              discovery.metrics.affiliateLinksGenerated +
+              (shopee?.metrics.linksGenerated ?? 0),
+            affiliateLinksReused:
+              discovery.metrics.affiliateLinksReused +
+              (shopee?.metrics.linksReused ?? 0),
           },
         };
       },

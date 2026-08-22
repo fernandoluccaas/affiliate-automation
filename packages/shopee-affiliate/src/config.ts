@@ -173,6 +173,14 @@ export function resolveShopeeAffiliateConfiguration(
     "SHOPEE_REMOTE_DISCOVERY_PAGE_SIZE_INVALID",
     issues,
   );
+  const automatedDiscoveryIntervalHours = boundedInteger(
+    environment.SHOPEE_AUTOMATED_DISCOVERY_INTERVAL_HOURS,
+    24,
+    1,
+    168,
+    "SHOPEE_AUTOMATED_DISCOVERY_INTERVAL_INVALID",
+    issues,
+  );
   const remoteDiscoveryReferenceIds = remoteIdentifiers(
     environment.SHOPEE_REMOTE_DISCOVERY_REFERENCE_IDS,
     "SHOPEE_REMOTE_DISCOVERY_REFERENCE_IDS_INVALID",
@@ -198,6 +206,13 @@ export function resolveShopeeAffiliateConfiguration(
     configurationValid && enabled && openApiMode && openApiConfigured;
   const remoteDiscoveryReady =
     openApiReady && discoverySource === "OPEN_API_FEED";
+  const automatedDiscoveryEnabled =
+    environment.SHOPEE_AUTOMATED_DISCOVERY_ENABLED === "true";
+  const remoteDiscoveryLockConfigured = Boolean(
+    environment.REDIS_URL ||
+    (environment.UPSTASH_REDIS_REST_URL &&
+      environment.UPSTASH_REDIS_REST_TOKEN),
+  );
   return {
     enabled: configurationValid && enabled && effectiveMode !== "OFF",
     requestedMode,
@@ -236,8 +251,9 @@ export function resolveShopeeAffiliateConfiguration(
     autoLinkMaxPerRun,
     autoLinkConcurrency,
     discoverySource,
-    automatedDiscoveryEnabled:
-      environment.SHOPEE_AUTOMATED_DISCOVERY_ENABLED === "true",
+    automatedDiscoveryEnabled,
+    automatedDiscoveryIntervalHours,
+    automatedDiscoveryIntervalMs: automatedDiscoveryIntervalHours * 60 * 60_000,
     remoteDiscoveryContract: "OFFICIAL_V2_FULL",
     remoteDiscoveryState: remoteDiscoveryReady
       ? "READY_FOR_OPEN_API_FEED"
@@ -245,8 +261,12 @@ export function resolveShopeeAffiliateConfiguration(
         ? "DISABLED_BY_SOURCE"
         : "OPEN_API_NOT_READY",
     remoteDiscoveryReady,
+    remoteDiscoveryLockConfigured,
     remoteDiscoveryAutoRunReady:
-      remoteDiscoveryReady && remoteDiscoveryReferenceIds.length > 0,
+      remoteDiscoveryReady &&
+      automatedDiscoveryEnabled &&
+      remoteDiscoveryLockConfigured &&
+      remoteDiscoveryReferenceIds.length > 0,
     remoteDiscoveryPageSize,
     remoteDiscoveryMaxPages,
     remoteDiscoveryMaxItems,

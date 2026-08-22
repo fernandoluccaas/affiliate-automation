@@ -11,6 +11,7 @@
     "open-api:smoke": "node --env-file=../../.env --import tsx src/open-api-smoke-cli.ts",
     "affiliate-links": "node --env-file=../../.env --import tsx src/affiliate-links-cli.ts",
     "remote-discovery": "node --env-file=../../.env --import tsx src/remote-discovery-cli.ts",
+    "scheduled-discovery": "node --env-file=../../.env --import tsx src/scheduled-discovery-cli.ts",
     "build": "tsc -p tsconfig.json",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",

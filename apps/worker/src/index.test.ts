@@ -238,10 +238,37 @@ describe("createPublicationIdempotently", () => {
     expect(findManyOffers).toHaveBeenCalledWith(
       expect.objectContaining({
         where: {
+          marketplace: { not: "SHOPEE" },
           status: { in: ["READY_TO_PUBLISH", "SCHEDULED", "PUBLISHED"] },
         },
       }),
     );
+  });
+
+  it("keeps Shopee READY_TO_PUBLISH offers outside Publication planning", async () => {
+    const actual = await import("@affiliate/database");
+    const createPublication = vi.fn();
+    Object.assign(actual.prisma, {
+      offer: {
+        findMany: vi.fn().mockResolvedValue([
+          {
+            id: "shopee-ready",
+            marketplace: "SHOPEE",
+            status: "READY_TO_PUBLISH",
+            affiliateLinks: [],
+          },
+        ]),
+      },
+      channel: { findMany: vi.fn().mockResolvedValue([{ id: "channel-1" }]) },
+      publication: { create: createPublication },
+    });
+
+    const result = await scheduleReadyOffers(
+      new Date("2026-08-22T12:00:00.000Z"),
+    );
+
+    expect(result).toMatchObject({ readyOffersFound: 1, scheduled: 0 });
+    expect(createPublication).not.toHaveBeenCalled();
   });
 
   it("schedules a sparse READY_TO_PUBLISH offer for a channel without optional minimums", async () => {
@@ -252,7 +279,7 @@ describe("createPublicationIdempotently", () => {
       productId: "product-1",
       title: "Produto teste sem dados enriquecidos",
       externalProductId: "produto-opcional-001",
-      marketplace: "SHOPEE",
+      marketplace: "MERCADO_LIVRE",
       category: null,
       imageUrl: null,
       originalPrice: null,
@@ -265,7 +292,7 @@ describe("createPublicationIdempotently", () => {
       stockStatus: "UNKNOWN",
       score: 100,
       scoreCompletenessPercentage: 10,
-      affiliateUrl: "https://example.com/affiliate",
+      affiliateUrl: "https://www.mercadolivre.com.br/sec/fixture",
       version: 1,
       sourceCategoryId: "MLB123",
       bestSellerPosition: 8,
@@ -276,7 +303,7 @@ describe("createPublicationIdempotently", () => {
         {
           id: "link-1",
           slug: "produto-opcional-001",
-          destination: "https://example.com/affiliate",
+          destination: "https://www.mercadolivre.com.br/sec/fixture",
           active: true,
         },
       ],
@@ -294,7 +321,7 @@ describe("createPublicationIdempotently", () => {
       minimumScore: 0,
       minDiscountPercentage: 0,
       productRepeatIntervalDays: 0,
-      allowedMarketplaces: ["SHOPEE"],
+      allowedMarketplaces: ["MERCADO_LIVRE"],
       allowedCategories: [],
       configuration: { chatId: "chat-1" },
       createdAt: now,
@@ -1529,6 +1556,107 @@ describe("continuous worker Redis coordination", () => {
 });
 
 describe("runWorkerCycle", () => {
+  it("isolates a Shopee scheduled discovery error and continues the worker cycle", async () => {
+    const actual = await import("@affiliate/database");
+    const automationRunUpdate = vi.fn().mockResolvedValue({});
+    const systemAlertCreate = vi.fn().mockResolvedValue({});
+    Object.assign(actual.prisma, {
+      automationRun: {
+        create: vi.fn().mockResolvedValue({ id: "worker-run-shopee" }),
+        update: automationRunUpdate,
+      },
+      systemAlert: { create: systemAlertCreate },
+    });
+    const now = new Date("2026-08-22T12:00:00.000Z");
+    const schedule = vi.fn().mockResolvedValue(workerJobMetrics());
+    const publish = vi.fn().mockResolvedValue(workerJobMetrics());
+    const shopee = vi.fn().mockResolvedValue({
+      status: "FAILED",
+      autoRunReady: true,
+      due: true,
+      runId: "shopee-run",
+      nextScheduledRunAt: "2026-08-23T12:00:00.000Z",
+      metrics: {
+        durationMs: 10,
+        feedsProcessed: 0,
+        itemsReceived: 0,
+        selected: 0,
+        imported: 0,
+        linksGenerated: 0,
+        linksReused: 0,
+        failed: 0,
+        pendingAffiliateLink: 0,
+        readyToPublish: 0,
+        externalRequests: 0,
+        writes: 0,
+        publicationsCreated: 0,
+        messagesSent: 0,
+        complete: false,
+        errorCode: "SHOPEE_OPEN_API_SCHEMA_MISMATCH",
+      },
+      externalRequests: 0,
+      writes: 0,
+      publicationsCreated: 0,
+      messagesSent: 0,
+      stateModified: false,
+      errorCode: "SHOPEE_OPEN_API_SCHEMA_MISMATCH",
+    });
+
+    const result = await runWorkerCycle(now, {
+      expireInvalidOffers: vi.fn().mockResolvedValue(workerJobMetrics()),
+      collectMercadoLivreCandidates: vi.fn().mockResolvedValue({
+        ok: true,
+        status: "SUCCEEDED",
+        metrics: createMercadoLivreDiscoveryMetrics(),
+      }),
+      runShopeeScheduledDiscoveryTick: shopee,
+      processAffiliateLinkJobs: vi.fn().mockResolvedValue({
+        selected: 0,
+        processed: 0,
+        failed: 0,
+      }),
+      refreshMercadoLivreOffers: vi.fn().mockResolvedValue({
+        ...workerJobMetrics(),
+        selected: 0,
+        refreshed: 0,
+        unchanged: 0,
+        newVersions: 0,
+        notFound: 0,
+        affiliateUrlsPreserved: 0,
+        failures: [],
+      }),
+      scheduleReadyOffers: schedule,
+      retryFailedPublications: vi.fn().mockResolvedValue(workerJobMetrics()),
+      publishScheduledOffers: publish,
+    } as never);
+
+    expect(shopee).toHaveBeenCalledWith({ now });
+    expect(schedule).toHaveBeenCalled();
+    expect(publish).toHaveBeenCalled();
+    expect(result).toMatchObject({
+      shopeeDiscovery: { status: "FAILED" },
+      stages: {
+        discovery: { status: "SUCCEEDED" },
+        "shopee-discovery": {
+          status: "FAILED",
+          errorCode: "SHOPEE_OPEN_API_SCHEMA_MISMATCH",
+        },
+        schedule: { status: "SUCCEEDED" },
+        publish: { status: "SUCCEEDED" },
+      },
+    });
+    expect(automationRunUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "PARTIAL" }),
+      }),
+    );
+    expect(systemAlertCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ source: "worker.shopee-discovery" }),
+      }),
+    );
+  });
+
   it("forwards the balanced session order to the existing scheduler", async () => {
     const actual = await import("@affiliate/database");
     const now = new Date("2026-08-06T12:00:00.000Z");

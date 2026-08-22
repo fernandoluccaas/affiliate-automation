@@ -83,6 +83,7 @@ describe("Shopee dashboard Server Actions", () => {
       recentSelectionWindowDays: 7,
       maxPerShopPerSession: 2,
       remoteDiscoveryReady: false,
+      remoteDiscoveryLockConfigured: false,
     });
     recentItems.mockResolvedValue([]);
     offerState.mockResolvedValue({
@@ -105,6 +106,7 @@ describe("Shopee dashboard Server Actions", () => {
       mode: "HYBRID",
       recentSelectionWindowDays: 7,
       remoteDiscoveryReady: true,
+      remoteDiscoveryLockConfigured: false,
     });
     listRemoteFeeds.mockResolvedValue({
       status: "SUCCEEDED",
@@ -127,6 +129,7 @@ describe("Shopee dashboard Server Actions", () => {
       mode: "HYBRID",
       recentSelectionWindowDays: 7,
       remoteDiscoveryReady: true,
+      remoteDiscoveryLockConfigured: false,
     });
     const remoteInput = {
       confirmLiveCall: true as const,

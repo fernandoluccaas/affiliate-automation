@@ -122,7 +122,10 @@ describe("Shopee affiliate configuration", () => {
       autoLinkConcurrency: 1,
       discoverySource: "LOCAL_FILE",
       automatedDiscoveryEnabled: false,
+      automatedDiscoveryIntervalHours: 24,
+      automatedDiscoveryIntervalMs: 86_400_000,
       remoteDiscoveryReady: false,
+      remoteDiscoveryLockConfigured: false,
       remoteDiscoveryContract: "OFFICIAL_V2_FULL",
       remoteDiscoveryState: "DISABLED_BY_SOURCE",
       remoteDiscoveryAutoRunReady: false,
@@ -173,6 +176,7 @@ describe("Shopee affiliate configuration", () => {
       SHOPEE_OPEN_API_APP_ID: "fixture-app",
       SHOPEE_OPEN_API_SECRET: "fixture-secret",
       SHOPEE_DISCOVERY_SOURCE: "OPEN_API_FEED",
+      REDIS_URL: "redis://fixture.invalid:6379",
     };
     expect(resolveShopeeAffiliateConfiguration(base)).toMatchObject({
       remoteDiscoveryContract: "OFFICIAL_V2_FULL",
@@ -183,6 +187,7 @@ describe("Shopee affiliate configuration", () => {
     expect(
       resolveShopeeAffiliateConfiguration({
         ...base,
+        SHOPEE_AUTOMATED_DISCOVERY_ENABLED: "true",
         SHOPEE_REMOTE_DISCOVERY_REFERENCE_IDS: "stable-reference",
         SHOPEE_REMOTE_DISCOVERY_MAX_PAGES: "250",
         SHOPEE_REMOTE_DISCOVERY_MAX_ITEMS: "120000",
@@ -192,6 +197,73 @@ describe("Shopee affiliate configuration", () => {
       remoteDiscoveryAutoRunReady: true,
       remoteDiscoveryMaxPages: 250,
       remoteDiscoveryMaxItems: 120_000,
+    });
+  });
+
+  it("requires an exact enabled flag, stable references and valid cadence for auto-run", () => {
+    const base = {
+      SHOPEE_AFFILIATE_ENABLED: "true",
+      SHOPEE_AFFILIATE_MODE: "HYBRID",
+      SHOPEE_OPEN_API_APP_ID: "fixture-app",
+      SHOPEE_OPEN_API_SECRET: "fixture-secret",
+      SHOPEE_DISCOVERY_SOURCE: "OPEN_API_FEED",
+      SHOPEE_REMOTE_DISCOVERY_REFERENCE_IDS: "stable-reference",
+      REDIS_URL: "redis://fixture.invalid:6379",
+    };
+    expect(resolveShopeeAffiliateConfiguration(base)).toMatchObject({
+      remoteDiscoveryReady: true,
+      automatedDiscoveryEnabled: false,
+      remoteDiscoveryAutoRunReady: false,
+    });
+    expect(
+      resolveShopeeAffiliateConfiguration({
+        ...base,
+        SHOPEE_AUTOMATED_DISCOVERY_ENABLED: "true",
+        SHOPEE_AUTOMATED_DISCOVERY_INTERVAL_HOURS: "12",
+      }),
+    ).toMatchObject({
+      automatedDiscoveryIntervalHours: 12,
+      automatedDiscoveryIntervalMs: 43_200_000,
+      remoteDiscoveryAutoRunReady: true,
+    });
+    expect(
+      resolveShopeeAffiliateConfiguration({
+        ...base,
+        SHOPEE_AUTOMATED_DISCOVERY_ENABLED: "true",
+        SHOPEE_AUTOMATED_DISCOVERY_INTERVAL_HOURS: "0",
+      }),
+    ).toMatchObject({
+      configurationValid: false,
+      automatedDiscoveryIntervalHours: 24,
+      remoteDiscoveryAutoRunReady: false,
+      issues: expect.arrayContaining([
+        "SHOPEE_AUTOMATED_DISCOVERY_INTERVAL_INVALID",
+      ]),
+    });
+  });
+
+  it("requires a configured Redis backend before reporting auto-run ready", () => {
+    const base = {
+      SHOPEE_AFFILIATE_ENABLED: "true",
+      SHOPEE_AFFILIATE_MODE: "HYBRID",
+      SHOPEE_OPEN_API_APP_ID: "fixture-app",
+      SHOPEE_OPEN_API_SECRET: "fixture-secret",
+      SHOPEE_DISCOVERY_SOURCE: "OPEN_API_FEED",
+      SHOPEE_AUTOMATED_DISCOVERY_ENABLED: "true",
+      SHOPEE_REMOTE_DISCOVERY_REFERENCE_IDS: "stable-reference",
+    };
+    expect(resolveShopeeAffiliateConfiguration(base)).toMatchObject({
+      remoteDiscoveryLockConfigured: false,
+      remoteDiscoveryAutoRunReady: false,
+    });
+    expect(
+      resolveShopeeAffiliateConfiguration({
+        ...base,
+        REDIS_URL: "redis://fixture.invalid:6379",
+      }),
+    ).toMatchObject({
+      remoteDiscoveryLockConfigured: true,
+      remoteDiscoveryAutoRunReady: true,
     });
   });
 
