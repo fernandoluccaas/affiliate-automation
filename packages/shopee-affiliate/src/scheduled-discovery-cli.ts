@@ -1,11 +1,14 @@
-import { runShopeeScheduledDiscoveryCommand } from "./scheduled-discovery-command";
+import {
+  getShopeeScheduledDiscoveryExitCode,
+  runShopeeScheduledDiscoveryCommand,
+} from "./scheduled-discovery-command";
 
 const args = process.argv.slice(2);
 
 runShopeeScheduledDiscoveryCommand(args)
   .then((result) => {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-    process.exitCode = result.status === "FAILED" ? 2 : 0;
+    process.exitCode = getShopeeScheduledDiscoveryExitCode(result);
   })
   .catch(() => {
     process.stdout.write(

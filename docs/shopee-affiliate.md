@@ -386,10 +386,42 @@ npm run shopee:discovery:auto:status
 ```
 
 O status mostra enabled/ready/due, intervalo, última e próxima execução, feeds,
-itens, seleção, import, links e erro sanitizado. Para uma validação real futura,
-o operador configura `.env`, verifica primeiro esse status e inicia o worker
-operacional controlado. Os comandos manuais continuam exigindo suas duas
-confirmações; `--help` nunca passa pelo gate live.
+itens, seleção, import, links e erro sanitizado.
+
+Para validar isoladamente exatamente um tick, sem iniciar worker, Mercado Livre
+ou qualquer rotina de publicação, existe o comando controlado:
+
+```powershell
+npm run shopee:discovery:auto:tick -- --confirm-live-call --confirm-import
+```
+
+As confirmações são independentes e verificadas na camada CLI antes de lock,
+`AutomationRun`, API ou escrita. Se `SHOPEE_AUTO_LINK_AFTER_IMPORT=true`, também
+é obrigatório informar `--confirm-generate`:
+
+```powershell
+npm run shopee:discovery:auto:tick -- --confirm-live-call --confirm-import --confirm-generate
+```
+
+Essas flags autorizam os efeitos possíveis, mas não tornam o scheduler due e
+não ignoram a cadência. Um tick antecipado continua retornando
+`SKIPPED_NOT_DUE` com zero requests e zero writes. `SKIPPED_NOT_DUE`,
+`SKIPPED_LOCKED`, `DISABLED` e `SUCCEEDED` usam exit code 0; `PARTIAL` usa 1;
+`NOT_READY`, `FAILED` e qualquer confirmação ausente usam código interno 2. O
+`npm` pode apresentar uma falha de lifecycle com outro código genérico, mas ela
+permanece sempre não zero. O worker continua automático e não recebe esses
+gates de CLI.
+
+Ajuda segura no PowerShell, sem efeitos:
+
+```powershell
+npm run shopee:discovery:auto:tick -- --help
+```
+
+Tanto o worker quanto o tick isolado terminam em `READY_TO_PUBLISH`, sem criar
+`Publication` e sem enviar Telegram ou WhatsApp. Uma validação real deve começar
+pelo status e pela ajuda; as três confirmações só devem ser usadas posteriormente
+em uma janela operacional controlada.
 
 ### Registro histórico — decisão fail-closed da Fase 6A.5 (substituída)
 
