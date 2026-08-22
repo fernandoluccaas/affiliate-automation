@@ -42,10 +42,15 @@ export type ShopeeAffiliateConfiguration = {
   autoLinkConcurrency: number;
   discoverySource: ShopeeDiscoverySource;
   automatedDiscoveryEnabled: boolean;
-  remoteDiscoveryContract: "WAITING_FOR_OFFICIAL_CONTRACT";
+  remoteDiscoveryContract: "OFFICIAL_V2_FULL";
+  remoteDiscoveryState:
+    "READY_FOR_OPEN_API_FEED" | "DISABLED_BY_SOURCE" | "OPEN_API_NOT_READY";
   remoteDiscoveryReady: boolean;
+  remoteDiscoveryAutoRunReady: boolean;
+  remoteDiscoveryPageSize: number;
   remoteDiscoveryMaxPages: number;
   remoteDiscoveryMaxItems: number;
+  remoteDiscoveryReferenceIds: string[];
   remoteDiscoveryFeedIds: string[];
   issues: string[];
 };

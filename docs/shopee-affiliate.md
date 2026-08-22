@@ -215,7 +215,126 @@ inline, pending localizado, prevenção de duplo clique e preservação de tab,
 scroll e formulário. O arquivo continua no servidor; não há upload de 198 MB
 para a memória do browser.
 
-## Automated Discovery Source Decision
+## Descoberta oficial por Item Feed — contrato ativo
+
+A Fase 6A.5b ativa o adapter produtivo confirmado no Explorer V2 oficial para
+o ambiente brasileiro. A descoberta massiva usa exclusivamente:
+
+```text
+listItemFeeds(feedMode: FULL)
+  -> selecionar a versão atual pelo referenceId estável
+  -> getItemFeedData(datafeedId, offset, limit)
+  -> columns JSON
+  -> normalizador comercial compartilhado com o CSV
+  -> filtros, ranking, pools limitados e round robin
+```
+
+`listItemFeeds` retorna `datafeedId`, `referenceId`, `datafeedName`,
+`description`, `totalCount`, `date` e `feedMode`. O `referenceId` é a identidade
+estável configurável; o `datafeedId` identifica uma versão datada e é sempre
+usado exatamente como retornado pela API. O sistema nunca constrói o
+`datafeedId` por concatenação. Os dois feeds FULL disponíveis para uma conta
+podem ser processados sequencialmente na mesma sessão, sem hardcode de nomes ou
+IDs e com deduplicação global por `itemId`.
+
+`getItemFeedData` usa paginação por offset: começa em `0`, solicita de 1 a 500
+linhas e avança pelo progresso real (`offset + rows.length`). Cada página
+revalida `totalCount`: quando o próximo offset atinge esse limite, a leitura
+termina mesmo que a Shopee ainda informe `hasMore=true` na última página cheia.
+A página terminal vazia (`offset === totalCount`, zero linhas e
+`hasMore=false`) também conclui normalmente. `hasMore=false` antes do limite,
+offset repetido/regressivo, ausência de progresso, linhas além do limite ou
+`totalCount` incompatível continuam bloqueados. Uma variação coerente de
+`totalCount` entre páginas é aceita sem criar snapshot ou ultrapassar o limite.
+Preview parcial por `maxPages`/`maxItems` conserva métricas, produz zero
+escritas e encerra a CLI com sucesso; outras falhas parciais continuam com exit
+code não zero. Import exige `complete=true` e nunca persiste vencedores de um
+catálogo truncado.
+
+Em FULL, `updateType` deve ser `null`. DELTA está reconhecido no contrato, mas
+fica bloqueado por `SHOPEE_REMOTE_DISCOVERY_DELTA_NOT_SUPPORTED`; NEW, UPDATE e
+DELETE não são aplicados nesta fase. `productOfferV2` também foi confirmado
+como uma operação separada, com paginação page/`scrollId` de curta duração e
+`offerLink` em `s.shopee.com.br`, mas não integra o discovery. Ele fica reservado
+para enrichment futuro de comissão/vendas. `generateShortLink` permanece o
+único caminho principal de AffiliateLink.
+
+Contrato registrado, sem chamada operacional: `productOfferV2` aceita
+`listType` (`0 ALL`, `1 HIGHEST_COMMISSION`, `2 TOP_PERFORMING`,
+`3 LANDING_CATEGORY`, `4 DETAIL_CATEGORY`, `5 DETAIL_SHOP`,
+`6 DETAIL_COLLECTION`), além de `matchId`, `keyword`, `sortType`, `page`,
+`limit`, `itemId`, `shopId`, `productCatId`, `isAMSOffer` e `isKeySeller`. Os
+sorts confirmados são relevância, vendidos, preço decrescente/crescente e
+comissão. Os nodes podem fornecer item/shop, nomes, preços, sales, ratings,
+categorias, taxas/comissão, período, imagem, `productLink` e `offerLink`;
+`pageInfo` usa page/limit/hasNextPage/`scrollId`. O cursor começa vazio, dura
+aproximadamente 30 segundos e, se expirar, exigirá reinício da consulta. Esse
+contrato não é confundido com o offset do Item Feed e não foi implementado.
+
+O campo `columns` é uma string JSON com os nomes já conhecidos no CSV, como
+`itemid`, `title`, `price`, `sale_price`, `discount_percentage`,
+`item_rating`, categorias, imagens e `product_link`. O schema externo é
+validado com Zod; números em string passam pelo normalizador explícito e IDs
+continuam strings. Campos adicionais são tolerados sem influenciar regras.
+`global_item_attributes` não participa do ranking. O `product_short link`
+universal recebido no feed não é promovido a AffiliateLink nem usado em
+`/go/[slug]`; ele é descartado do modelo afiliado e o tracking oficial é criado
+posteriormente por `generateShortLink`.
+
+O consumo mantém memória limitada: a página atual é normalizada e liberada,
+enquanto ficam residentes somente o conjunto compacto de IDs vistos e pools de
+até 100 candidatos por categoria. Filtros, seis categorias, score,
+`recentSelectionWindowDays`, máximo por loja, máximo de 12 vencedores e round
+robin são os mesmos do CSV. Comissões e vendas não foram adicionadas ao score.
+
+Configuração segura:
+
+```dotenv
+SHOPEE_DISCOVERY_SOURCE="LOCAL_FILE"
+SHOPEE_AUTOMATED_DISCOVERY_ENABLED="false"
+SHOPEE_REMOTE_DISCOVERY_REFERENCE_IDS=""
+SHOPEE_REMOTE_DISCOVERY_PAGE_SIZE="500"
+SHOPEE_REMOTE_DISCOVERY_MAX_PAGES="10"
+SHOPEE_REMOTE_DISCOVERY_MAX_ITEMS="10000"
+SHOPEE_REMOTE_DISCOVERY_FEED_IDS="" # legado/deprecated
+```
+
+O default continua `LOCAL_FILE` e o auto-run continua desligado. A execução
+automática de escrita exige uma allowlist não vazia de `referenceId`; nenhum
+feed futuro é aceito implicitamente. A flag `SHOPEE_REMOTE_DISCOVERY_FEED_IDS`
+preserva compatibilidade somente para seleção exata de versões antigas e não
+deve ser confundida com identidade estável. Os limites aceitam configuração
+de pelo menos 250 páginas e 120.000 itens, mantendo defaults conservadores.
+Todas as páginas passam pelo mesmo timeout, rate limiter e transporte assinado,
+com concorrência efetiva 1. Apenas falhas transitórias de conexão, timeout ou
+5xx recebem uma segunda tentativa curta; auth, assinatura, GraphQL validation,
+schema, feed inexistente e rate limit não entram em retry local.
+
+Comandos operacionais:
+
+```powershell
+npm run shopee:discovery:remote:status
+npm run shopee:feeds:list -- --confirm-live-call
+npm run shopee:discovery:remote:preview -- --reference-id <REFERENCE_ID> --confirm-live-call
+npm run shopee:discovery:remote:preview -- --feed <DATAFEED_ID> --page-size 3 --max-pages 1 --max-items 3 --confirm-live-call
+npm run shopee:discovery:remote:run -- --reference-id <REFERENCE_ID> --confirm-live-call --confirm-import
+```
+
+Sem `--confirm-live-call`, há zero requests. O run requer ainda
+`--confirm-import`, lock Redis com ownership e catálogo completo. Preview gera
+zero `Product`, `Offer`, `AffiliateLink` e `Publication`. O import reutiliza o
+pipeline versionado e pode executar auto-link somente se
+`SHOPEE_AUTO_LINK_AFTER_IMPORT=true` e HYBRID estiver pronto. Em qualquer caso,
+esta fase cria zero Publications e envia zero mensagens.
+
+O dashboard consulta feeds apenas por clique autenticado. Ele mantém pending
+localizado, bloqueio de duplo clique, tab e scroll, e mostra somente metadata e
+métricas sanitizadas. Nenhuma chamada ocorre no carregamento da página.
+
+### Registro histórico — decisão fail-closed da Fase 6A.5 (substituída)
+
+O texto abaixo documenta por que a fase anterior permaneceu fechada antes de o
+contrato ser confirmado. O estado operacional atual é o descrito acima.
 
 A Fase 6A.5 auditou o cliente autenticado, os testes de assinatura, o smoke de
 `generateShortLink`, o histórico Git e o Explorer V2 oficial. O único contrato

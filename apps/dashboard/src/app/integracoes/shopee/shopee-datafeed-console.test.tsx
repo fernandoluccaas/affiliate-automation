@@ -10,6 +10,9 @@ const importAction = vi.hoisted(() => vi.fn());
 const retryAction = vi.hoisted(() => vi.fn());
 const manualAction = vi.hoisted(() => vi.fn());
 const bulkAction = vi.hoisted(() => vi.fn());
+const remoteFeedsAction = vi.hoisted(() => vi.fn());
+const remotePreviewAction = vi.hoisted(() => vi.fn());
+const remoteImportAction = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/shopee-datafeed-actions", () => ({
   inspectShopeeDatafeedAction: inspectAction,
@@ -18,6 +21,9 @@ vi.mock("@/lib/shopee-datafeed-actions", () => ({
   retryShopeeAffiliateLinkAction: retryAction,
   applyManualShopeeAffiliateLinkAction: manualAction,
   generatePendingShopeeAffiliateLinksAction: bulkAction,
+  listShopeeOfficialFeedsAction: remoteFeedsAction,
+  previewShopeeRemoteDiscoveryAction: remotePreviewAction,
+  confirmShopeeRemoteImportAction: remoteImportAction,
 }));
 
 const categories: ShopeeDashboardConfigurationDto["categories"] = [
@@ -57,11 +63,15 @@ const configuration: ShopeeDashboardConfigurationDto = {
   autoLinkConcurrency: 1,
   discoverySource: "LOCAL_FILE",
   automatedDiscoveryEnabled: false,
-  remoteDiscoveryContract: "WAITING_FOR_OFFICIAL_CONTRACT",
+  remoteDiscoveryContract: "OFFICIAL_V2_FULL",
+  remoteDiscoveryState: "DISABLED_BY_SOURCE",
   remoteDiscoveryReady: false,
+  remoteDiscoveryAutoRunReady: false,
+  remoteDiscoveryPageSize: 500,
   remoteDiscoveryMaxPages: 10,
   remoteDiscoveryMaxItems: 10_000,
   remoteDiscoveryFeedIds: [],
+  remoteDiscoveryReferenceIds: [],
   maxFileBytes: 536_870_912,
   maxTrackedItems: 2_000_000,
   issues: [],
@@ -175,6 +185,58 @@ describe("ShopeeDatafeedConsole", () => {
       },
       offerState: { offerCounts: { pending: 0, ready: 2 }, pendingOffers: [] },
     });
+    remoteFeedsAction.mockResolvedValue({
+      ok: true,
+      message: "1 feed(s) FULL localizado(s).",
+      data: {
+        status: "SUCCEEDED",
+        feeds: [
+          {
+            datafeedId: "ref-safe_FULL_2026-08-19",
+            referenceId: "ref-safe",
+            name: "Feed sanitizado",
+            totalCount: 10_000,
+            date: "20260819",
+            feedMode: "FULL",
+          },
+        ],
+        externalRequests: 1,
+        writes: 0,
+        stateModified: false,
+      },
+    });
+    remotePreviewAction.mockResolvedValue({
+      ok: true,
+      message: "Preview remoto concluído.",
+      data: {
+        status: "PREVIEW_COMPLETED",
+        source: "OPEN_API_FEED",
+        complete: true,
+        feed: null,
+        feeds: [],
+        feedsDiscovered: 1,
+        feedsSelected: 1,
+        feedsProcessed: 1,
+        currentFeed: "ref-safe",
+        feedTotalCount: 10_000,
+        pagesFetched: 20,
+        itemsReceived: 10_000,
+        itemsNormalized: 9_990,
+        itemsRejected: 10,
+        duplicates: 2,
+        eligible: 12,
+        candidatePoolSize: 12,
+        eligibleByCategory: {},
+        selected: [],
+        apiRequests: 21,
+        durationMs: 10,
+        errorCode: null,
+        databaseWrites: 0,
+        publicationsCreated: 0,
+        messagesSent: 0,
+        stateModified: false,
+      },
+    });
   });
 
   it("switches tabs without navigation or losing local form state", () => {
@@ -232,11 +294,11 @@ describe("ShopeeDatafeedConsole", () => {
     expect(screen.getByText("Nenhuma oferta pendente")).toBeInTheDocument();
   });
 
-  it("shows the remote source contract gap without issuing an automatic request", () => {
+  it("shows the official contract without issuing an automatic request", () => {
     render(<ShopeeDatafeedConsole configuration={configuration} />);
     fireEvent.click(screen.getByRole("tab", { name: "Datafeeds" }));
     expect(
-      screen.getByText("Contrato oficial ainda não comprovado"),
+      screen.getByText("Feed remoto desativado pela configuração"),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Consultar feeds oficiais" }),
@@ -246,6 +308,51 @@ describe("ShopeeDatafeedConsole", () => {
     ).toBeDisabled();
     expect(inspectAction).not.toHaveBeenCalled();
     expect(previewAction).not.toHaveBeenCalled();
+    expect(remoteFeedsAction).not.toHaveBeenCalled();
+  });
+
+  it("lists and previews official feeds only after explicit clicks", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(
+      <ShopeeDatafeedConsole
+        configuration={{
+          ...configuration,
+          mode: "HYBRID",
+          state: "READY_FOR_HYBRID",
+          discoverySource: "OPEN_API_FEED",
+          openApiConfigured: true,
+          openApiReady: true,
+          externalRequestsEnabled: true,
+          remoteDiscoveryReady: true,
+          remoteDiscoveryState: "READY_FOR_OPEN_API_FEED",
+        }}
+      />,
+    );
+    expect(remoteFeedsAction).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("tab", { name: "Datafeeds" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Consultar feeds oficiais" }),
+    );
+    const feedOption = await screen.findByRole("checkbox", {
+      name: /Feed sanitizado/,
+    });
+    fireEvent.click(feedOption);
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Executar preview pela Open API",
+      }),
+    );
+    expect(
+      await screen.findByText(/9990 normalizados, 10 rejeitados/),
+    ).toBeInTheDocument();
+    expect(remotePreviewAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        confirmLiveCall: true,
+        referenceIds: ["ref-safe"],
+        pageSize: 500,
+      }),
+    );
+    confirm.mockRestore();
   });
 
   it("requires preview before explicit import confirmation", async () => {

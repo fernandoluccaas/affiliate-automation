@@ -123,10 +123,14 @@ describe("Shopee affiliate configuration", () => {
       discoverySource: "LOCAL_FILE",
       automatedDiscoveryEnabled: false,
       remoteDiscoveryReady: false,
-      remoteDiscoveryContract: "WAITING_FOR_OFFICIAL_CONTRACT",
+      remoteDiscoveryContract: "OFFICIAL_V2_FULL",
+      remoteDiscoveryState: "DISABLED_BY_SOURCE",
+      remoteDiscoveryAutoRunReady: false,
+      remoteDiscoveryPageSize: 500,
       remoteDiscoveryMaxPages: 10,
       remoteDiscoveryMaxItems: 10_000,
       remoteDiscoveryFeedIds: [],
+      remoteDiscoveryReferenceIds: [],
     });
     expect(
       resolveShopeeAffiliateConfiguration({
@@ -139,22 +143,55 @@ describe("Shopee affiliate configuration", () => {
     });
   });
 
-  it("accepts explicit remote discovery settings but keeps the unproven contract closed", () => {
+  it("accepts official remote discovery settings and prefers stable references", () => {
     expect(
       resolveShopeeAffiliateConfiguration({
         SHOPEE_DISCOVERY_SOURCE: "OPEN_API_FEED",
         SHOPEE_AUTOMATED_DISCOVERY_ENABLED: "true",
         SHOPEE_REMOTE_DISCOVERY_MAX_PAGES: "20",
         SHOPEE_REMOTE_DISCOVERY_MAX_ITEMS: "5000",
+        SHOPEE_REMOTE_DISCOVERY_PAGE_SIZE: "250",
+        SHOPEE_REMOTE_DISCOVERY_REFERENCE_IDS: "ref-b,ref-a,ref-b",
         SHOPEE_REMOTE_DISCOVERY_FEED_IDS: "feed-b,feed-a,feed-b",
       }),
     ).toMatchObject({
       discoverySource: "OPEN_API_FEED",
       automatedDiscoveryEnabled: true,
       remoteDiscoveryReady: false,
+      remoteDiscoveryPageSize: 250,
       remoteDiscoveryMaxPages: 20,
       remoteDiscoveryMaxItems: 5_000,
       remoteDiscoveryFeedIds: ["feed-b", "feed-a"],
+      remoteDiscoveryReferenceIds: ["ref-b", "ref-a"],
+    });
+  });
+
+  it("reports the official adapter ready separately from automatic allowlisting", () => {
+    const base = {
+      SHOPEE_AFFILIATE_ENABLED: "true",
+      SHOPEE_AFFILIATE_MODE: "HYBRID",
+      SHOPEE_OPEN_API_APP_ID: "fixture-app",
+      SHOPEE_OPEN_API_SECRET: "fixture-secret",
+      SHOPEE_DISCOVERY_SOURCE: "OPEN_API_FEED",
+    };
+    expect(resolveShopeeAffiliateConfiguration(base)).toMatchObject({
+      remoteDiscoveryContract: "OFFICIAL_V2_FULL",
+      remoteDiscoveryState: "READY_FOR_OPEN_API_FEED",
+      remoteDiscoveryReady: true,
+      remoteDiscoveryAutoRunReady: false,
+    });
+    expect(
+      resolveShopeeAffiliateConfiguration({
+        ...base,
+        SHOPEE_REMOTE_DISCOVERY_REFERENCE_IDS: "stable-reference",
+        SHOPEE_REMOTE_DISCOVERY_MAX_PAGES: "250",
+        SHOPEE_REMOTE_DISCOVERY_MAX_ITEMS: "120000",
+      }),
+    ).toMatchObject({
+      remoteDiscoveryReady: true,
+      remoteDiscoveryAutoRunReady: true,
+      remoteDiscoveryMaxPages: 250,
+      remoteDiscoveryMaxItems: 120_000,
     });
   });
 
@@ -164,6 +201,8 @@ describe("Shopee affiliate configuration", () => {
         SHOPEE_DISCOVERY_SOURCE: "UNKNOWN",
         SHOPEE_REMOTE_DISCOVERY_MAX_PAGES: "0",
         SHOPEE_REMOTE_DISCOVERY_MAX_ITEMS: "999999",
+        SHOPEE_REMOTE_DISCOVERY_PAGE_SIZE: "501",
+        SHOPEE_REMOTE_DISCOVERY_REFERENCE_IDS: "contains spaces",
         SHOPEE_REMOTE_DISCOVERY_FEED_IDS: "contains spaces",
       }),
     ).toMatchObject({
@@ -176,6 +215,8 @@ describe("Shopee affiliate configuration", () => {
         "SHOPEE_DISCOVERY_SOURCE_INVALID",
         "SHOPEE_REMOTE_DISCOVERY_MAX_PAGES_INVALID",
         "SHOPEE_REMOTE_DISCOVERY_MAX_ITEMS_INVALID",
+        "SHOPEE_REMOTE_DISCOVERY_PAGE_SIZE_INVALID",
+        "SHOPEE_REMOTE_DISCOVERY_REFERENCE_IDS_INVALID",
         "SHOPEE_REMOTE_DISCOVERY_FEED_IDS_INVALID",
       ]),
     });

@@ -1,0 +1,22 @@
+{
+  "feeds": [
+    {
+      "datafeedId": "fixture-br_FULL_2026-08-19",
+      "referenceId": "fixture-br",
+      "datafeedName": "Feed Brasil sanitizado",
+      "description": "Fixture sem dados de conta",
+      "totalCount": 10000,
+      "date": "20260819",
+      "feedMode": "FULL"
+    },
+    {
+      "datafeedId": "fixture-official_FULL_2026-08-19",
+      "referenceId": "fixture-official",
+      "datafeedName": "Feed Oficial sanitizado",
+      "description": "Fixture sem dados de conta",
+      "totalCount": 100000,
+      "date": "20260819",
+      "feedMode": "FULL"
+    }
+  ]
+}

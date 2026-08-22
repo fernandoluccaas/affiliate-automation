@@ -197,13 +197,14 @@ success keeps failed Offers pending, and the flow stops at `READY_TO_PUBLISH`
 without creating a Publication. See
 [Shopee Affiliate](docs/shopee-affiliate.md).
 
-The automated-discovery foundation keeps `LOCAL_FILE` as the default source and
-adds a fail-closed `OPEN_API_FEED` adapter boundary. The repository currently
-contains no official, complete feed-operation contract, so it deliberately
-issues zero feed requests until the operation, variables, pagination and
-response schema are confirmed in Shopee's official Explorer. Mocked pagination,
-bounded selection, one-shot import orchestration and operator-confirmed CLI
-gates are ready without speculative GraphQL.
+Shopee remote discovery now implements the official Explorer V2 contracts
+`listItemFeeds(FULL)` and `getItemFeedData` through the existing signed
+transport. Stable `referenceId` allowlists resolve the current `datafeedId`,
+pages use offsets with a maximum size of 500, and the JSON `columns` records use
+the same normalizer, filtering and ranking as local CSV files. `LOCAL_FILE`
+remains the safe default, DELTA remains disabled, every live CLI call requires
+explicit confirmation, and a remote import additionally requires Redis plus
+`--confirm-import`. Remote discovery and import still create zero Publications.
 
 The worker processes queued `AFFILIATE_LINK_BATCH` jobs and isolates expiration, discovery, refresh, scheduling, retries and publication as independent stages. A failed discovery produces `PARTIAL` while refresh and ready publications continue. Refresh records `selected`, `refreshed`, `unchanged`, `newVersions`, `notFound`, `failed` and `affiliateUrlsPreserved`; it never replaces an existing affiliate URL with `null`.
 

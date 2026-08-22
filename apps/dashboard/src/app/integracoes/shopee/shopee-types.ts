@@ -6,6 +6,8 @@ import type {
   ShopeeOperationalImportResult,
   ShopeeOperationalOfferState,
   ShopeeBulkAffiliateLinkResult,
+  ShopeeRemoteDiscoveryResult,
+  ShopeeAutomatedDiscoveryResult,
 } from "@affiliate/shopee-affiliate";
 
 export type ShopeeDashboardConfigurationDto = ShopeeAffiliateConfiguration & {
@@ -64,3 +66,30 @@ export type ShopeeBulkLinkActionResult =
       message: string;
     }
   | { ok: false; errorCode: string; message: string };
+
+export type ShopeeRemoteActionInput = {
+  confirmLiveCall: true;
+  referenceIds: string[];
+  pageSize: number;
+  maxPages: number;
+  maxItems: number;
+};
+
+export type ShopeeRemoteFeedsActionResult = ShopeeActionResult<{
+  status: "SUCCEEDED";
+  feeds: Array<{
+    referenceId: string;
+    datafeedId: string;
+    name: string;
+    totalCount: number;
+    date: string;
+    feedMode: "FULL";
+  }>;
+  externalRequests: number;
+  writes: 0;
+  stateModified: false;
+}>;
+export type ShopeeRemotePreviewActionResult =
+  ShopeeActionResult<ShopeeRemoteDiscoveryResult>;
+export type ShopeeRemoteImportActionResult =
+  ShopeeActionResult<ShopeeAutomatedDiscoveryResult>;

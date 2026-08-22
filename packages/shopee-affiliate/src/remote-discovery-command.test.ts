@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { runShopeeRemoteDiscoveryCommand } from "./remote-discovery-command";
+import {
+  getShopeeRemoteDiscoveryExitCode,
+  runShopeeRemoteDiscoveryCommand,
+} from "./remote-discovery-command";
 
 const environment = {
   SHOPEE_AFFILIATE_ENABLED: "true",
@@ -9,6 +12,33 @@ const environment = {
 } as NodeJS.ProcessEnv;
 
 describe("Shopee remote discovery CLI contract", () => {
+  it("exits zero only for a deliberately limited partial preview", () => {
+    expect(
+      getShopeeRemoteDiscoveryExitCode(["preview", "--max-pages", "1"], {
+        status: "PARTIAL",
+        errorCode: "SHOPEE_REMOTE_DISCOVERY_LIMIT_REACHED",
+      }),
+    ).toBe(0);
+    expect(
+      getShopeeRemoteDiscoveryExitCode(["run", "--max-pages", "1"], {
+        status: "PARTIAL",
+        errorCode: "SHOPEE_REMOTE_DISCOVERY_LIMIT_REACHED",
+      }),
+    ).toBe(1);
+  });
+
+  it.each([
+    "SHOPEE_OPEN_API_SCHEMA_MISMATCH",
+    "SHOPEE_REMOTE_DISCOVERY_PAGINATION_INCONSISTENT",
+  ])("keeps %s non-zero for preview", (errorCode) => {
+    expect(
+      getShopeeRemoteDiscoveryExitCode(["preview"], {
+        status: "PARTIAL",
+        errorCode,
+      }),
+    ).toBe(1);
+  });
+
   it("returns a read-only fail-closed status without credentials", async () => {
     const result = await runShopeeRemoteDiscoveryCommand(["status"], {
       environment,
@@ -17,7 +47,7 @@ describe("Shopee remote discovery CLI contract", () => {
       status: "SHOPEE_REMOTE_DISCOVERY_STATUS",
       source: "LOCAL_FILE",
       remoteDiscoveryReady: false,
-      contract: "WAITING_FOR_OFFICIAL_CONTRACT",
+      contract: "OFFICIAL_V2_FULL",
       externalRequests: 0,
       writes: 0,
     });
@@ -43,14 +73,14 @@ describe("Shopee remote discovery CLI contract", () => {
     expect(listFeeds).not.toHaveBeenCalled();
   });
 
-  it("requires an explicit feed for preview", async () => {
+  it("requires an explicit or configured feed selection for preview", async () => {
     const preview = vi.fn();
     const result = await runShopeeRemoteDiscoveryCommand(
       ["preview", "--confirm-live-call"],
       { environment, preview },
     );
     expect(result).toMatchObject({
-      errorCode: "SHOPEE_REMOTE_FEED_ID_REQUIRED",
+      errorCode: "SHOPEE_REMOTE_FEED_SELECTION_REQUIRED",
     });
     expect(preview).not.toHaveBeenCalled();
   });
@@ -82,9 +112,81 @@ describe("Shopee remote discovery CLI contract", () => {
     expect(result.status).toBe("IMPORTED");
     expect(run).toHaveBeenCalledWith(
       expect.objectContaining({
-        feedId: "feed-1",
+        feedIds: ["feed-1"],
         confirmLiveCall: true,
         confirmImport: true,
+      }),
+    );
+  });
+
+  it("prints only sanitized official feed metadata", async () => {
+    const result = await runShopeeRemoteDiscoveryCommand(
+      ["feeds", "--confirm-live-call"],
+      {
+        environment,
+        listFeeds: vi.fn(async () => ({
+          status: "SUCCEEDED" as const,
+          feeds: [
+            {
+              datafeedId: "ref_FULL_2026-08-19",
+              referenceId: "ref",
+              datafeedName: "Feed sanitizado",
+              description: "must-not-be-printed",
+              totalCount: 10_000,
+              date: "20260819",
+              feedMode: "FULL" as const,
+            },
+          ],
+          externalRequests: 1,
+          writes: 0 as const,
+          stateModified: false as const,
+        })),
+      },
+    );
+    expect(result).toMatchObject({
+      feeds: [
+        {
+          referenceId: "ref",
+          datafeedId: "ref_FULL_2026-08-19",
+          name: "Feed sanitizado",
+          totalCount: 10_000,
+          date: "20260819",
+          feedMode: "FULL",
+        },
+      ],
+    });
+    expect(JSON.stringify(result)).not.toContain("must-not-be-printed");
+  });
+
+  it("forwards stable references and bounded smoke overrides", async () => {
+    const preview = vi.fn(async () => ({
+      status: "PREVIEW_COMPLETED" as const,
+      writes: 0,
+    }));
+    await runShopeeRemoteDiscoveryCommand(
+      [
+        "preview",
+        "--reference-id",
+        "ref-a",
+        "--reference-id",
+        "ref-b",
+        "--page-size",
+        "3",
+        "--max-pages",
+        "1",
+        "--max-items",
+        "3",
+        "--confirm-live-call",
+      ],
+      { environment, preview: preview as never },
+    );
+    expect(preview).toHaveBeenCalledWith(
+      expect.objectContaining({
+        referenceIds: ["ref-a", "ref-b"],
+        pageSize: 3,
+        maxPages: 1,
+        maxItems: 3,
+        confirmLiveCall: true,
       }),
     );
   });

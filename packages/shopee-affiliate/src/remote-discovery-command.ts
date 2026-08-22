@@ -15,9 +15,37 @@ export type ShopeeRemoteDiscoveryCommandDependencies = {
   run?: typeof runShopeeAutomatedDiscovery;
 };
 
+export function getShopeeRemoteDiscoveryExitCode(
+  args: readonly string[],
+  result: { status?: unknown; errorCode?: unknown },
+) {
+  const command = args[0] ?? "status";
+  if (
+    command === "preview" &&
+    result.status === "PARTIAL" &&
+    result.errorCode === "SHOPEE_REMOTE_DISCOVERY_LIMIT_REACHED"
+  ) {
+    return 0;
+  }
+  if (result.status === "FAILED") return 2;
+  if (result.status === "PARTIAL") return 1;
+  return 0;
+}
+
 function value(args: readonly string[], name: string) {
   const index = args.indexOf(name);
   return index >= 0 ? args[index + 1] : undefined;
+}
+
+function values(args: readonly string[], name: string) {
+  return args.flatMap((argument, index) =>
+    argument === name && args[index + 1] ? [args[index + 1]!] : [],
+  );
+}
+
+function numericValue(args: readonly string[], name: string) {
+  const raw = value(args, name);
+  return raw === undefined ? undefined : Number(raw);
 }
 
 function blocked(errorCode: string) {
@@ -30,6 +58,39 @@ function blocked(errorCode: string) {
     messagesSent: 0,
     stateModified: false,
   };
+}
+
+function sanitizedPreviewRecord(result: Record<string, unknown>) {
+  if (!Array.isArray(result.selected)) return result;
+  return {
+    ...result,
+    selected: result.selected.map((item) => {
+      const candidate = item as Record<string, unknown>;
+      return {
+        itemId: candidate.itemId,
+        category: candidate.category,
+        score: candidate.score,
+        salePrice: candidate.salePrice,
+        linkStatus: candidate.linkStatus,
+        sourceProductHost: candidate.sourceProductHost,
+      };
+    }),
+  };
+}
+
+function sanitizedCommandResult<T>(value: T): T {
+  if (!value || typeof value !== "object") return value;
+  const result = sanitizedPreviewRecord(value as Record<string, unknown>);
+  return {
+    ...result,
+    ...(result.preview && typeof result.preview === "object"
+      ? {
+          preview: sanitizedPreviewRecord(
+            result.preview as Record<string, unknown>,
+          ),
+        }
+      : {}),
+  } as T;
 }
 
 export async function runShopeeRemoteDiscoveryCommand(
@@ -47,7 +108,10 @@ export async function runShopeeRemoteDiscoveryCommand(
       openApiReady: configuration.openApiReady,
       remoteDiscoveryReady: configuration.remoteDiscoveryReady,
       contract: SHOPEE_REMOTE_FEED_CONTRACT_STATUS,
+      readinessState: configuration.remoteDiscoveryState,
+      configuredReferenceIds: configuration.remoteDiscoveryReferenceIds,
       configuredFeedIds: configuration.remoteDiscoveryFeedIds,
+      pageSize: configuration.remoteDiscoveryPageSize,
       maxPages: configuration.remoteDiscoveryMaxPages,
       maxItems: configuration.remoteDiscoveryMaxItems,
       externalRequests: 0,
@@ -60,33 +124,71 @@ export async function runShopeeRemoteDiscoveryCommand(
     return blocked("SHOPEE_REMOTE_DISCOVERY_NOT_CONFIRMED");
   }
   if (command === "feeds") {
-    return (dependencies.listFeeds ?? listShopeeOfficialFeeds)({
+    const result = await (dependencies.listFeeds ?? listShopeeOfficialFeeds)({
       confirmLiveCall,
       environment,
       ...(dependencies.client ? { client: dependencies.client } : {}),
     });
+    return result.status === "SUCCEEDED"
+      ? {
+          ...result,
+          feeds: result.feeds.map((feed) => ({
+            referenceId: feed.referenceId,
+            datafeedId: feed.datafeedId,
+            name: feed.datafeedName,
+            totalCount: feed.totalCount,
+            date: feed.date,
+            feedMode: feed.feedMode,
+          })),
+        }
+      : result;
   }
-  const feedId = value(args, "--feed");
-  if (!feedId) return blocked("SHOPEE_REMOTE_FEED_ID_REQUIRED");
+  const feedIds = values(args, "--feed");
+  const referenceIds = values(args, "--reference-id");
+  if (
+    feedIds.length === 0 &&
+    referenceIds.length === 0 &&
+    configuration.remoteDiscoveryReferenceIds.length === 0 &&
+    configuration.remoteDiscoveryFeedIds.length === 0
+  ) {
+    return blocked("SHOPEE_REMOTE_FEED_SELECTION_REQUIRED");
+  }
+  const selection = {
+    ...(feedIds.length > 0 ? { feedIds } : {}),
+    ...(referenceIds.length > 0 ? { referenceIds } : {}),
+    ...(numericValue(args, "--page-size") !== undefined
+      ? { pageSize: numericValue(args, "--page-size")! }
+      : {}),
+    ...(numericValue(args, "--max-pages") !== undefined
+      ? { maxPages: numericValue(args, "--max-pages")! }
+      : {}),
+    ...(numericValue(args, "--max-items") !== undefined
+      ? { maxItems: numericValue(args, "--max-items")! }
+      : {}),
+  };
   if (command === "preview") {
-    return (dependencies.preview ?? previewShopeeRemoteDiscovery)({
-      feedId,
-      confirmLiveCall,
-      environment,
-      ...(dependencies.client ? { client: dependencies.client } : {}),
-    });
+    const result = await (dependencies.preview ?? previewShopeeRemoteDiscovery)(
+      {
+        ...selection,
+        confirmLiveCall,
+        environment,
+        ...(dependencies.client ? { client: dependencies.client } : {}),
+      },
+    );
+    return sanitizedCommandResult(result);
   }
   if (command === "run") {
     if (!args.includes("--confirm-import")) {
       return blocked("SHOPEE_REMOTE_IMPORT_NOT_CONFIRMED");
     }
-    return (dependencies.run ?? runShopeeAutomatedDiscovery)({
-      feedId,
+    const result = await (dependencies.run ?? runShopeeAutomatedDiscovery)({
+      ...selection,
       confirmLiveCall,
       confirmImport: true,
       environment,
       ...(dependencies.client ? { client: dependencies.client } : {}),
     });
+    return sanitizedCommandResult(result);
   }
   return blocked("SHOPEE_REMOTE_DISCOVERY_COMMAND_INVALID");
 }

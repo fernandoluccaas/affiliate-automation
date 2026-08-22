@@ -18,7 +18,11 @@ const DISCOVERY_SOURCES = new Set<ShopeeDiscoverySource>([
   "OPEN_API_FEED",
 ]);
 
-function remoteFeedIds(raw: string | undefined, issues: string[]) {
+function remoteIdentifiers(
+  raw: string | undefined,
+  issue: string,
+  issues: string[],
+) {
   if (!raw?.trim()) return [];
   const values = [
     ...new Set(
@@ -34,7 +38,7 @@ function remoteFeedIds(raw: string | undefined, issues: string[]) {
       (value) => value.length > 128 || !/^[A-Za-z0-9_-]+$/.test(value),
     )
   ) {
-    issues.push("SHOPEE_REMOTE_DISCOVERY_FEED_IDS_INVALID");
+    issues.push(issue);
     return [];
   }
   return values;
@@ -149,7 +153,7 @@ export function resolveShopeeAffiliateConfiguration(
     environment.SHOPEE_REMOTE_DISCOVERY_MAX_PAGES,
     10,
     1,
-    100,
+    500,
     "SHOPEE_REMOTE_DISCOVERY_MAX_PAGES_INVALID",
     issues,
   );
@@ -157,12 +161,26 @@ export function resolveShopeeAffiliateConfiguration(
     environment.SHOPEE_REMOTE_DISCOVERY_MAX_ITEMS,
     10_000,
     100,
-    100_000,
+    500_000,
     "SHOPEE_REMOTE_DISCOVERY_MAX_ITEMS_INVALID",
     issues,
   );
-  const remoteDiscoveryFeedIds = remoteFeedIds(
+  const remoteDiscoveryPageSize = boundedInteger(
+    environment.SHOPEE_REMOTE_DISCOVERY_PAGE_SIZE,
+    500,
+    1,
+    500,
+    "SHOPEE_REMOTE_DISCOVERY_PAGE_SIZE_INVALID",
+    issues,
+  );
+  const remoteDiscoveryReferenceIds = remoteIdentifiers(
+    environment.SHOPEE_REMOTE_DISCOVERY_REFERENCE_IDS,
+    "SHOPEE_REMOTE_DISCOVERY_REFERENCE_IDS_INVALID",
+    issues,
+  );
+  const remoteDiscoveryFeedIds = remoteIdentifiers(
     environment.SHOPEE_REMOTE_DISCOVERY_FEED_IDS,
+    "SHOPEE_REMOTE_DISCOVERY_FEED_IDS_INVALID",
     issues,
   );
   if (enabled && requestedMode === "OFF") {
@@ -178,6 +196,8 @@ export function resolveShopeeAffiliateConfiguration(
     effectiveMode === "OPEN_API" || effectiveMode === "HYBRID";
   const openApiReady =
     configurationValid && enabled && openApiMode && openApiConfigured;
+  const remoteDiscoveryReady =
+    openApiReady && discoverySource === "OPEN_API_FEED";
   return {
     enabled: configurationValid && enabled && effectiveMode !== "OFF",
     requestedMode,
@@ -218,10 +238,19 @@ export function resolveShopeeAffiliateConfiguration(
     discoverySource,
     automatedDiscoveryEnabled:
       environment.SHOPEE_AUTOMATED_DISCOVERY_ENABLED === "true",
-    remoteDiscoveryContract: "WAITING_FOR_OFFICIAL_CONTRACT",
-    remoteDiscoveryReady: false,
+    remoteDiscoveryContract: "OFFICIAL_V2_FULL",
+    remoteDiscoveryState: remoteDiscoveryReady
+      ? "READY_FOR_OPEN_API_FEED"
+      : discoverySource !== "OPEN_API_FEED"
+        ? "DISABLED_BY_SOURCE"
+        : "OPEN_API_NOT_READY",
+    remoteDiscoveryReady,
+    remoteDiscoveryAutoRunReady:
+      remoteDiscoveryReady && remoteDiscoveryReferenceIds.length > 0,
+    remoteDiscoveryPageSize,
     remoteDiscoveryMaxPages,
     remoteDiscoveryMaxItems,
+    remoteDiscoveryReferenceIds,
     remoteDiscoveryFeedIds,
     issues,
   };

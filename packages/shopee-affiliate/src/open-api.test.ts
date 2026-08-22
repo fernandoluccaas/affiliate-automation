@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import {
   SHOPEE_OPEN_API_ENDPOINT,
   ShopeeOpenApiClient,
+  createGetItemFeedDataPayload,
   createGenerateShortLinkPayload,
+  createListItemFeedsPayload,
   createShopeeGraphQlStringLiteral,
   createShopeeOpenApiSignature,
   sanitizeShopeeSubIds,
@@ -38,6 +40,31 @@ function successFetch() {
 }
 
 describe("Shopee Affiliate Open API signature and payload", () => {
+  it("builds the confirmed FULL feed operations without a cursor", () => {
+    const list = createListItemFeedsPayload("FULL");
+    expect(list.request.query).toContain("listItemFeeds(feedMode: FULL)");
+    expect(list.request.query).toContain("referenceId");
+    const page = createGetItemFeedDataPayload({
+      datafeedId: "reference_FULL_2026-08-19",
+      offset: 500,
+      limit: 3,
+    });
+    expect(page.request.query).toContain(
+      'getItemFeedData(datafeedId: "reference_FULL_2026-08-19", offset: 500, limit: 3)',
+    );
+    expect(page.request.query).not.toContain("cursor");
+  });
+
+  it("rejects an Item Feed page size above 500 before transport", () => {
+    expect(() =>
+      createGetItemFeedDataPayload({
+        datafeedId: "feed",
+        offset: 0,
+        limit: 501,
+      }),
+    ).toThrow("SHOPEE_REMOTE_DISCOVERY_PAGINATION_INVALID");
+  });
+
   it("matches the official signature vector byte-for-byte", () => {
     const payload =
       '{"query":"{\\nbrandOffer{\\n    nodes{\\n        commissionRate\\n        offerName\\n    }\\n}\\n}"}';
@@ -185,6 +212,65 @@ describe("Shopee Affiliate Open API signature and payload", () => {
 });
 
 describe("Shopee Affiliate Open API transport", () => {
+  it("reuses signed transport for listItemFeeds and getItemFeedData", async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce(
+        response({
+          data: {
+            listItemFeeds: {
+              feeds: [
+                {
+                  datafeedId: "ref_FULL_2026-08-19",
+                  referenceId: "ref",
+                  datafeedName: "Feed sanitizado",
+                  description: "Fixture",
+                  totalCount: "10000",
+                  date: "20260819",
+                  feedMode: "FULL",
+                },
+              ],
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        response({
+          data: {
+            getItemFeedData: {
+              rows: [{ columns: "{}", updateType: null }],
+              pageInfo: {
+                offset: 0,
+                limit: 3,
+                totalCount: 1,
+                hasMore: false,
+              },
+            },
+          },
+        }),
+      );
+    const client = new ShopeeOpenApiClient(credentials, {
+      fetch: request,
+      now: () => now,
+    });
+    await expect(client.listItemFeeds("FULL")).resolves.toMatchObject({
+      feeds: [{ referenceId: "ref", totalCount: 10_000 }],
+    });
+    await expect(
+      client.getItemFeedData({
+        datafeedId: "ref_FULL_2026-08-19",
+        offset: 0,
+        limit: 3,
+      }),
+    ).resolves.toMatchObject({ pageInfo: { limit: 3, hasMore: false } });
+    expect(request).toHaveBeenCalledTimes(2);
+    for (const [, init] of request.mock.calls) {
+      expect(init.headers.authorization).toMatch(
+        /^SHA256 Credential=123456, Timestamp=\d+, Signature=[a-f0-9]{64}$/,
+      );
+    }
+  });
+
   it("rejects missing credentials before creating a request", () => {
     expect(
       () => new ShopeeOpenApiClient({ appId: "", secret: "demo" }),
