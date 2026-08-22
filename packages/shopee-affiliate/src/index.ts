@@ -4,6 +4,8 @@ export * from "./parser";
 export * from "./providers";
 export * from "./remote-discovery";
 export * from "./remote-discovery-command";
+export * from "./scheduled-discovery";
+export * from "./scheduled-discovery-command";
 export * from "./open-api";
 export * from "./official-feed-contract";
 export * from "./open-api-smoke";

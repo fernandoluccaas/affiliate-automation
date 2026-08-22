@@ -1,10 +1,17 @@
-import { DatabaseZap, FileSearch, Link2Off, ShieldCheck } from "lucide-react";
+import {
+  Clock3,
+  DatabaseZap,
+  FileSearch,
+  Link2Off,
+  ShieldCheck,
+} from "lucide-react";
 import { AdminShell } from "@/components/admin-shell";
 import { Alert } from "@/components/ui/alert";
 import { MetricCard, MetricGrid } from "@/components/ui/page";
 import { StatusBadge } from "@/components/ui/status-badge";
 import {
   SHOPEE_CATEGORY_CATALOG,
+  getShopeeScheduledDiscoveryStatus,
   loadShopeeOperationalOfferState,
   resolveShopeeAffiliateConfiguration,
 } from "@affiliate/shopee-affiliate";
@@ -12,9 +19,30 @@ import { ShopeeDatafeedConsole } from "./shopee-datafeed-console";
 
 export const dynamic = "force-dynamic";
 
+function dateTime(value: string | null) {
+  return value
+    ? new Intl.DateTimeFormat("pt-BR", {
+        dateStyle: "short",
+        timeStyle: "short",
+        timeZone: "America/Fortaleza",
+      }).format(new Date(value))
+    : "Ainda não executada";
+}
+
 export default async function ShopeeIntegrationPage() {
   const configuration = resolveShopeeAffiliateConfiguration();
-  const offerState = await loadShopeeOperationalOfferState();
+  const [offerState, scheduledDiscovery] = await Promise.all([
+    loadShopeeOperationalOfferState(),
+    getShopeeScheduledDiscoveryStatus(),
+  ]);
+  const automationState =
+    scheduledDiscovery.lastRunStatus === "RUNNING"
+      ? "Em execução"
+      : scheduledDiscovery.lastRunStatus === "FAILED"
+        ? "Erro"
+        : scheduledDiscovery.autoRunReady
+          ? "Pronta"
+          : "Não pronta";
   return (
     <AdminShell
       currentPath="/integracoes/shopee"
@@ -87,6 +115,59 @@ export default async function ShopeeIntegrationPage() {
             detail="Somente links gerados ou validados podem liberar a oferta"
             icon={Link2Off}
             tone={configuration.linksVerified ? "success" : "warning"}
+          />
+        </MetricGrid>
+
+        <MetricGrid>
+          <MetricCard
+            label="Automação de descoberta"
+            value={
+              scheduledDiscovery.automatedDiscoveryEnabled
+                ? "Ativada"
+                : "Desativada"
+            }
+            detail={`${automationState} · intervalo de ${scheduledDiscovery.intervalHours}h`}
+            icon={Clock3}
+            tone={scheduledDiscovery.autoRunReady ? "success" : "default"}
+          />
+          <MetricCard
+            label="Última execução"
+            value={dateTime(scheduledDiscovery.lastScheduledRunAt)}
+            detail={`${scheduledDiscovery.lastFeedsProcessed} feeds processados`}
+            icon={Clock3}
+          />
+          <MetricCard
+            label="Próxima execução"
+            value={
+              scheduledDiscovery.due
+                ? "Pendente agora"
+                : dateTime(scheduledDiscovery.nextScheduledRunAt)
+            }
+            detail="Persistida por AutomationRun"
+            icon={Clock3}
+          />
+          <MetricCard
+            label="Itens analisados"
+            value={scheduledDiscovery.lastItemsReceived}
+            detail={`${scheduledDiscovery.lastSelected} ofertas selecionadas`}
+            icon={FileSearch}
+          />
+          <MetricCard
+            label="Ofertas importadas"
+            value={scheduledDiscovery.lastImported}
+            detail={`${scheduledDiscovery.lastReadyToPublish} prontas para publicação`}
+            icon={DatabaseZap}
+          />
+          <MetricCard
+            label="Links gerados"
+            value={scheduledDiscovery.lastLinksGenerated}
+            detail={
+              scheduledDiscovery.lastErrorCode
+                ? `Último erro: ${scheduledDiscovery.lastErrorCode}`
+                : `${scheduledDiscovery.lastPendingAffiliateLink} ainda pendentes`
+            }
+            icon={Link2Off}
+            tone={scheduledDiscovery.lastErrorCode ? "warning" : "default"}
           />
         </MetricGrid>
 

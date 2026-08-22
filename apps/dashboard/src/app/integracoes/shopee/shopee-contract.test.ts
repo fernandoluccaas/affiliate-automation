@@ -55,6 +55,18 @@ describe("Shopee dashboard architecture", () => {
     expect(source).not.toMatch(/useEffect\s*\(/);
   });
 
+  it("shows read-only scheduled discovery observability without a dispatch control", () => {
+    const source = app("page.tsx");
+    expect(source).toContain("getShopeeScheduledDiscoveryStatus");
+    expect(source).toContain("Automação de descoberta");
+    expect(source).toContain("Última execução");
+    expect(source).toContain("Próxima execução");
+    expect(source).toContain("Itens analisados");
+    expect(source).toContain("Ofertas importadas");
+    expect(source).toContain("Links gerados");
+    expect(source).not.toMatch(/dispatch|playwright|chromium/i);
+  });
+
   it("does not contain operational publication or messaging calls", () => {
     const source = `${app("shopee-datafeed-console.tsx")}\n${lib("shopee-datafeed-actions.ts")}`;
     expect(source).not.toMatch(

@@ -12,6 +12,28 @@ const environment = {
 } as NodeJS.ProcessEnv;
 
 describe("Shopee remote discovery CLI contract", () => {
+  it("shows help with exit code zero and no confirmation or effects", async () => {
+    const preview = vi.fn();
+    const listFeeds = vi.fn();
+    const result = await runShopeeRemoteDiscoveryCommand(
+      ["preview", "--help"],
+      { environment, preview, listFeeds },
+    );
+    expect(result).toMatchObject({
+      status: "SHOPEE_REMOTE_DISCOVERY_HELP",
+      externalRequests: 0,
+      writes: 0,
+      publicationsCreated: 0,
+      messagesSent: 0,
+      stateModified: false,
+    });
+    expect(
+      getShopeeRemoteDiscoveryExitCode(["preview", "--help"], result),
+    ).toBe(0);
+    expect(preview).not.toHaveBeenCalled();
+    expect(listFeeds).not.toHaveBeenCalled();
+  });
+
   it("exits zero only for a deliberately limited partial preview", () => {
     expect(
       getShopeeRemoteDiscoveryExitCode(["preview", "--max-pages", "1"], {
@@ -47,6 +69,7 @@ describe("Shopee remote discovery CLI contract", () => {
       status: "SHOPEE_REMOTE_DISCOVERY_STATUS",
       source: "LOCAL_FILE",
       remoteDiscoveryReady: false,
+      remoteDiscoveryLockConfigured: false,
       contract: "OFFICIAL_V2_FULL",
       externalRequests: 0,
       writes: 0,

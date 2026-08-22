@@ -98,6 +98,21 @@ export async function runShopeeRemoteDiscoveryCommand(
   dependencies: ShopeeRemoteDiscoveryCommandDependencies = {},
 ) {
   const command = args[0] ?? "status";
+  if (args.includes("--help") || command === "help") {
+    return {
+      status: "SHOPEE_REMOTE_DISCOVERY_HELP" as const,
+      usage: [
+        "npm run shopee:feeds:list -- --confirm-live-call",
+        "npm run shopee:discovery:remote:preview -- --reference-id <REFERENCE_ID> --confirm-live-call",
+        "npm run shopee:discovery:remote:run -- --reference-id <REFERENCE_ID> --confirm-live-call --confirm-import",
+      ],
+      externalRequests: 0 as const,
+      writes: 0 as const,
+      publicationsCreated: 0 as const,
+      messagesSent: 0 as const,
+      stateModified: false as const,
+    };
+  }
   const environment = dependencies.environment ?? process.env;
   const configuration = resolveShopeeAffiliateConfiguration(environment);
   if (command === "status") {
@@ -107,6 +122,8 @@ export async function runShopeeRemoteDiscoveryCommand(
       enabled: configuration.automatedDiscoveryEnabled,
       openApiReady: configuration.openApiReady,
       remoteDiscoveryReady: configuration.remoteDiscoveryReady,
+      remoteDiscoveryLockConfigured:
+        configuration.remoteDiscoveryLockConfigured,
       contract: SHOPEE_REMOTE_FEED_CONTRACT_STATUS,
       readinessState: configuration.remoteDiscoveryState,
       configuredReferenceIds: configuration.remoteDiscoveryReferenceIds,
