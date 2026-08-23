@@ -231,6 +231,22 @@ export function resolveShopeeAffiliateConfiguration(
     "SHOPEE_PUBLICATION_WINDOW_END_INVALID",
     issues,
   );
+  const productCooldownHours = boundedInteger(
+    environment.SHOPEE_PRODUCT_COOLDOWN_HOURS,
+    168,
+    0,
+    2_160,
+    "SHOPEE_PRODUCT_COOLDOWN_INVALID",
+    issues,
+  );
+  const sellerCooldownHours = boundedInteger(
+    environment.SHOPEE_SELLER_COOLDOWN_HOURS,
+    24,
+    0,
+    720,
+    "SHOPEE_SELLER_COOLDOWN_INVALID",
+    issues,
+  );
   const remoteDiscoveryReferenceIds = remoteIdentifiers(
     environment.SHOPEE_REMOTE_DISCOVERY_REFERENCE_IDS,
     "SHOPEE_REMOTE_DISCOVERY_REFERENCE_IDS_INVALID",
@@ -339,6 +355,8 @@ export function resolveShopeeAffiliateConfiguration(
     publicationWhatsAppEnabled:
       configurationValid &&
       environment.SHOPEE_PUBLICATION_WHATSAPP_ENABLED === "true",
+    productCooldownHours,
+    sellerCooldownHours,
     issues,
   };
 }

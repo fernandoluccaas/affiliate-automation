@@ -26,6 +26,7 @@ import type {
   ShopeeScoreBreakdown,
 } from "./types";
 import { urlHost, validateShopeeUrl } from "./validation";
+import { scoreShopeeAdvancedCandidate } from "./ranking";
 
 const ISSUE_SAMPLE_LIMIT = 20;
 const BUCKET_COUNT = 64;
@@ -337,6 +338,13 @@ export function createShopeeRankedCandidate(input: {
     product,
     input.weights ?? DEFAULT_SHOPEE_RANKING_WEIGHTS,
   );
+  const advanced = scoreShopeeAdvancedCandidate({
+    itemId: product.itemId,
+    qualityScore: scored.score,
+    salePrice: product.salePrice,
+    originalPrice: product.originalPrice,
+    discountPercentage: product.discountPercentage,
+  });
   return {
     itemId: product.itemId,
     title: product.title.slice(0, 180),
@@ -355,8 +363,9 @@ export function createShopeeRankedCandidate(input: {
       : product.candidateAffiliateUrl
         ? ("NOT_VERIFIED" as const)
         : ("MISSING" as const),
-    score: scored.score,
+    score: advanced.score,
     components: scored.components,
+    advancedComponents: advanced.components,
     sources: product.sources,
   } satisfies ShopeeRankedCandidate;
 }

@@ -64,6 +64,8 @@ export type ShopeeAffiliateConfiguration = {
   publicationWindowEnd: string;
   publicationTelegramEnabled: boolean;
   publicationWhatsAppEnabled: boolean;
+  productCooldownHours: number;
+  sellerCooldownHours: number;
   issues: string[];
 };
 
@@ -261,6 +263,7 @@ export type ShopeeRankedCandidate = {
   linkStatus: "VERIFIED" | "NOT_VERIFIED" | "MISSING";
   score: number;
   components: ShopeeScoreBreakdown;
+  advancedComponents?: import("./ranking").ShopeeAdvancedScoreBreakdown;
   sources: ShopeeProductSource[];
 };
 

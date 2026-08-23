@@ -12,6 +12,7 @@ export * from "./official-feed-contract";
 export * from "./open-api-smoke";
 export * from "./operational";
 export * from "./publication";
+export * from "./ranking";
 export * from "./schema";
 export * from "./source";
 export * from "./types";

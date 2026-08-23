@@ -62,6 +62,7 @@
     "shopee:publication:create": "npm run publication -w @affiliate/shopee-affiliate -- create",
     "shopee:distribution:status": "npm run distribution -w @affiliate/shopee-affiliate -- status",
     "shopee:distribution:preview": "npm run distribution -w @affiliate/shopee-affiliate -- preview",
+    "shopee:ranking:preview": "npm run ranking -w @affiliate/shopee-affiliate -- preview",
     "conversions:inspect-csv": "npm run cli -w @affiliate/tracking -- conversions-inspect-csv",
     "conversions:import-csv": "npm run cli -w @affiliate/tracking -- conversions-import-csv",
     "commissions:inspect-csv": "npm run cli -w @affiliate/tracking -- commissions-inspect-csv",

@@ -143,6 +143,8 @@ describe("Shopee affiliate configuration", () => {
       publicationWindowEnd: "22:00",
       publicationTelegramEnabled: false,
       publicationWhatsAppEnabled: false,
+      productCooldownHours: 168,
+      sellerCooldownHours: 24,
     });
     expect(
       resolveShopeeAffiliateConfiguration({

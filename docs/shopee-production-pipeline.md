@@ -62,3 +62,26 @@ npm run shopee:distribution:preview
 ```
 
 Both commands are read-only and make no marketplace or messaging request.
+
+## Advanced ranking (Phase 6A.9)
+
+The deterministic ranking keeps the existing data-quality score and adds an
+explainable second layer. It uses percentage discount, absolute savings,
+current price, source freshness, persisted click/conversion performance, and
+commission only when each signal exists. Missing commission or tracking data
+stays `null` and its weight is removed from the denominator.
+
+Explicit penalties cover recent product publication, recent seller use,
+duplicate similarity, and category/seller concentration. Product cooldown is
+conservative enough to reduce a candidate to zero; the existing round-robin
+continues selecting one or two offers per logical category, honoring the total
+limit and the per-shop cap. Item ID remains the stable final tie-break.
+
+```dotenv
+SHOPEE_PRODUCT_COOLDOWN_HOURS="168"
+SHOPEE_SELLER_COOLDOWN_HOURS="24"
+```
+
+`npm run shopee:ranking:preview` reads the current Shopee Offer versions and
+their persisted tracking counts, returns the complete score breakdown, and
+performs zero writes or external requests.
