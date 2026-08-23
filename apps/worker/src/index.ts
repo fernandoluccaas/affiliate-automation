@@ -38,6 +38,9 @@ import {
 import { sanitizeMercadoLivreAffiliateError } from "@affiliate/marketplace-connectors";
 import { validateMarketplaceAffiliateUrl } from "@affiliate/validation";
 import {
+  evaluateShopeeDistributionPolicy,
+  isShopeeAutomaticDistributionEnabled,
+  isShopeeDistributionChannelEnabled,
   resolveShopeeAffiliateConfiguration,
   runShopeeScheduledDiscoveryTick,
   type ShopeeScheduledDiscoveryTickResult,
@@ -271,6 +274,30 @@ type WorkerSkipReason =
   | "ACTIVE_PUBLICATION_EXISTS"
   | "WHATSAPP_WEB_DELIVERY_UNCERTAIN"
   | "PLANNING_FAILED";
+
+function canDispatchShopeePublication(
+  marketplace: string,
+  channelType: string,
+) {
+  if (marketplace !== "SHOPEE") return true;
+  const configuration = resolveShopeeAffiliateConfiguration();
+  return (
+    isShopeeAutomaticDistributionEnabled(configuration) &&
+    isShopeeDistributionChannelEnabled(configuration, channelType)
+  );
+}
+
+function stateForTimezone(
+  states: Map<
+    string,
+    { publicationsToday: number; lastPublicationAt: Date | null }
+  >,
+  timezone: string,
+) {
+  const state = states.get(timezone);
+  if (!state) throw new Error("SHOPEE_DISTRIBUTION_STATE_MISSING");
+  return state;
+}
 
 function recordSkip(metrics: JobMetrics, reason: WorkerSkipReason) {
   metrics.skipped += 1;
@@ -865,11 +892,17 @@ export async function scheduleReadyOffers(
   options: { planningRunId?: string; preferredOfferIds?: string[] } = {},
 ) {
   const metrics = emptyMetrics();
+  const shopeeConfiguration = resolveShopeeAffiliateConfiguration();
+  const includeShopee = isShopeeAutomaticDistributionEnabled(
+    shopeeConfiguration,
+  );
   const preferredOfferIds = [...new Set(options.preferredOfferIds ?? [])];
   const [fallbackOffers, preferredOffers, channels] = await Promise.all([
     prisma.offer.findMany({
       where: {
-        marketplace: { not: "SHOPEE" },
+        ...(!includeShopee
+          ? { marketplace: { not: "SHOPEE" as const } }
+          : {}),
         status: { in: ["READY_TO_PUBLISH", "SCHEDULED", "PUBLISHED"] },
       },
       orderBy: { publishedAt: "asc" },
@@ -880,7 +913,9 @@ export async function scheduleReadyOffers(
       ? prisma.offer.findMany({
           where: {
             id: { in: preferredOfferIds },
-            marketplace: { not: "SHOPEE" },
+            ...(!includeShopee
+              ? { marketplace: { not: "SHOPEE" as const } }
+              : {}),
             status: { in: ["READY_TO_PUBLISH", "SCHEDULED", "PUBLISHED"] },
           },
           include: { affiliateLinks: true },
@@ -909,6 +944,11 @@ export async function scheduleReadyOffers(
   });
   const scheduledChannelIds = new Set<string>();
   const selectedOfferIds = new Set<string>();
+  let shopeeScheduledThisCycle = 0;
+  const shopeeDistributionStates = new Map<
+    string,
+    { publicationsToday: number; lastPublicationAt: Date | null }
+  >();
   const whatsappQueues = new Map<
     string,
     Awaited<ReturnType<typeof getWhatsAppWebQueueStatus>>
@@ -929,12 +969,71 @@ export async function scheduleReadyOffers(
   }
 
   for (const offer of prioritizedOffers) {
-    // Shopee automation deliberately stops at READY_TO_PUBLISH in Phase 6A.6.
-    if (offer.marketplace === "SHOPEE") continue;
+    if (offer.marketplace === "SHOPEE" && !includeShopee) continue;
     for (const channel of channels) {
       if (scheduledChannelIds.has(channel.id)) continue;
 
       try {
+        if (offer.marketplace === "SHOPEE") {
+          let state = shopeeDistributionStates.get(channel.timezone);
+          if (!state) {
+            const range = getZonedDayRange(now, channel.timezone);
+            const [publicationsToday, lastPublication] = await Promise.all([
+              prisma.publication.count({
+                where: {
+                  marketplaceSnapshot: "SHOPEE",
+                  status: {
+                    in: [
+                      "SCHEDULED",
+                      "PUBLISHED",
+                      "EXPORTED",
+                      "AWAITING_MANUAL_PUBLICATION",
+                    ],
+                  },
+                  scheduledAt: { gte: range.start, lt: range.end },
+                },
+              }),
+              prisma.publication.findFirst({
+                where: {
+                  marketplaceSnapshot: "SHOPEE",
+                  status: { in: ["SCHEDULED", "PUBLISHED", "EXPORTED"] },
+                },
+                orderBy: { scheduledAt: "desc" },
+                select: { scheduledAt: true, publishedAt: true },
+              }),
+            ]);
+            state = {
+              publicationsToday,
+              lastPublicationAt:
+                lastPublication?.publishedAt ??
+                lastPublication?.scheduledAt ??
+                null,
+            };
+            shopeeDistributionStates.set(channel.timezone, state);
+          }
+          const gate = evaluateShopeeDistributionPolicy({
+            configuration: shopeeConfiguration,
+            channelType: channel.type,
+            timezone: channel.timezone,
+            now,
+            scheduledThisCycle: shopeeScheduledThisCycle,
+            publicationsToday: state.publicationsToday,
+            lastPublicationAt: state.lastPublicationAt,
+          });
+          if (!gate.ok) {
+            metrics.skipped += 1;
+            metrics.skipReasons[gate.code] =
+              (metrics.skipReasons[gate.code] ?? 0) + 1;
+            recordPlanningDecision(
+              metrics,
+              offer,
+              channel,
+              "BLOCKED_BY_POLICY",
+              { reason: gate.code },
+            );
+            continue;
+          }
+        }
         const channelBlock = controlledChannelPlanningBlock(channel);
         if (channelBlock) {
           recordSkip(
@@ -1079,9 +1178,47 @@ export async function scheduleReadyOffers(
         const idempotencyKey = `publication:${channel.id}:${offer.id}`;
         const existingPublication = await prisma.publication.findFirst({
           where: { idempotencyKey },
-          select: { id: true, metadata: true },
+          select: { id: true, status: true, metadata: true },
         });
         if (existingPublication) {
+          const controlledMetadata =
+            existingPublication.metadata &&
+            typeof existingPublication.metadata === "object" &&
+            !Array.isArray(existingPublication.metadata)
+              ? (existingPublication.metadata as Record<string, unknown>)
+              : {};
+          if (
+            offer.marketplace === "SHOPEE" &&
+            channel.type === "TELEGRAM" &&
+            existingPublication.status === "AWAITING_MANUAL_PUBLICATION" &&
+            controlledMetadata.publicationMode === "SHOPEE_CONTROLLED" &&
+            controlledMetadata.distributionState === "PLANNED"
+          ) {
+            await prisma.publication.update({
+              where: { id: existingPublication.id },
+              data: {
+                status: "SCHEDULED",
+                scheduledAt: now,
+                metadata: {
+                  ...controlledMetadata,
+                  distributionState: "SCHEDULED",
+                  autoDistributionActivatedAt: now.toISOString(),
+                } as Prisma.InputJsonValue,
+              },
+            });
+            shopeeScheduledThisCycle += 1;
+            stateForTimezone(shopeeDistributionStates, channel.timezone).publicationsToday += 1;
+            metrics.scheduled += 1;
+            metrics.publicationsPlanned += 1;
+            selectedOfferIds.add(offer.id);
+            recordPlanningDecision(metrics, offer, channel, "ALREADY_EXISTS", {
+              executionResult: "PENDING",
+              reason: "SHOPEE_CONTROLLED_PUBLICATION_ACTIVATED",
+              publicationId: existingPublication.id,
+            });
+            scheduledChannelIds.add(channel.id);
+            continue;
+          }
           recordSkip(metrics, "DUPLICATE_PUBLICATION");
           metrics.publicationsAlreadyExisting += 1;
           selectedOfferIds.add(offer.id);
@@ -1193,6 +1330,10 @@ export async function scheduleReadyOffers(
           metrics.scheduled += 1;
           metrics.publicationsPlanned += 1;
           metrics.publicationsCreated += 1;
+          if (offer.marketplace === "SHOPEE") {
+            shopeeScheduledThisCycle += 1;
+            stateForTimezone(shopeeDistributionStates, channel.timezone).publicationsToday += 1;
+          }
           if (assisted) metrics.whatsappGroupAssistedPrepared += 1;
           selectedOfferIds.add(offer.id);
           recordPlanningDecision(metrics, offer, channel, "CREATED", {
@@ -1376,8 +1517,13 @@ export async function publishScheduledOffers(now = new Date()) {
     },
   });
 
-  const controlledWebPublications = publications.filter((publication) =>
-    isExperimentalWhatsAppGroup(publication.channel),
+  const controlledWebPublications = publications.filter(
+    (publication) =>
+      isExperimentalWhatsAppGroup(publication.channel) &&
+      canDispatchShopeePublication(
+        publication.offer.marketplace,
+        publication.channel.type,
+      ),
   );
   for (const publication of controlledWebPublications) {
     const metadata =
@@ -1422,6 +1568,14 @@ export async function publishScheduledOffers(now = new Date()) {
 
   const selectedChannelIds = new Set<string>();
   const selectedPublications = publications.filter((publication) => {
+    if (
+      !canDispatchShopeePublication(
+        publication.offer.marketplace,
+        publication.channel.type,
+      )
+    ) {
+      return false;
+    }
     if (isExperimentalWhatsAppGroup(publication.channel)) return false;
     if (selectedChannelIds.has(publication.channelId)) return false;
     selectedChannelIds.add(publication.channelId);
@@ -1508,11 +1662,23 @@ export async function retryFailedPublications(now = new Date()) {
     where: { status: "FAILED", scheduledAt: { lte: now } },
     orderBy: { scheduledAt: "asc" },
     take: 100,
-    include: { attempts: { select: { id: true } } },
+    include: {
+      attempts: { select: { id: true } },
+      offer: { select: { marketplace: true } },
+      channel: { select: { type: true } },
+    },
   });
   const selectedChannels = new Set<string>();
 
   for (const publication of publications) {
+    if (
+      !canDispatchShopeePublication(
+        publication.offer.marketplace,
+        publication.channel.type,
+      )
+    ) {
+      continue;
+    }
     if (selectedChannels.has(publication.channelId)) continue;
     selectedChannels.add(publication.channelId);
 

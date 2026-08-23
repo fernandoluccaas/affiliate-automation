@@ -135,7 +135,14 @@ describe("Shopee affiliate configuration", () => {
       remoteDiscoveryFeedIds: [],
       remoteDiscoveryReferenceIds: [],
       publicationEnabled: false,
+      autoDistributionEnabled: false,
       publicationMaxPerCycle: 2,
+      publicationMaxPerDay: 12,
+      publicationMinIntervalMinutes: 60,
+      publicationWindowStart: "08:00",
+      publicationWindowEnd: "22:00",
+      publicationTelegramEnabled: false,
+      publicationWhatsAppEnabled: false,
     });
     expect(
       resolveShopeeAffiliateConfiguration({

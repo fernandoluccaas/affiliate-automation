@@ -271,6 +271,37 @@ describe("createPublicationIdempotently", () => {
     expect(createPublication).not.toHaveBeenCalled();
   });
 
+  it("includes Shopee candidates only when automatic distribution is explicitly enabled", async () => {
+    const actual = await import("@affiliate/database");
+    const findManyOffers = vi.fn().mockResolvedValue([]);
+    Object.assign(actual.prisma, {
+      offer: { findMany: findManyOffers },
+      channel: { findMany: vi.fn().mockResolvedValue([]) },
+    });
+    const previous = {
+      publication: process.env.SHOPEE_PUBLICATION_ENABLED,
+      distribution: process.env.SHOPEE_AUTO_DISTRIBUTION_ENABLED,
+    };
+    process.env.SHOPEE_PUBLICATION_ENABLED = "true";
+    process.env.SHOPEE_AUTO_DISTRIBUTION_ENABLED = "true";
+
+    await scheduleReadyOffers(new Date("2026-08-23T15:00:00.000Z"));
+
+    expect(findManyOffers).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          status: { in: ["READY_TO_PUBLISH", "SCHEDULED", "PUBLISHED"] },
+        },
+      }),
+    );
+    if (previous.publication === undefined)
+      delete process.env.SHOPEE_PUBLICATION_ENABLED;
+    else process.env.SHOPEE_PUBLICATION_ENABLED = previous.publication;
+    if (previous.distribution === undefined)
+      delete process.env.SHOPEE_AUTO_DISTRIBUTION_ENABLED;
+    else process.env.SHOPEE_AUTO_DISTRIBUTION_ENABLED = previous.distribution;
+  });
+
   it("schedules a sparse READY_TO_PUBLISH offer for a channel without optional minimums", async () => {
     const actual = await import("@affiliate/database");
     const now = new Date("2026-07-24T12:00:00.000Z");

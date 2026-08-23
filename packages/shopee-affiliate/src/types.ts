@@ -56,7 +56,14 @@ export type ShopeeAffiliateConfiguration = {
   remoteDiscoveryReferenceIds: string[];
   remoteDiscoveryFeedIds: string[];
   publicationEnabled: boolean;
+  autoDistributionEnabled: boolean;
   publicationMaxPerCycle: number;
+  publicationMaxPerDay: number;
+  publicationMinIntervalMinutes: number;
+  publicationWindowStart: string;
+  publicationWindowEnd: string;
+  publicationTelegramEnabled: boolean;
+  publicationWhatsAppEnabled: boolean;
   issues: string[];
 };
 

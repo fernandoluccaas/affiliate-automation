@@ -61,6 +61,20 @@ function boundedInteger(
   return value;
 }
 
+function clockTime(
+  raw: string | undefined,
+  fallback: string,
+  issue: string,
+  issues: string[],
+) {
+  const value = raw?.trim() || fallback;
+  if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value)) {
+    issues.push(issue);
+    return fallback;
+  }
+  return value;
+}
+
 export function resolveShopeeAffiliateConfiguration(
   environment: NodeJS.ProcessEnv = process.env,
 ): ShopeeAffiliateConfiguration {
@@ -189,6 +203,34 @@ export function resolveShopeeAffiliateConfiguration(
     "SHOPEE_PUBLICATION_MAX_PER_CYCLE_INVALID",
     issues,
   );
+  const publicationMaxPerDay = boundedInteger(
+    environment.SHOPEE_PUBLICATION_MAX_PER_DAY,
+    12,
+    1,
+    100,
+    "SHOPEE_PUBLICATION_MAX_PER_DAY_INVALID",
+    issues,
+  );
+  const publicationMinIntervalMinutes = boundedInteger(
+    environment.SHOPEE_PUBLICATION_MIN_INTERVAL_MINUTES,
+    60,
+    1,
+    1_440,
+    "SHOPEE_PUBLICATION_MIN_INTERVAL_INVALID",
+    issues,
+  );
+  const publicationWindowStart = clockTime(
+    environment.SHOPEE_PUBLICATION_WINDOW_START,
+    "08:00",
+    "SHOPEE_PUBLICATION_WINDOW_START_INVALID",
+    issues,
+  );
+  const publicationWindowEnd = clockTime(
+    environment.SHOPEE_PUBLICATION_WINDOW_END,
+    "22:00",
+    "SHOPEE_PUBLICATION_WINDOW_END_INVALID",
+    issues,
+  );
   const remoteDiscoveryReferenceIds = remoteIdentifiers(
     environment.SHOPEE_REMOTE_DISCOVERY_REFERENCE_IDS,
     "SHOPEE_REMOTE_DISCOVERY_REFERENCE_IDS_INVALID",
@@ -283,7 +325,20 @@ export function resolveShopeeAffiliateConfiguration(
     publicationEnabled:
       configurationValid &&
       environment.SHOPEE_PUBLICATION_ENABLED === "true",
+    autoDistributionEnabled:
+      configurationValid &&
+      environment.SHOPEE_AUTO_DISTRIBUTION_ENABLED === "true",
     publicationMaxPerCycle,
+    publicationMaxPerDay,
+    publicationMinIntervalMinutes,
+    publicationWindowStart,
+    publicationWindowEnd,
+    publicationTelegramEnabled:
+      configurationValid &&
+      environment.SHOPEE_PUBLICATION_TELEGRAM_ENABLED === "true",
+    publicationWhatsAppEnabled:
+      configurationValid &&
+      environment.SHOPEE_PUBLICATION_WHATSAPP_ENABLED === "true",
     issues,
   };
 }
