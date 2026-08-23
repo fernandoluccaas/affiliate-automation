@@ -141,6 +141,51 @@ describe("Shopee official feed listing", () => {
 });
 
 describe("Shopee offset feed discovery", () => {
+  it("enriches only the preliminary shortlist and keeps offerLink as metadata", async () => {
+    const remote = client({
+      pages: {
+        "0": page({
+          offset: 0,
+          ids: ["100", "101", "102"],
+          totalCount: 3,
+        }),
+      },
+    });
+    const enrichItem = vi.fn(async (itemId: string) => ({
+      itemId,
+      shopId: "200",
+      priceMin: 80,
+      priceMax: 80,
+      sales: 10,
+      ratingStar: 4.9,
+      commissionRate: 8,
+      sellerCommissionRate: null,
+      shopeeCommissionRate: null,
+      commission: null,
+      productLink: `https://shopee.com.br/produto-i.200.${itemId}`,
+      offerLink: "https://s.shopee.com.br/metadata-only",
+      periodStartTime: null,
+      periodEndTime: null,
+      available: null,
+    }));
+    const result = await previewShopeeRemoteDiscovery({
+      feedId: "feed-1",
+      confirmLiveCall: true,
+      environment: { ...environment, SHOPEE_ENRICHMENT_ENABLED: "true" },
+      client: remote,
+      enrichmentClient: { enrichItem },
+    });
+    expect(result).toMatchObject({
+      enrichmentShortlisted: 1,
+      enrichmentAttempted: 1,
+      enrichmentSucceeded: 1,
+    });
+    expect(enrichItem).toHaveBeenCalledTimes(1);
+    expect(result.selected[0]?.enrichment?.offerLink).toBe(
+      "https://s.shopee.com.br/metadata-only",
+    );
+  });
+
   it("completes on a full last page with hasMore=true without a terminal request", async () => {
     const remote = client({
       pages: {

@@ -85,3 +85,30 @@ SHOPEE_SELLER_COOLDOWN_HOURS="24"
 `npm run shopee:ranking:preview` reads the current Shopee Offer versions and
 their persisted tracking counts, returns the complete score breakdown, and
 performs zero writes or external requests.
+
+## Open API enrichment (Phase 6A.10)
+
+Enrichment is disabled by default and is applied only after cheap feed
+normalization and preliminary ranking. The shortlist is deduplicated and
+capped at 24 items (hard maximum 50), so the 110,000-item catalog is never
+expanded into one request per product. The implementation reuses the existing
+signed Open API transport, timeout, rate limiter, sanitized error mapping, and
+the confirmed `productOfferV2` single-item contract.
+
+Returned price, sales, rating, and commission values are enrichment metadata.
+`offerLink` is retained only as metadata: it never creates, replaces, or updates
+the canonical `AffiliateLink.destination`; `generateShortLink` remains the only
+canonical link path. Missing availability is left unknown rather than inferred.
+
+The per-cycle cache avoids duplicate item calls. Item failures produce a
+partial result, while authentication, systemic GraphQL, schema, and rate-limit
+failures stop the remaining shortlist without changing persisted offers.
+
+```dotenv
+SHOPEE_ENRICHMENT_ENABLED="false"
+SHOPEE_ENRICHMENT_MAX_ITEMS="24"
+```
+
+`npm run shopee:enrichment:status` and
+`npm run shopee:enrichment:preview` are read-only. Preview reports only the
+candidate count and bounded estimate; it performs zero Open API calls.

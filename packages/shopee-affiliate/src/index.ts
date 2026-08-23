@@ -1,6 +1,7 @@
 export * from "./config";
 export * from "./discovery";
 export * from "./distribution";
+export * from "./enrichment";
 export * from "./parser";
 export * from "./providers";
 export * from "./remote-discovery";
@@ -9,6 +10,7 @@ export * from "./scheduled-discovery";
 export * from "./scheduled-discovery-command";
 export * from "./open-api";
 export * from "./official-feed-contract";
+export * from "./official-product-offer-contract";
 export * from "./open-api-smoke";
 export * from "./operational";
 export * from "./publication";

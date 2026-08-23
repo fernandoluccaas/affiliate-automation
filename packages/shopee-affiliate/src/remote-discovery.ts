@@ -27,6 +27,13 @@ import {
 } from "./official-feed-contract";
 import { ShopeeOpenApiClient, ShopeeOpenApiError } from "./open-api";
 import {
+  createOfficialShopeeProductEnrichmentClient,
+  enrichShopeeShortlist,
+  type ShopeeProductEnrichment,
+  type ShopeeProductEnrichmentClient,
+} from "./enrichment";
+import { scoreShopeeAdvancedCandidate } from "./ranking";
+import {
   generateShopeeAffiliateLinksBulk,
   persistShopeeOperationalWinners,
   type ShopeeOperationalPersistence,
@@ -96,6 +103,11 @@ export type ShopeeRemoteDiscoveryResult = {
   duplicates: number;
   eligible: number;
   candidatePoolSize: number;
+  enrichmentShortlisted: number;
+  enrichmentAttempted: number;
+  enrichmentSucceeded: number;
+  enrichmentFailed: number;
+  enrichmentErrorCode: string | null;
   eligibleByCategory: Record<string, number>;
   selected: ShopeeRankedCandidate[];
   apiRequests: number;
@@ -277,6 +289,11 @@ function emptyResult(startedAt: number): ShopeeRemoteDiscoveryResult {
     duplicates: 0,
     eligible: 0,
     candidatePoolSize: 0,
+    enrichmentShortlisted: 0,
+    enrichmentAttempted: 0,
+    enrichmentSucceeded: 0,
+    enrichmentFailed: 0,
+    enrichmentErrorCode: null,
     eligibleByCategory: {},
     selected: [],
     apiRequests: 0,
@@ -307,6 +324,8 @@ type PrepareInput = {
   recentItemIds?: readonly string[];
   maxTotal?: number;
   maxPerShop?: number;
+  enrichmentClient?: ShopeeProductEnrichmentClient;
+  enrichmentCache?: Map<string, ShopeeProductEnrichment | null>;
 };
 
 function uniqueIdentifiers(values: readonly string[]) {
@@ -612,7 +631,7 @@ export async function prepareShopeeRemoteDiscovery(
       if (paginationError || reachedLimit) break;
     }
 
-    const selection = selectShopeeRoundRobin({
+    const selectionInput = {
       pools,
       categories,
       maxTotal: Math.min(
@@ -621,7 +640,60 @@ export async function prepareShopeeRemoteDiscovery(
       ),
       backfill: DEFAULT_SHOPEE_SELECTION.backfill,
       maxPerShop: input.maxPerShop ?? configuration.maxPerShopPerSession,
-    });
+    };
+    let selection = selectShopeeRoundRobin(selectionInput);
+    if (configuration.enrichmentEnabled) {
+      const preliminary = selectShopeeRoundRobin({
+        ...selectionInput,
+        maxTotal: configuration.enrichmentMaxItems,
+      });
+      const enrichment = await enrichShopeeShortlist({
+        itemIds: preliminary.selected.map((candidate) => candidate.itemId),
+        environment,
+        client:
+          input.enrichmentClient ??
+          createOfficialShopeeProductEnrichmentClient(environment),
+        ...(input.enrichmentCache ? { cache: input.enrichmentCache } : {}),
+      });
+      result.apiRequests += enrichment.externalRequests;
+      result.enrichmentShortlisted = enrichment.shortlisted;
+      result.enrichmentAttempted = enrichment.attempted;
+      result.enrichmentSucceeded = enrichment.enriched;
+      result.enrichmentFailed = enrichment.failed;
+      result.enrichmentErrorCode = enrichment.globalErrorCode;
+      const enrichmentByItem = new Map(
+        enrichment.items.map((item) => [item.itemId, item.metadata]),
+      );
+      const enrichedPools = new Map<
+        ShopeeLogicalCategory,
+        ShopeeRankedCandidate[]
+      >();
+      for (const candidate of preliminary.selected) {
+        const metadata = enrichmentByItem.get(candidate.itemId) ?? null;
+        const reranked = scoreShopeeAdvancedCandidate({
+          itemId: candidate.itemId,
+          qualityScore: candidate.score,
+          salePrice: candidate.salePrice,
+          originalPrice: candidate.originalPrice,
+          discountPercentage: candidate.discountPercentage,
+          commissionPercentage: metadata?.commissionRate ?? null,
+        });
+        const enrichedCandidate = {
+          ...candidate,
+          score: reranked.score,
+          advancedComponents: reranked.components,
+          enrichment: metadata,
+        };
+        const pool = enrichedPools.get(candidate.category) ?? [];
+        pool.push(enrichedCandidate);
+        pool.sort(compareShopeeRankedCandidates);
+        enrichedPools.set(candidate.category, pool);
+      }
+      selection = selectShopeeRoundRobin({
+        ...selectionInput,
+        pools: enrichedPools,
+      });
+    }
     result.eligibleByCategory = Object.fromEntries(
       [...eligible.entries()].sort(([left], [right]) =>
         left.localeCompare(right),

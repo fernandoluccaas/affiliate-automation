@@ -13,6 +13,8 @@ import {
   ShopeeListItemFeedsResponseSchema,
   type ShopeeFeedMode,
 } from "./official-feed-contract";
+import { ShopeeProductOfferV2ResponseSchema } from "./official-product-offer-contract";
+import type { ShopeeProductEnrichment } from "./enrichment";
 
 export const SHOPEE_OPEN_API_ENDPOINT =
   "https://open-api.affiliate.shopee.com.br/graphql";
@@ -145,6 +147,41 @@ export function createGetItemFeedDataPayload(input: {
       limit
       totalCount
       hasMore
+    }
+  }
+}`,
+  };
+  return { request, body: JSON.stringify(request) };
+}
+
+export function createProductOfferV2Payload(input: { itemId: string }) {
+  if (!/^\d+$/.test(input.itemId)) {
+    throw new ShopeeOpenApiError("SHOPEE_ENRICHMENT_ITEM_ID_INVALID");
+  }
+  const request = {
+    query: `query {
+  productOfferV2(itemId: ${input.itemId}, page: 1, limit: 1) {
+    nodes {
+      itemId
+      shopId
+      priceMin
+      priceMax
+      sales
+      ratingStar
+      commissionRate
+      sellerCommissionRate
+      shopeeCommissionRate
+      commission
+      periodStartTime
+      periodEndTime
+      productLink
+      offerLink
+    }
+    pageInfo {
+      page
+      limit
+      hasNextPage
+      scrollId
     }
   }
 }`,
@@ -336,6 +373,27 @@ export class ShopeeOpenApiClient {
       throw new ShopeeOpenApiError("SHOPEE_OPEN_API_SCHEMA_MISMATCH");
     }
     return parsed.data;
+  }
+
+  async productOfferV2(input: {
+    itemId: string;
+  }): Promise<ShopeeProductEnrichment | null> {
+    const response = await this.execute(createProductOfferV2Payload(input));
+    const parsed = ShopeeProductOfferV2ResponseSchema.safeParse(
+      response.data.productOfferV2,
+    );
+    if (!parsed.success) {
+      throw new ShopeeOpenApiError("SHOPEE_OPEN_API_SCHEMA_MISMATCH");
+    }
+    const node = parsed.data.nodes.find((item) => item.itemId === input.itemId);
+    if (!node || !node.itemId) return null;
+    return {
+      ...node,
+      itemId: node.itemId,
+      // Availability is not inferred from dates or sales. It stays unknown
+      // unless a future confirmed contract exposes an explicit field.
+      available: null,
+    };
   }
 }
 

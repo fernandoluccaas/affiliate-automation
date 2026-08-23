@@ -145,6 +145,8 @@ describe("Shopee affiliate configuration", () => {
       publicationWhatsAppEnabled: false,
       productCooldownHours: 168,
       sellerCooldownHours: 24,
+      enrichmentEnabled: false,
+      enrichmentMaxItems: 24,
     });
     expect(
       resolveShopeeAffiliateConfiguration({

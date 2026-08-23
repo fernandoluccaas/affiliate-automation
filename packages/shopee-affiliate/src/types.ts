@@ -66,6 +66,8 @@ export type ShopeeAffiliateConfiguration = {
   publicationWhatsAppEnabled: boolean;
   productCooldownHours: number;
   sellerCooldownHours: number;
+  enrichmentEnabled: boolean;
+  enrichmentMaxItems: number;
   issues: string[];
 };
 
@@ -264,6 +266,7 @@ export type ShopeeRankedCandidate = {
   score: number;
   components: ShopeeScoreBreakdown;
   advancedComponents?: import("./ranking").ShopeeAdvancedScoreBreakdown;
+  enrichment?: import("./enrichment").ShopeeProductEnrichment | null;
   sources: ShopeeProductSource[];
 };
 

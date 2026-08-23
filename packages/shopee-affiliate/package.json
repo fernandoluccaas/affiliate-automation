@@ -15,6 +15,7 @@
     "publication": "node --env-file=../../.env --import tsx src/publication-cli.ts",
     "distribution": "node --env-file=../../.env --import tsx src/distribution-cli.ts",
     "ranking": "node --env-file=../../.env --import tsx src/ranking-cli.ts",
+    "enrichment": "node --env-file=../../.env --import tsx src/enrichment-cli.ts",
     "build": "tsc -p tsconfig.json",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",

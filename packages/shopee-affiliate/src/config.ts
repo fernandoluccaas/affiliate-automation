@@ -247,6 +247,14 @@ export function resolveShopeeAffiliateConfiguration(
     "SHOPEE_SELLER_COOLDOWN_INVALID",
     issues,
   );
+  const enrichmentMaxItems = boundedInteger(
+    environment.SHOPEE_ENRICHMENT_MAX_ITEMS,
+    24,
+    1,
+    50,
+    "SHOPEE_ENRICHMENT_MAX_ITEMS_INVALID",
+    issues,
+  );
   const remoteDiscoveryReferenceIds = remoteIdentifiers(
     environment.SHOPEE_REMOTE_DISCOVERY_REFERENCE_IDS,
     "SHOPEE_REMOTE_DISCOVERY_REFERENCE_IDS_INVALID",
@@ -357,6 +365,9 @@ export function resolveShopeeAffiliateConfiguration(
       environment.SHOPEE_PUBLICATION_WHATSAPP_ENABLED === "true",
     productCooldownHours,
     sellerCooldownHours,
+    enrichmentEnabled:
+      configurationValid && environment.SHOPEE_ENRICHMENT_ENABLED === "true",
+    enrichmentMaxItems,
     issues,
   };
 }
