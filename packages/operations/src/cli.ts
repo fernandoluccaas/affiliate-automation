@@ -8,6 +8,10 @@ import { spawn } from "node:child_process";
 import { prisma } from "@affiliate/database";
 import { acquireLock, getRedisKeyFingerprint } from "@affiliate/redis";
 import {
+  auditShopeeProductionStatus,
+  loadShopeeProductionStatus,
+} from "@affiliate/shopee-affiliate";
+import {
   BURN_IN_REPORT_FILE,
   BURN_IN_REPORT_HISTORY,
   OPS_LOG_ROOT,
@@ -1108,11 +1112,19 @@ async function main() {
   }
   if (command === "status") {
     const status = await collectOperationalStatus(prisma, { workspaceRoot });
+    const shopeeProduction =
+      status.database === "OK" ? await loadShopeeProductionStatus() : null;
     const findings =
       status.database === "OK" ? await collectStateAudit(prisma, { workspaceRoot }) : [];
     output({
       ...status,
-      findings,
+      shopeeProduction,
+      findings: [
+        ...findings,
+        ...(shopeeProduction
+          ? auditShopeeProductionStatus(shopeeProduction)
+          : []),
+      ],
       currentBurnInSession: await currentBurnInSessionView(),
       lastCompletedBurnIn: await readBurnInReport(workspaceRoot),
       stateModified: false,
@@ -1120,9 +1132,14 @@ async function main() {
     return;
   }
   if (command === "audit-state") {
+    const shopeeProduction = await loadShopeeProductionStatus();
     output({
       status: "AUDIT_COMPLETED",
-      findings: await collectStateAudit(prisma, { workspaceRoot }),
+      findings: [
+        ...(await collectStateAudit(prisma, { workspaceRoot })),
+        ...auditShopeeProductionStatus(shopeeProduction),
+      ],
+      shopeeProduction,
       stateModified: false,
     });
     return;

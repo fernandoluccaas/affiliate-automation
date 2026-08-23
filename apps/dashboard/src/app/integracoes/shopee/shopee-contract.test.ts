@@ -67,6 +67,14 @@ describe("Shopee dashboard architecture", () => {
     expect(source).not.toMatch(/dispatch|playwright|chromium/i);
   });
 
+  it("shows read-only production pipeline observability", () => {
+    const source = app("page.tsx");
+    expect(source).toContain("loadShopeeProductionStatus");
+    expect(source).toContain("Publicação Shopee");
+    expect(source).toContain("Freshness");
+    expect(source).toContain("Enrichment");
+  });
+
   it("does not contain operational publication or messaging calls", () => {
     const source = `${app("shopee-datafeed-console.tsx")}\n${lib("shopee-datafeed-actions.ts")}`;
     expect(source).not.toMatch(

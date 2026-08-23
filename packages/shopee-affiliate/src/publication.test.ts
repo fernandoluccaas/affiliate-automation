@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  auditShopeeProductionStatus,
   evaluateShopeePublicationOffer,
   planShopeePublications,
   type ShopeePublicationChannel,
@@ -94,6 +95,32 @@ const enabledEnvironment = {
 } as NodeJS.ProcessEnv;
 
 describe("controlled Shopee publication", () => {
+  it("surfaces stale production state through read-only audit findings", () => {
+    const findings = auditShopeeProductionStatus({
+      enabled: true,
+      autoDistributionEnabled: true,
+      telegramEnabled: false,
+      whatsappEnabled: false,
+      candidateCount: 3,
+      plannedCount: 1,
+      publishedToday: 0,
+      dailyLimit: 12,
+      nextAllowedPublicationAt: null,
+      lastPublicationAt: null,
+      lastPublicationStatus: null,
+      lastErrorCode: null,
+      freshness: { fresh: 2, stale: 2 },
+      ranking: { candidatePool: 3 },
+      enrichment: { enabled: false, maxItems: 24 },
+      externalRequests: 0,
+      stateModified: false,
+    });
+    expect(findings.map((finding) => finding.code)).toEqual([
+      "SHOPEE_STALE_OFFERS_PENDING",
+      "SHOPEE_DISTRIBUTION_WITHOUT_CHANNEL",
+    ]);
+  });
+
   it("rejects an offer without a canonical AffiliateLink", () => {
     expect(
       evaluateShopeePublicationOffer(

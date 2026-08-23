@@ -68,6 +68,8 @@ export type ShopeeAffiliateConfiguration = {
   sellerCooldownHours: number;
   enrichmentEnabled: boolean;
   enrichmentMaxItems: number;
+  publicationMaxOfferAgeHours: number;
+  refreshBeforePublication: boolean;
   issues: string[];
 };
 

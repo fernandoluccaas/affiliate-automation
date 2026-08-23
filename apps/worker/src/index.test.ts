@@ -1220,6 +1220,76 @@ describe("createPublicationIdempotently", () => {
     ).toEqual(["publication-a1", "publication-b1"]);
   });
 
+  it("never dispatches a stale Shopee Publication", async () => {
+    const actual = await import("@affiliate/database");
+    const now = new Date("2026-08-23T15:00:00.000Z");
+    const previous = {
+      publication: process.env.SHOPEE_PUBLICATION_ENABLED,
+      distribution: process.env.SHOPEE_AUTO_DISTRIBUTION_ENABLED,
+      telegram: process.env.SHOPEE_PUBLICATION_TELEGRAM_ENABLED,
+    };
+    process.env.SHOPEE_PUBLICATION_ENABLED = "true";
+    process.env.SHOPEE_AUTO_DISTRIBUTION_ENABLED = "true";
+    process.env.SHOPEE_PUBLICATION_TELEGRAM_ENABLED = "true";
+    const attemptCreate = vi.fn();
+    Object.assign(actual.prisma, {
+      publication: {
+        findMany: vi.fn().mockResolvedValue([
+          {
+            id: "shopee-publication-stale",
+            offerId: "shopee-offer-stale",
+            channelId: "telegram-shopee",
+            status: "SCHEDULED",
+            messagePayload: {
+              trackingUrl: "https://affiliate.test/go/shopee",
+              message: "Mensagem que não deve ser enviada",
+            },
+            offer: {
+              id: "shopee-offer-stale",
+              marketplace: "SHOPEE",
+              imageUrl: null,
+              affiliateLinks: [],
+            },
+            channel: {
+              id: "telegram-shopee",
+              type: "TELEGRAM",
+              configuration: null,
+            },
+            attempts: [],
+          },
+        ]),
+        update: vi.fn(),
+      },
+      publicationAttempt: { create: attemptCreate },
+    });
+
+    const metrics = await publishScheduledOffers(now, {
+      ensureShopeeFreshness: vi.fn().mockResolvedValue({
+        allowed: false,
+        reason: "SHOPEE_OFFER_STALE",
+        refreshAttempted: false,
+        refreshSucceeded: false,
+        externalRequests: 0,
+      }),
+    });
+
+    expect(metrics).toMatchObject({
+      published: 0,
+      expired: 1,
+      skipReasons: { SHOPEE_OFFER_STALE: 1 },
+    });
+    expect(attemptCreate).not.toHaveBeenCalled();
+    if (previous.publication === undefined)
+      delete process.env.SHOPEE_PUBLICATION_ENABLED;
+    else process.env.SHOPEE_PUBLICATION_ENABLED = previous.publication;
+    if (previous.distribution === undefined)
+      delete process.env.SHOPEE_AUTO_DISTRIBUTION_ENABLED;
+    else process.env.SHOPEE_AUTO_DISTRIBUTION_ENABLED = previous.distribution;
+    if (previous.telegram === undefined)
+      delete process.env.SHOPEE_PUBLICATION_TELEGRAM_ENABLED;
+    else process.env.SHOPEE_PUBLICATION_TELEGRAM_ENABLED = previous.telegram;
+  });
+
   it("persists Telegram Retry-After and blocks immediate retry", async () => {
     const actual = await import("@affiliate/database");
     const now = new Date("2026-07-30T12:00:00.000Z");

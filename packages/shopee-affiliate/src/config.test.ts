@@ -147,6 +147,8 @@ describe("Shopee affiliate configuration", () => {
       sellerCooldownHours: 24,
       enrichmentEnabled: false,
       enrichmentMaxItems: 24,
+      publicationMaxOfferAgeHours: 24,
+      refreshBeforePublication: true,
     });
     expect(
       resolveShopeeAffiliateConfiguration({

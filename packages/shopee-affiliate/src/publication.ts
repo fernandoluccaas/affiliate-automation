@@ -1,6 +1,7 @@
 import { prisma, Prisma, type PrismaClient } from "@affiliate/database";
-import { buildPromoMessage } from "@affiliate/publication";
+import { buildPromoMessage, getZonedDayRange } from "@affiliate/publication";
 import { resolveShopeeAffiliateConfiguration } from "./config";
+import { nextShopeePublicationAt } from "./distribution";
 import { validateShopeeGeneratedShortLink } from "./validation";
 
 export type ShopeePublicationSkipCode =
@@ -448,4 +449,130 @@ export function createPrismaShopeePublicationStore(
       }
     },
   };
+}
+
+export async function loadShopeeProductionStatus(input: {
+  database?: PrismaClient;
+  environment?: NodeJS.ProcessEnv;
+  now?: Date;
+  timezone?: string;
+} = {}) {
+  const database = input.database ?? prisma;
+  const environment = input.environment ?? process.env;
+  const configuration = resolveShopeeAffiliateConfiguration(environment);
+  const now = input.now ?? new Date();
+  const timezone = input.timezone ?? "America/Fortaleza";
+  const range = getZonedDayRange(now, timezone);
+  const cutoff = new Date(
+    now.getTime() - configuration.publicationMaxOfferAgeHours * 3_600_000,
+  );
+  const [candidateCount, plannedCount, publishedToday, stale, last] =
+    await Promise.all([
+      database.offer.count({
+        where: { marketplace: "SHOPEE", status: "READY_TO_PUBLISH" },
+      }),
+      database.publication.count({
+        where: {
+          marketplaceSnapshot: "SHOPEE",
+          status: { in: ["SCHEDULED", "AWAITING_MANUAL_PUBLICATION"] },
+        },
+      }),
+      database.publication.count({
+        where: {
+          marketplaceSnapshot: "SHOPEE",
+          status: { in: ["PUBLISHED", "EXPORTED"] },
+          publishedAt: { gte: range.start, lt: range.end },
+        },
+      }),
+      database.offer.count({
+        where: {
+          marketplace: "SHOPEE",
+          status: { in: ["READY_TO_PUBLISH", "SCHEDULED"] },
+          collectedAt: { lt: cutoff },
+          OR: [{ verifiedAt: null }, { verifiedAt: { lt: cutoff } }],
+        },
+      }),
+      database.publication.findFirst({
+        where: { marketplaceSnapshot: "SHOPEE" },
+        orderBy: { scheduledAt: "desc" },
+        select: {
+          status: true,
+          scheduledAt: true,
+          publishedAt: true,
+          errorMessage: true,
+        },
+      }),
+    ]);
+  const lastPublicationAt = last?.publishedAt ?? last?.scheduledAt ?? null;
+  return {
+    enabled: configuration.publicationEnabled,
+    autoDistributionEnabled: configuration.autoDistributionEnabled,
+    telegramEnabled: configuration.publicationTelegramEnabled,
+    whatsappEnabled: configuration.publicationWhatsAppEnabled,
+    candidateCount,
+    plannedCount,
+    publishedToday,
+    dailyLimit: configuration.publicationMaxPerDay,
+    nextAllowedPublicationAt: nextShopeePublicationAt({
+      configuration,
+      lastPublicationAt,
+    })?.toISOString() ?? null,
+    lastPublicationAt: lastPublicationAt?.toISOString() ?? null,
+    lastPublicationStatus: last?.status ?? null,
+    lastErrorCode:
+      last?.errorMessage && /^SHOPEE_[A-Z0-9_]+$/.test(last.errorMessage)
+        ? last.errorMessage
+        : last?.errorMessage
+          ? "SHOPEE_PUBLICATION_FAILED"
+          : null,
+    freshness: {
+      fresh: Math.max(0, candidateCount + plannedCount - stale),
+      stale,
+    },
+    ranking: {
+      candidatePool: candidateCount,
+    },
+    enrichment: {
+      enabled: configuration.enrichmentEnabled,
+      maxItems: configuration.enrichmentMaxItems,
+    },
+    externalRequests: 0 as const,
+    stateModified: false as const,
+  };
+}
+
+export function auditShopeeProductionStatus(
+  status: Awaited<ReturnType<typeof loadShopeeProductionStatus>>,
+) {
+  const findings: Array<{
+    code: string;
+    severity: "WARNING" | "CRITICAL";
+    action: string;
+  }> = [];
+  if (status.freshness.stale > 0) {
+    findings.push({
+      code: "SHOPEE_STALE_OFFERS_PENDING",
+      severity: "WARNING",
+      action: "REVIEW_SHOPEE_FRESHNESS",
+    });
+  }
+  if (status.lastErrorCode) {
+    findings.push({
+      code: status.lastErrorCode,
+      severity: "WARNING",
+      action: "INSPECT_SHOPEE_PUBLICATION",
+    });
+  }
+  if (
+    status.autoDistributionEnabled &&
+    !status.telegramEnabled &&
+    !status.whatsappEnabled
+  ) {
+    findings.push({
+      code: "SHOPEE_DISTRIBUTION_WITHOUT_CHANNEL",
+      severity: "WARNING",
+      action: "ENABLE_ONE_SHOPEE_CHANNEL_OR_DISABLE_DISTRIBUTION",
+    });
+  }
+  return findings;
 }

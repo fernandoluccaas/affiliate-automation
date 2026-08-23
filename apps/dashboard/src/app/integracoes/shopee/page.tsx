@@ -12,6 +12,7 @@ import { StatusBadge } from "@/components/ui/status-badge";
 import {
   SHOPEE_CATEGORY_CATALOG,
   getShopeeScheduledDiscoveryStatus,
+  loadShopeeProductionStatus,
   loadShopeeOperationalOfferState,
   resolveShopeeAffiliateConfiguration,
 } from "@affiliate/shopee-affiliate";
@@ -31,9 +32,10 @@ function dateTime(value: string | null) {
 
 export default async function ShopeeIntegrationPage() {
   const configuration = resolveShopeeAffiliateConfiguration();
-  const [offerState, scheduledDiscovery] = await Promise.all([
+  const [offerState, scheduledDiscovery, productionStatus] = await Promise.all([
     loadShopeeOperationalOfferState(),
     getShopeeScheduledDiscoveryStatus(),
+    loadShopeeProductionStatus(),
   ]);
   const automationState =
     scheduledDiscovery.lastRunStatus === "RUNNING"
@@ -115,6 +117,59 @@ export default async function ShopeeIntegrationPage() {
             detail="Somente links gerados ou validados podem liberar a oferta"
             icon={Link2Off}
             tone={configuration.linksVerified ? "success" : "warning"}
+          />
+        </MetricGrid>
+
+        <MetricGrid>
+          <MetricCard
+            label="Publicação Shopee"
+            value={productionStatus.enabled ? "Habilitada" : "Desabilitada"}
+            detail={
+              productionStatus.autoDistributionEnabled
+                ? "Distribuição automática ativa"
+                : "Distribuição automática fail-closed"
+            }
+            icon={ShieldCheck}
+            tone={productionStatus.autoDistributionEnabled ? "success" : "default"}
+          />
+          <MetricCard
+            label="Candidatas"
+            value={productionStatus.candidateCount}
+            detail={`${productionStatus.plannedCount} Publications planejadas`}
+            icon={FileSearch}
+          />
+          <MetricCard
+            label="Publicadas hoje"
+            value={`${productionStatus.publishedToday}/${productionStatus.dailyLimit}`}
+            detail={
+              productionStatus.nextAllowedPublicationAt
+                ? `Próxima após ${dateTime(productionStatus.nextAllowedPublicationAt)}`
+                : "Sem intervalo pendente"
+            }
+            icon={Clock3}
+          />
+          <MetricCard
+            label="Canais Shopee"
+            value={
+              productionStatus.telegramEnabled || productionStatus.whatsappEnabled
+                ? "Configurados"
+                : "Desabilitados"
+            }
+            detail={`Telegram ${productionStatus.telegramEnabled ? "on" : "off"} · WhatsApp ${productionStatus.whatsappEnabled ? "on" : "off"}`}
+            icon={ShieldCheck}
+          />
+          <MetricCard
+            label="Freshness"
+            value={`${productionStatus.freshness.fresh} fresh`}
+            detail={`${productionStatus.freshness.stale} stale`}
+            icon={Clock3}
+            tone={productionStatus.freshness.stale > 0 ? "warning" : "success"}
+          />
+          <MetricCard
+            label="Enrichment"
+            value={productionStatus.enrichment.enabled ? "Ativo" : "Desativado"}
+            detail={`Shortlist máxima: ${productionStatus.enrichment.maxItems}`}
+            icon={DatabaseZap}
           />
         </MetricGrid>
 

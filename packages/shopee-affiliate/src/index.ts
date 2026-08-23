@@ -2,6 +2,7 @@ export * from "./config";
 export * from "./discovery";
 export * from "./distribution";
 export * from "./enrichment";
+export * from "./freshness";
 export * from "./parser";
 export * from "./providers";
 export * from "./remote-discovery";

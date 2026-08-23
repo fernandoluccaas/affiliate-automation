@@ -39,6 +39,7 @@ import { sanitizeMercadoLivreAffiliateError } from "@affiliate/marketplace-conne
 import { validateMarketplaceAffiliateUrl } from "@affiliate/validation";
 import {
   evaluateShopeeDistributionPolicy,
+  ensureShopeePublicationFreshness,
   isShopeeAutomaticDistributionEnabled,
   isShopeeDistributionChannelEnabled,
   resolveShopeeAffiliateConfiguration,
@@ -1490,7 +1491,12 @@ export function publicationRetryDelayMs(
   return Math.max(backoffMs, retryAfterMs);
 }
 
-export async function publishScheduledOffers(now = new Date()) {
+export async function publishScheduledOffers(
+  now = new Date(),
+  options: {
+    ensureShopeeFreshness?: typeof ensureShopeePublicationFreshness;
+  } = {},
+) {
   const metrics = emptyMetrics();
   const maxAttempts = Number(
     process.env.WORKER_MAX_ATTEMPTS ?? DEFAULT_MAX_ATTEMPTS,
@@ -1583,6 +1589,40 @@ export async function publishScheduledOffers(now = new Date()) {
   });
 
   for (const publication of selectedPublications) {
+    if (publication.offer.marketplace === "SHOPEE") {
+      try {
+        const freshness = await (
+          options.ensureShopeeFreshness ?? ensureShopeePublicationFreshness
+        )({
+          publicationId: publication.id,
+          now,
+        });
+        if (!freshness.allowed) {
+          metrics.expired += 1;
+          metrics.skipped += 1;
+          metrics.skipReasons[freshness.reason] =
+            (metrics.skipReasons[freshness.reason] ?? 0) + 1;
+          recordPlanningDecision(
+            metrics,
+            publication.offer,
+            publication.channel,
+            "BLOCKED_BY_POLICY",
+            {
+              executionResult: "FAILED",
+              reason: freshness.reason,
+              publicationId: publication.id,
+            },
+          );
+          continue;
+        }
+      } catch {
+        metrics.failed += 1;
+        metrics.skipped += 1;
+        metrics.skipReasons.SHOPEE_OFFER_REFRESH_FAILED =
+          (metrics.skipReasons.SHOPEE_OFFER_REFRESH_FAILED ?? 0) + 1;
+        continue;
+      }
+    }
     const payload = await payloadFromPublication(publication);
     const publisher = publisherForChannel(publication.channel);
 

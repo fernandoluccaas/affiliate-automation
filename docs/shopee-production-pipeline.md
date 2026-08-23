@@ -112,3 +112,35 @@ SHOPEE_ENRICHMENT_MAX_ITEMS="24"
 `npm run shopee:enrichment:status` and
 `npm run shopee:enrichment:preview` are read-only. Preview reports only the
 candidate count and bounded estimate; it performs zero Open API calls.
+
+## Freshness, refresh, and expiration (Phase 6A.11)
+
+Immediately before a Shopee channel adapter runs, the worker validates the
+canonical AffiliateLink and the newest of `verifiedAt`/`collectedAt`. Fresh
+offers proceed without Open API. Stale offers are refreshed with the same
+bounded `productOfferV2` client only when refresh and automatic distribution are
+explicitly enabled.
+
+An unchanged price refreshes the verification timestamp. A missing product,
+missing canonical link, changed price, duplicate Publication, or refresh error
+cancels the pending Publication and marks the Offer `REJECTED_EXPIRED` with a
+structured reason. The immutable old message is never rewritten or sent; a
+commercial change must return through discovery and ingestion to create the
+proper Offer version.
+
+The idempotent maintenance command expires stale ready/scheduled Offers and
+cancels their pending Publications. It never deletes Offers, Publications,
+AffiliateLinks, clicks, or conversion history.
+
+```dotenv
+SHOPEE_PUBLICATION_MAX_OFFER_AGE_HOURS="24"
+SHOPEE_REFRESH_BEFORE_PUBLICATION="true"
+```
+
+```powershell
+npm run shopee:freshness:status
+npm run shopee:freshness:expire -- --confirm-expire-stale
+```
+
+Status is read-only and never calls Open API. Maintenance requires the exact
+confirmation flag and sends no message.

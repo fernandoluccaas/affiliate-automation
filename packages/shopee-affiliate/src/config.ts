@@ -255,6 +255,14 @@ export function resolveShopeeAffiliateConfiguration(
     "SHOPEE_ENRICHMENT_MAX_ITEMS_INVALID",
     issues,
   );
+  const publicationMaxOfferAgeHours = boundedInteger(
+    environment.SHOPEE_PUBLICATION_MAX_OFFER_AGE_HOURS,
+    24,
+    1,
+    720,
+    "SHOPEE_PUBLICATION_MAX_OFFER_AGE_INVALID",
+    issues,
+  );
   const remoteDiscoveryReferenceIds = remoteIdentifiers(
     environment.SHOPEE_REMOTE_DISCOVERY_REFERENCE_IDS,
     "SHOPEE_REMOTE_DISCOVERY_REFERENCE_IDS_INVALID",
@@ -368,6 +376,9 @@ export function resolveShopeeAffiliateConfiguration(
     enrichmentEnabled:
       configurationValid && environment.SHOPEE_ENRICHMENT_ENABLED === "true",
     enrichmentMaxItems,
+    publicationMaxOfferAgeHours,
+    refreshBeforePublication:
+      environment.SHOPEE_REFRESH_BEFORE_PUBLICATION !== "false",
     issues,
   };
 }
