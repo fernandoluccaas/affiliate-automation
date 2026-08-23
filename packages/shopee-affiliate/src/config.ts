@@ -181,6 +181,14 @@ export function resolveShopeeAffiliateConfiguration(
     "SHOPEE_AUTOMATED_DISCOVERY_INTERVAL_INVALID",
     issues,
   );
+  const publicationMaxPerCycle = boundedInteger(
+    environment.SHOPEE_PUBLICATION_MAX_PER_CYCLE,
+    2,
+    1,
+    24,
+    "SHOPEE_PUBLICATION_MAX_PER_CYCLE_INVALID",
+    issues,
+  );
   const remoteDiscoveryReferenceIds = remoteIdentifiers(
     environment.SHOPEE_REMOTE_DISCOVERY_REFERENCE_IDS,
     "SHOPEE_REMOTE_DISCOVERY_REFERENCE_IDS_INVALID",
@@ -272,6 +280,10 @@ export function resolveShopeeAffiliateConfiguration(
     remoteDiscoveryMaxItems,
     remoteDiscoveryReferenceIds,
     remoteDiscoveryFeedIds,
+    publicationEnabled:
+      configurationValid &&
+      environment.SHOPEE_PUBLICATION_ENABLED === "true",
+    publicationMaxPerCycle,
     issues,
   };
 }

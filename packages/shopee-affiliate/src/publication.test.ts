@@ -1,0 +1,189 @@
+import { describe, expect, it } from "vitest";
+import {
+  evaluateShopeePublicationOffer,
+  planShopeePublications,
+  type ShopeePublicationChannel,
+  type ShopeePublicationCreateInput,
+  type ShopeePublicationOffer,
+  type ShopeePublicationStore,
+} from "./publication";
+
+function offer(
+  overrides: Partial<ShopeePublicationOffer> = {},
+): ShopeePublicationOffer {
+  return {
+    id: "offer-1",
+    productId: "product-1",
+    marketplace: "SHOPEE",
+    externalProductId: "1001",
+    version: 1,
+    status: "READY_TO_PUBLISH",
+    title: "Produto sanitizado",
+    category: "CASA",
+    imageUrl: "https://down-br.img.susercontent.com/file/example",
+    affiliateUrl: "https://s.shopee.com.br/AbCdEf",
+    originalPrice: "120.00",
+    currentPrice: "90.00",
+    discountPercentage: "25",
+    couponCode: null,
+    couponExpiration: null,
+    freeShipping: false,
+    shippingStatus: "UNKNOWN",
+    score: 90,
+    sourceCategoryId: "cat-1",
+    bestSellerPosition: null,
+    sourceHighlightId: null,
+    sourceHighlightType: null,
+    resolutionStrategy: "OPEN_API_FEED",
+    affiliateLinks: [
+      {
+        id: "link-1",
+        slug: "shopee-link-1",
+        destination: "https://s.shopee.com.br/AbCdEf",
+        active: true,
+      },
+    ],
+    ...overrides,
+  };
+}
+
+const channel: ShopeePublicationChannel = {
+  id: "channel-1",
+  type: "TELEGRAM",
+  enabled: true,
+  allowedMarketplaces: ["SHOPEE"],
+  allowedCategories: [],
+  minimumScore: 70,
+  minimumDiscountPercentage: null,
+};
+
+class MemoryStore implements ShopeePublicationStore {
+  readonly created = new Map<string, ShopeePublicationCreateInput>();
+
+  constructor(
+    readonly offers: ShopeePublicationOffer[] = [offer()],
+    readonly channels: ShopeePublicationChannel[] = [channel],
+  ) {}
+
+  async listReadyOffers() {
+    return this.offers;
+  }
+
+  async listChannels() {
+    return this.channels;
+  }
+
+  async publicationExists(key: string) {
+    return this.created.has(key);
+  }
+
+  async createControlledPublication(input: ShopeePublicationCreateInput) {
+    await Promise.resolve();
+    if (this.created.has(input.idempotencyKey)) {
+      return { id: "publication-existing", created: false };
+    }
+    this.created.set(input.idempotencyKey, input);
+    return { id: `publication-${this.created.size}`, created: true };
+  }
+}
+
+const enabledEnvironment = {
+  SHOPEE_PUBLICATION_ENABLED: "true",
+  SHOPEE_PUBLICATION_MAX_PER_CYCLE: "2",
+  APP_BASE_URL: "https://affiliate.test",
+} as NodeJS.ProcessEnv;
+
+describe("controlled Shopee publication", () => {
+  it("rejects an offer without a canonical AffiliateLink", () => {
+    expect(
+      evaluateShopeePublicationOffer(
+        offer({ affiliateUrl: null, affiliateLinks: [] }),
+      ),
+    ).toBe("SHOPEE_AFFILIATE_LINK_MISSING");
+  });
+
+  it("rejects an offer from the wrong marketplace", () => {
+    expect(evaluateShopeePublicationOffer(offer({ marketplace: "AMAZON" }))).toBe(
+      "SHOPEE_OFFER_WRONG_MARKETPLACE",
+    );
+  });
+
+  it("uses only the canonical AffiliateLink destination and internal slug", async () => {
+    const store = new MemoryStore();
+    const result = await planShopeePublications({
+      store,
+      environment: enabledEnvironment,
+      confirmCreatePublication: true,
+    });
+    expect(result.publicationsCreated).toBe(1);
+    const created = [...store.created.values()][0]!;
+    expect(created.affiliateDestination).toBe(
+      "https://s.shopee.com.br/AbCdEf",
+    );
+    expect(created.trackingUrl).toBe(
+      "https://affiliate.test/go/shopee-link-1",
+    );
+  });
+
+  it("reports an existing Publication as a duplicate", async () => {
+    const store = new MemoryStore();
+    store.created.set("publication:channel-1:offer-1", {} as ShopeePublicationCreateInput);
+    const result = await planShopeePublications({
+      store,
+      environment: enabledEnvironment,
+      confirmCreatePublication: true,
+    });
+    expect(result.duplicates).toBe(1);
+    expect(result.publicationsCreated).toBe(0);
+  });
+
+  it("is race-safe when two planners target the same Offer/channel", async () => {
+    const store = new MemoryStore();
+    const [first, second] = await Promise.all([
+      planShopeePublications({
+        store,
+        environment: enabledEnvironment,
+        confirmCreatePublication: true,
+      }),
+      planShopeePublications({
+        store,
+        environment: enabledEnvironment,
+        confirmCreatePublication: true,
+      }),
+    ]);
+    expect(first.publicationsCreated + second.publicationsCreated).toBe(1);
+    expect(store.created).toHaveLength(1);
+  });
+
+  it("keeps preview read-only", async () => {
+    const store = new MemoryStore();
+    const result = await planShopeePublications({
+      store,
+      environment: enabledEnvironment,
+      preview: true,
+    });
+    expect(result.status).toBe("PREVIEW_COMPLETED");
+    expect(result.writes).toBe(0);
+    expect(result.publicationsCreated).toBe(0);
+    expect(result.messagesSent).toBe(0);
+    expect(result.stateModified).toBe(false);
+    expect(store.created).toHaveLength(0);
+  });
+
+  it("fails closed without reading the store when disabled", async () => {
+    let reads = 0;
+    const store = new MemoryStore();
+    store.listReadyOffers = async () => {
+      reads += 1;
+      return [offer()];
+    };
+    const result = await planShopeePublications({
+      store,
+      environment: {},
+      preview: true,
+    });
+    expect(result.status).toBe("DISABLED");
+    expect(result.reasons).toEqual({ SHOPEE_PUBLICATION_DISABLED: 1 });
+    expect(reads).toBe(0);
+  });
+});

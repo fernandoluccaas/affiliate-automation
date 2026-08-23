@@ -134,6 +134,8 @@ describe("Shopee affiliate configuration", () => {
       remoteDiscoveryMaxItems: 10_000,
       remoteDiscoveryFeedIds: [],
       remoteDiscoveryReferenceIds: [],
+      publicationEnabled: false,
+      publicationMaxPerCycle: 2,
     });
     expect(
       resolveShopeeAffiliateConfiguration({
@@ -344,6 +346,31 @@ describe("Shopee affiliate configuration", () => {
         SHOPEE_DATAFEED_LINKS_VERIFIED: "true",
       }).linksVerified,
     ).toBe(true);
+  });
+
+  it("keeps controlled publication fail-closed and bounded", () => {
+    expect(
+      resolveShopeeAffiliateConfiguration({
+        SHOPEE_PUBLICATION_ENABLED: "true",
+        SHOPEE_PUBLICATION_MAX_PER_CYCLE: "24",
+      }),
+    ).toMatchObject({
+      publicationEnabled: true,
+      publicationMaxPerCycle: 24,
+    });
+    expect(
+      resolveShopeeAffiliateConfiguration({
+        SHOPEE_PUBLICATION_ENABLED: "true",
+        SHOPEE_PUBLICATION_MAX_PER_CYCLE: "100",
+      }),
+    ).toMatchObject({
+      configurationValid: false,
+      publicationEnabled: false,
+      publicationMaxPerCycle: 2,
+      issues: expect.arrayContaining([
+        "SHOPEE_PUBLICATION_MAX_PER_CYCLE_INVALID",
+      ]),
+    });
   });
 
   it("uses six centralized category mappings", () => {

@@ -55,6 +55,8 @@ export type ShopeeAffiliateConfiguration = {
   remoteDiscoveryMaxItems: number;
   remoteDiscoveryReferenceIds: string[];
   remoteDiscoveryFeedIds: string[];
+  publicationEnabled: boolean;
+  publicationMaxPerCycle: number;
   issues: string[];
 };
 
