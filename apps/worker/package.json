@@ -9,6 +9,8 @@
     "start": "node --env-file=../../.env --import tsx src/index.ts",
     "burn-in": "node --env-file=../../.env --import tsx src/burn-in-entry.ts",
     "whatsapp:web": "tsx src/whatsapp-web-cli.ts",
+    "shopee:dispatch": "node --env-file=../../.env --import tsx src/shopee-dispatch-cli.ts",
+    "shopee:production": "node --env-file=../../.env --import tsx src/shopee-production-cli.ts",
     "build": "tsc -p tsconfig.json",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",

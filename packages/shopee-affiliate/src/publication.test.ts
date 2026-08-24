@@ -102,10 +102,19 @@ const enabledEnvironment = {
 describe("controlled Shopee publication", () => {
   it("surfaces stale production state through read-only audit findings", () => {
     const findings = auditShopeeProductionStatus({
+      mode: "DRY_RUN",
       enabled: true,
+      publicationEnabled: true,
       autoDistributionEnabled: true,
+      externalSendsEnabled: false,
       telegramEnabled: false,
       whatsappEnabled: false,
+      configuredShopeeChannels: {
+        total: 0,
+        telegram: 0,
+        whatsapp: 0,
+        manual: 0,
+      },
       candidateCount: 3,
       plannedCount: 1,
       publishedToday: 0,
@@ -117,6 +126,16 @@ describe("controlled Shopee publication", () => {
       freshness: { fresh: 2, stale: 2 },
       ranking: { candidatePool: 3 },
       enrichment: { enabled: false, maxItems: 24 },
+      lastProductionRun: null,
+      telegram: { pending: 0, sentToday: 0, failed: 0, deliveryUncertain: 0 },
+      whatsapp: {
+        pending: 0,
+        queued: 0,
+        sentToday: 0,
+        failed: 0,
+        deliveryUncertain: 0,
+      },
+      lock: { held: false, owner: null, ttlMs: 0, mode: "unavailable" },
       externalRequests: 0,
       stateModified: false,
     });

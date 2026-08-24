@@ -28,6 +28,7 @@ export type PublisherResult = {
   failureKind?: "TRANSIENT" | "PERMANENT" | undefined;
   errorCode?: string | undefined;
   retryAfterSeconds?: number | undefined;
+  deliveryUncertain?: boolean | undefined;
 };
 
 export interface PublisherAdapter {
@@ -141,6 +142,7 @@ type TelegramApiResponse = {
   error_code?: number;
   httpStatus?: number;
   transientFailure?: boolean;
+  deliveryUncertain?: boolean;
   parameters?: {
     retry_after?: number;
   };
@@ -176,6 +178,7 @@ function telegramFailure(response: TelegramApiResponse) {
           ? `TELEGRAM_HTTP_${response.httpStatus}`
           : "TELEGRAM_REQUEST_FAILED",
     ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}),
+    ...(response.deliveryUncertain ? { deliveryUncertain: true } : {}),
   };
 }
 
@@ -360,6 +363,7 @@ export class TelegramPublisher implements PublisherAdapter {
       return {
         ok: false,
         transientFailure: true,
+        deliveryUncertain: true,
         description:
           error instanceof Error && error.name === "AbortError"
             ? "Telegram request timed out."

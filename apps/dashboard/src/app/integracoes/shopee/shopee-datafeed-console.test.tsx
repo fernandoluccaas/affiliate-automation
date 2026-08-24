@@ -77,6 +77,7 @@ const configuration: ShopeeDashboardConfigurationDto = {
   remoteDiscoveryReferenceIds: [],
   publicationEnabled: false,
   autoDistributionEnabled: false,
+  externalSendsEnabled: false,
   publicationMaxPerCycle: 2,
   publicationMaxPerDay: 12,
   publicationMinIntervalMinutes: 60,

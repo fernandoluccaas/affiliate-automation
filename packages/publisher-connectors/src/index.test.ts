@@ -136,6 +136,24 @@ describe("TelegramPublisher retry classification", () => {
       errorCode: "TELEGRAM_400",
     });
   });
+
+  it("marks a transport failure as delivery uncertain", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockRejectedValue(new Error("socket reset")),
+    );
+
+    await expect(
+      new TelegramPublisher({
+        botToken: "secret-token",
+        chatId: "chat-1",
+      }).publish({ ...payload, imageUrl: null }),
+    ).resolves.toMatchObject({
+      status: "FAILED",
+      failureKind: "TRANSIENT",
+      deliveryUncertain: true,
+    });
+  });
 });
 
 describe("TelegramPublisher", () => {

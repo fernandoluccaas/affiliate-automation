@@ -18,6 +18,11 @@ import {
   type WhatsAppWebSendStateUpdate,
 } from "@affiliate/publisher-connectors";
 import { acquireLock, type LockHandle } from "@affiliate/redis";
+import {
+  evaluateShopeeDispatchGates,
+  resolveShopeeAffiliateConfiguration,
+  type ShopeeDispatchRecord,
+} from "@affiliate/shopee-affiliate";
 
 const ACTOR = "LOCAL_REPOSITORY_OWNER_CLI";
 
@@ -73,6 +78,7 @@ export type AuthorizedDispatchContext = {
   };
   input: WhatsAppWebPublicationInput;
   fingerprint: string;
+  shopeeDispatchRecord?: ShopeeDispatchRecord;
 };
 
 export type AuthorizedDispatchResult = {
@@ -96,12 +102,18 @@ export type AuthorizedDispatchDependencies = {
     channelId: string;
   }>;
   acquireProfileLock(profileKey: string, ttlMs: number): Promise<LockHandle>;
-  acquirePublicationLock(publicationId: string, ttlMs: number): Promise<LockHandle>;
+  acquirePublicationLock(
+    publicationId: string,
+    ttlMs: number,
+  ): Promise<LockHandle>;
   createPublisher(
     profileLock: LockHandle,
     recordSendState: (update: WhatsAppWebSendStateUpdate) => Promise<void>,
   ): WhatsAppGroupsWebPublisherContract;
-  createAttempt(context: AuthorizedDispatchContext, claimId: string): Promise<string>;
+  createAttempt(
+    context: AuthorizedDispatchContext,
+    claimId: string,
+  ): Promise<string>;
   finishAttempt(
     attemptId: string,
     result: {
@@ -138,7 +150,10 @@ function rejected(
   errorCode: string,
 ): AuthorizedDispatchResult {
   return {
-    status: errorCode === "WHATSAPP_WEB_PUBLICATION_ALREADY_PUBLISHED" ? "SKIPPED" : "FAILED",
+    status:
+      errorCode === "WHATSAPP_WEB_PUBLICATION_ALREADY_PUBLISHED"
+        ? "SKIPPED"
+        : "FAILED",
     errorCode,
     publicationId,
     channelId,
@@ -158,7 +173,10 @@ function assertPersistedDispatchGates(context: AuthorizedDispatchContext) {
   if (metadata.sendAuthorizationStatus === "REVOKED") {
     throw new Error("WHATSAPP_WEB_SEND_AUTHORIZATION_REVOKED");
   }
-  if (metadata.sendAuthorizationStatus === "CLAIMED" || metadata.sendAuthorizationStatus === "CONSUMED") {
+  if (
+    metadata.sendAuthorizationStatus === "CLAIMED" ||
+    metadata.sendAuthorizationStatus === "CONSUMED"
+  ) {
     throw new Error("WHATSAPP_WEB_SEND_AUTHORIZATION_ALREADY_CONSUMED");
   }
   if (metadata.sendAuthorizationStatus !== "ACTIVE") {
@@ -208,7 +226,11 @@ export async function dispatchAuthorizedWhatsAppPublication(
     context = await dependencies.loadContext(input.publicationId);
   } catch (error) {
     const errorCode = safeError(error);
-    dependencies.emit({ event: "DISPATCH_GATE_REJECTED", publicationId: input.publicationId, errorCode });
+    dependencies.emit({
+      event: "DISPATCH_GATE_REJECTED",
+      publicationId: input.publicationId,
+      errorCode,
+    });
     return rejected(input.publicationId, null, errorCode);
   }
 
@@ -218,6 +240,28 @@ export async function dispatchAuthorizedWhatsAppPublication(
       context.publication.channelId,
       "WHATSAPP_WEB_PUBLICATION_ALREADY_PUBLISHED",
     );
+  }
+
+  if (context.shopeeDispatchRecord) {
+    const shopeeGate = evaluateShopeeDispatchGates({
+      configuration: resolveShopeeAffiliateConfiguration(),
+      record: context.shopeeDispatchRecord,
+    });
+    if (!shopeeGate.ok) {
+      dependencies.emit({
+        event: "DISPATCH_GATE_REJECTED",
+        publicationId: context.publication.id,
+        channelId: context.publication.channelId,
+        errorCode: shopeeGate.code,
+        browserOpened: false,
+        sendCalled: false,
+      });
+      return rejected(
+        context.publication.id,
+        context.publication.channelId,
+        shopeeGate.code,
+      );
+    }
   }
 
   const eligibility = validateRealSendEligibility({
@@ -251,8 +295,17 @@ export async function dispatchAuthorizedWhatsAppPublication(
     assertPersistedDispatchGates(context);
   } catch (error) {
     const errorCode = safeError(error);
-    dependencies.emit({ event: "DISPATCH_GATE_REJECTED", publicationId: context.publication.id, channelId: context.publication.channelId, errorCode });
-    return rejected(context.publication.id, context.publication.channelId, errorCode);
+    dependencies.emit({
+      event: "DISPATCH_GATE_REJECTED",
+      publicationId: context.publication.id,
+      channelId: context.publication.channelId,
+      errorCode,
+    });
+    return rejected(
+      context.publication.id,
+      context.publication.channelId,
+      errorCode,
+    );
   }
 
   let operationalLock: LockHandle | null = null;
@@ -303,10 +356,13 @@ export async function dispatchAuthorizedWhatsAppPublication(
     if (!publicationLock.acquired) {
       throw new Error("WHATSAPP_WEB_PUBLICATION_DISPATCH_IN_PROGRESS");
     }
-    const renewal = setInterval(() => {
-      void operationalLock?.extend(dependencies.config.profileLockTtlMs);
-      void publicationLock?.extend(dependencies.config.profileLockTtlMs);
-    }, Math.max(1_000, Math.floor(dependencies.config.profileLockTtlMs / 3)));
+    const renewal = setInterval(
+      () => {
+        void operationalLock?.extend(dependencies.config.profileLockTtlMs);
+        void publicationLock?.extend(dependencies.config.profileLockTtlMs);
+      },
+      Math.max(1_000, Math.floor(dependencies.config.profileLockTtlMs / 3)),
+    );
     renewal.unref?.();
     try {
       attemptId = await dependencies.createAttempt(context, claimId);
@@ -492,13 +548,17 @@ export function createAuthorizedDispatchDependencies(): AuthorizedDispatchDepend
     async loadContext(publicationId) {
       const publication = await prisma.publication.findUnique({
         where: { id: publicationId },
-        include: { channel: true },
+        include: {
+          channel: true,
+          offer: { include: { affiliateLinks: true } },
+        },
       });
       if (!publication) throw new Error("PUBLICATION_NOT_FOUND");
       const payload = record(publication.messagePayload);
       const message = text(payload.message);
       const affiliateUrl = publication.affiliateUrlSnapshot || "";
-      if (!message || !affiliateUrl) throw new Error("PUBLICATION_SNAPSHOT_INVALID");
+      if (!message || !affiliateUrl)
+        throw new Error("PUBLICATION_SNAPSHOT_INVALID");
       const input: WhatsAppWebPublicationInput = {
         publicationId: publication.id,
         offerId: publication.offerId,
@@ -519,6 +579,37 @@ export function createAuthorizedDispatchDependencies(): AuthorizedDispatchDepend
           publication,
           channel: publication.channel,
         }),
+        ...(publication.offer.marketplace === "SHOPEE"
+          ? {
+              shopeeDispatchRecord: {
+                publicationId: publication.id,
+                offerId: publication.offerId,
+                channelId: publication.channelId,
+                marketplace: "SHOPEE",
+                publicationStatus: publication.status,
+                channelType: publication.channel.type,
+                channelEnabled: publication.channel.enabled,
+                allowedMarketplaces: Array.isArray(
+                  publication.channel.allowedMarketplaces,
+                )
+                  ? publication.channel.allowedMarketplaces.filter(
+                      (value): value is string => typeof value === "string",
+                    )
+                  : [],
+                trackingUrl: publication.trackingUrlSnapshot,
+                affiliateLinks: publication.offer.affiliateLinks.map(
+                  (link) => ({
+                    active: link.active,
+                    destination: link.destination,
+                  }),
+                ),
+                deliveryUncertain:
+                  record(publication.metadata).deliveryUncertain === true ||
+                  record(publication.metadata).deliveryState ===
+                    "DELIVERY_UNCERTAIN",
+              },
+            }
+          : {}),
       };
     },
     acquireOperationalLock: (channelId, ttlMs) =>

@@ -2,6 +2,12 @@ import { prisma, Prisma, type PrismaClient } from "@affiliate/database";
 import { buildPromoMessage, getZonedDayRange } from "@affiliate/publication";
 import { resolveShopeeAffiliateConfiguration } from "./config";
 import { nextShopeePublicationAt } from "./distribution";
+import { loadShopeeFreshnessSummary } from "./freshness";
+import {
+  deriveShopeeProductionMode,
+  inspectShopeeProductionLock,
+  SHOPEE_PRODUCTION_RUN_NAME,
+} from "./production";
 import { validateShopeeGeneratedShortLink } from "./validation";
 
 export type ShopeePublicationSkipCode =
@@ -517,52 +523,153 @@ export async function loadShopeeProductionStatus(
   const now = input.now ?? new Date();
   const timezone = input.timezone ?? "America/Fortaleza";
   const range = getZonedDayRange(now, timezone);
-  const cutoff = new Date(
-    now.getTime() - configuration.publicationMaxOfferAgeHours * 3_600_000,
-  );
-  const [candidateCount, plannedCount, publishedToday, stale, last] =
-    await Promise.all([
-      database.offer.count({
-        where: { marketplace: "SHOPEE", status: "READY_TO_PUBLISH" },
-      }),
-      database.publication.count({
-        where: {
-          marketplaceSnapshot: "SHOPEE",
-          status: { in: ["SCHEDULED", "AWAITING_MANUAL_PUBLICATION"] },
-        },
-      }),
-      database.publication.count({
-        where: {
-          marketplaceSnapshot: "SHOPEE",
-          status: { in: ["PUBLISHED", "EXPORTED"] },
-          publishedAt: { gte: range.start, lt: range.end },
-        },
-      }),
-      database.offer.count({
-        where: {
-          marketplace: "SHOPEE",
-          status: { in: ["READY_TO_PUBLISH", "SCHEDULED"] },
-          collectedAt: { lt: cutoff },
-          OR: [{ verifiedAt: null }, { verifiedAt: { lt: cutoff } }],
-        },
-      }),
+  const [
+    candidateCount,
+    plannedCount,
+    publishedToday,
+    freshness,
+    last,
+    channels,
+    productionPublications,
+    lastProductionRun,
+    lock,
+  ] = await Promise.all([
+    database.offer.count({
+      where: { marketplace: "SHOPEE", status: "READY_TO_PUBLISH" },
+    }),
+    database.publication.count({
+      where: {
+        marketplaceSnapshot: "SHOPEE",
+        status: { in: ["SCHEDULED", "AWAITING_MANUAL_PUBLICATION"] },
+      },
+    }),
+    database.publication.count({
+      where: {
+        marketplaceSnapshot: "SHOPEE",
+        status: { in: ["PUBLISHED", "EXPORTED"] },
+        publishedAt: { gte: range.start, lt: range.end },
+      },
+    }),
+    loadShopeeFreshnessSummary({ environment, now, database }),
       database.publication.findFirst({
-        where: { marketplaceSnapshot: "SHOPEE" },
-        orderBy: { scheduledAt: "desc" },
-        select: {
-          status: true,
-          scheduledAt: true,
-          publishedAt: true,
-          errorMessage: true,
+        where: {
+          marketplaceSnapshot: "SHOPEE",
+          status: {
+            in: [
+              "SCHEDULED",
+              "PUBLISHED",
+              "EXPORTED",
+              "FAILED",
+              "PUBLICATION_FAILED",
+            ],
+          },
         },
-      }),
-    ]);
+      orderBy: { scheduledAt: "desc" },
+      select: {
+        status: true,
+        scheduledAt: true,
+        publishedAt: true,
+        errorMessage: true,
+      },
+    }),
+    database.channel.findMany({
+      where: { type: { in: ["TELEGRAM", "WHATSAPP_GROUPS", "MANUAL_EXPORT"] } },
+      select: {
+        id: true,
+        type: true,
+        enabled: true,
+        allowedMarketplaces: true,
+      },
+    }),
+    database.publication.findMany({
+      where: { marketplaceSnapshot: "SHOPEE" },
+      select: {
+        status: true,
+        publishedAt: true,
+        metadata: true,
+        channel: { select: { type: true } },
+      },
+    }),
+    database.automationRun.findFirst({
+      where: { name: SHOPEE_PRODUCTION_RUN_NAME },
+      orderBy: { startedAt: "desc" },
+      select: {
+        status: true,
+        startedAt: true,
+        finishedAt: true,
+        errorMessage: true,
+      },
+    }),
+    inspectShopeeProductionLock(environment),
+  ]);
+  const allowed = (value: unknown) =>
+    Array.isArray(value) && value.includes("SHOPEE");
+  const configured = channels.filter(
+    (channel) => channel.enabled && allowed(channel.allowedMarketplaces),
+  );
+  const configuredShopeeChannels = {
+    total: configured.length,
+    telegram: configured.filter((channel) => channel.type === "TELEGRAM")
+      .length,
+    whatsapp: configured.filter((channel) => channel.type === "WHATSAPP_GROUPS")
+      .length,
+    manual: configured.filter((channel) => channel.type === "MANUAL_EXPORT")
+      .length,
+  };
+  const channelMetrics = (type: "TELEGRAM" | "WHATSAPP_GROUPS") => {
+    const matching = productionPublications.filter(
+      (publication) => publication.channel.type === type,
+    );
+    const uncertain = matching.filter((publication) => {
+      const metadata =
+        publication.metadata &&
+        typeof publication.metadata === "object" &&
+        !Array.isArray(publication.metadata)
+          ? (publication.metadata as Record<string, unknown>)
+          : {};
+      return (
+        metadata.deliveryUncertain === true ||
+        metadata.deliveryState === "DELIVERY_UNCERTAIN"
+      );
+    }).length;
+    return {
+      pending: matching.filter((publication) =>
+        ["SCHEDULED", "AWAITING_MANUAL_PUBLICATION"].includes(
+          publication.status,
+        ),
+      ).length,
+      sentToday: matching.filter(
+        (publication) =>
+          publication.status === "PUBLISHED" &&
+          publication.publishedAt &&
+          publication.publishedAt >= range.start &&
+          publication.publishedAt < range.end,
+      ).length,
+      failed: matching.filter((publication) =>
+        ["FAILED", "PUBLICATION_FAILED"].includes(publication.status),
+      ).length,
+      deliveryUncertain: uncertain,
+    };
+  };
   const lastPublicationAt = last?.publishedAt ?? last?.scheduledAt ?? null;
   return {
+    mode: deriveShopeeProductionMode({
+      configuration,
+      configuredChannelCount:
+        (configuration.publicationTelegramEnabled
+          ? configuredShopeeChannels.telegram
+          : 0) +
+        (configuration.publicationWhatsAppEnabled
+          ? configuredShopeeChannels.whatsapp
+          : 0),
+    }),
     enabled: configuration.publicationEnabled,
+    publicationEnabled: configuration.publicationEnabled,
     autoDistributionEnabled: configuration.autoDistributionEnabled,
+    externalSendsEnabled: configuration.externalSendsEnabled,
     telegramEnabled: configuration.publicationTelegramEnabled,
     whatsappEnabled: configuration.publicationWhatsAppEnabled,
+    configuredShopeeChannels,
     candidateCount,
     plannedCount,
     publishedToday,
@@ -575,15 +682,17 @@ export async function loadShopeeProductionStatus(
     lastPublicationAt: lastPublicationAt?.toISOString() ?? null,
     lastPublicationStatus: last?.status ?? null,
     lastErrorCode:
-      last?.errorMessage && /^SHOPEE_[A-Z0-9_]+$/.test(last.errorMessage)
+      last &&
+      ["FAILED", "PUBLICATION_FAILED"].includes(last.status) &&
+      last.errorMessage &&
+      /^SHOPEE_[A-Z0-9_]+$/.test(last.errorMessage)
         ? last.errorMessage
-        : last?.errorMessage
+        : last &&
+            ["FAILED", "PUBLICATION_FAILED"].includes(last.status) &&
+            last.errorMessage
           ? "SHOPEE_PUBLICATION_FAILED"
           : null,
-    freshness: {
-      fresh: Math.max(0, candidateCount + plannedCount - stale),
-      stale,
-    },
+    freshness: { fresh: freshness.fresh, stale: freshness.stale },
     ranking: {
       candidatePool: candidateCount,
     },
@@ -591,6 +700,24 @@ export async function loadShopeeProductionStatus(
       enabled: configuration.enrichmentEnabled,
       maxItems: configuration.enrichmentMaxItems,
     },
+    lastProductionRun: lastProductionRun
+      ? {
+          status: lastProductionRun.status,
+          startedAt: lastProductionRun.startedAt.toISOString(),
+          finishedAt: lastProductionRun.finishedAt?.toISOString() ?? null,
+          errorCode:
+            lastProductionRun.errorMessage &&
+            /^SHOPEE_[A-Z0-9_]+$/.test(lastProductionRun.errorMessage)
+              ? lastProductionRun.errorMessage
+              : null,
+        }
+      : null,
+    telegram: channelMetrics("TELEGRAM"),
+    whatsapp: {
+      ...channelMetrics("WHATSAPP_GROUPS"),
+      queued: channelMetrics("WHATSAPP_GROUPS").pending,
+    },
+    lock,
     externalRequests: 0 as const,
     stateModified: false as const,
   };
@@ -627,6 +754,30 @@ export function auditShopeeProductionStatus(
       code: "SHOPEE_DISTRIBUTION_WITHOUT_CHANNEL",
       severity: "WARNING",
       action: "ENABLE_ONE_SHOPEE_CHANNEL_OR_DISABLE_DISTRIBUTION",
+    });
+  }
+  if (status.externalSendsEnabled && status.mode !== "LIVE") {
+    findings.push({
+      code: "SHOPEE_EXTERNAL_SENDS_NOT_READY",
+      severity: "CRITICAL",
+      action: "DISABLE_EXTERNAL_SENDS_OR_COMPLETE_CHANNEL_GATES",
+    });
+  }
+  if (
+    status.telegram.deliveryUncertain > 0 ||
+    status.whatsapp.deliveryUncertain > 0
+  ) {
+    findings.push({
+      code: "SHOPEE_DELIVERY_UNCERTAIN_REVIEW_REQUIRED",
+      severity: "CRITICAL",
+      action: "RECONCILE_EXTERNAL_DELIVERY_BEFORE_RETRY",
+    });
+  }
+  if (status.lastProductionRun?.status === "RUNNING" && !status.lock.held) {
+    findings.push({
+      code: "SHOPEE_PRODUCTION_RUN_ABANDONED",
+      severity: "WARNING",
+      action: "RUN_CONFIRMED_PRODUCTION_TICK_TO_RECOVER",
     });
   }
   return findings;

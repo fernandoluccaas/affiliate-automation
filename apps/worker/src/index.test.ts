@@ -1227,10 +1227,12 @@ describe("createPublicationIdempotently", () => {
       publication: process.env.SHOPEE_PUBLICATION_ENABLED,
       distribution: process.env.SHOPEE_AUTO_DISTRIBUTION_ENABLED,
       telegram: process.env.SHOPEE_PUBLICATION_TELEGRAM_ENABLED,
+      external: process.env.SHOPEE_EXTERNAL_SENDS_ENABLED,
     };
     process.env.SHOPEE_PUBLICATION_ENABLED = "true";
     process.env.SHOPEE_AUTO_DISTRIBUTION_ENABLED = "true";
     process.env.SHOPEE_PUBLICATION_TELEGRAM_ENABLED = "true";
+    process.env.SHOPEE_EXTERNAL_SENDS_ENABLED = "true";
     const attemptCreate = vi.fn();
     Object.assign(actual.prisma, {
       publication: {
@@ -1244,15 +1246,24 @@ describe("createPublicationIdempotently", () => {
               trackingUrl: "https://affiliate.test/go/shopee",
               message: "Mensagem que não deve ser enviada",
             },
+            trackingUrlSnapshot: "https://affiliate.test/go/shopee",
+            metadata: null,
             offer: {
               id: "shopee-offer-stale",
               marketplace: "SHOPEE",
               imageUrl: null,
-              affiliateLinks: [],
+              affiliateLinks: [
+                {
+                  active: true,
+                  destination: "https://s.shopee.com.br/AbCdEf",
+                },
+              ],
             },
             channel: {
               id: "telegram-shopee",
               type: "TELEGRAM",
+              enabled: true,
+              allowedMarketplaces: ["SHOPEE"],
               configuration: null,
             },
             attempts: [],
@@ -1288,6 +1299,110 @@ describe("createPublicationIdempotently", () => {
     if (previous.telegram === undefined)
       delete process.env.SHOPEE_PUBLICATION_TELEGRAM_ENABLED;
     else process.env.SHOPEE_PUBLICATION_TELEGRAM_ENABLED = previous.telegram;
+    if (previous.external === undefined)
+      delete process.env.SHOPEE_EXTERNAL_SENDS_ENABLED;
+    else process.env.SHOPEE_EXTERNAL_SENDS_ENABLED = previous.external;
+  });
+
+  it("blocks retry after an uncertain Shopee Telegram transport", async () => {
+    const actual = await import("@affiliate/database");
+    const previous = {
+      publication: process.env.SHOPEE_PUBLICATION_ENABLED,
+      distribution: process.env.SHOPEE_AUTO_DISTRIBUTION_ENABLED,
+      telegram: process.env.SHOPEE_PUBLICATION_TELEGRAM_ENABLED,
+      external: process.env.SHOPEE_EXTERNAL_SENDS_ENABLED,
+    };
+    process.env.SHOPEE_PUBLICATION_ENABLED = "true";
+    process.env.SHOPEE_AUTO_DISTRIBUTION_ENABLED = "true";
+    process.env.SHOPEE_PUBLICATION_TELEGRAM_ENABLED = "true";
+    process.env.SHOPEE_EXTERNAL_SENDS_ENABLED = "true";
+    const publicationUpdate = vi.fn().mockResolvedValue({});
+    const attemptUpdate = vi.fn().mockResolvedValue({});
+    Object.assign(actual.prisma, {
+      publication: {
+        findMany: vi.fn().mockResolvedValue([
+          {
+            id: "shopee-publication-uncertain",
+            offerId: "shopee-offer-uncertain",
+            channelId: "telegram-shopee",
+            status: "SCHEDULED",
+            scheduledAt: new Date("2026-08-24T12:00:00.000Z"),
+            messagePayload: {
+              trackingUrl: "https://affiliate.test/go/shopee",
+              message: "Mensagem segura",
+            },
+            trackingUrlSnapshot: "https://affiliate.test/go/shopee",
+            metadata: null,
+            offer: {
+              id: "shopee-offer-uncertain",
+              marketplace: "SHOPEE",
+              imageUrl: null,
+              affiliateLinks: [
+                {
+                  active: true,
+                  destination: "https://s.shopee.com.br/AbCdEf",
+                },
+              ],
+            },
+            channel: {
+              id: "telegram-shopee",
+              type: "TELEGRAM",
+              enabled: true,
+              allowedMarketplaces: ["SHOPEE"],
+              configuration: null,
+            },
+            attempts: [],
+          },
+        ]),
+        update: publicationUpdate,
+      },
+      publicationAttempt: {
+        create: vi.fn().mockResolvedValue({ id: "attempt-pending" }),
+        update: attemptUpdate,
+      },
+    });
+    try {
+      const metrics = await publishScheduledOffers(
+        new Date("2026-08-24T12:01:00.000Z"),
+        {
+          ensureShopeeFreshness: vi.fn().mockResolvedValue({
+            allowed: true,
+            reason: "SHOPEE_OFFER_FRESH",
+          }),
+          publisherFactory: () => ({
+            publish: vi.fn().mockRejectedValue(new Error("socket reset")),
+            validateCredentials: vi.fn(),
+            healthCheck: vi.fn(),
+            getPublicationStatus: vi.fn(),
+            retry: vi.fn(),
+          }),
+        },
+      );
+      expect(metrics.failed).toBe(1);
+      expect(attemptUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: "attempt-pending" } }),
+      );
+      expect(publicationUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            status: "PUBLICATION_FAILED",
+            errorMessage: "DELIVERY_UNCERTAIN",
+            metadata: expect.objectContaining({ automaticRetryBlocked: true }),
+          }),
+        }),
+      );
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        const environmentKey = {
+          publication: "SHOPEE_PUBLICATION_ENABLED",
+          distribution: "SHOPEE_AUTO_DISTRIBUTION_ENABLED",
+          telegram: "SHOPEE_PUBLICATION_TELEGRAM_ENABLED",
+          external: "SHOPEE_EXTERNAL_SENDS_ENABLED",
+        }[key]!;
+        if (value === undefined) delete process.env[environmentKey];
+        else process.env[environmentKey] = value;
+      }
+    }
   });
 
   it("persists Telegram Retry-After and blocks immediate retry", async () => {
@@ -1802,6 +1917,7 @@ describe("runWorkerCycle", () => {
     expect(schedule).toHaveBeenCalledWith(now, {
       planningRunId: "worker-run-balanced",
       preferredOfferIds: ["offer-celulares", "offer-casa"],
+      shopeeScope: "EXCLUDE",
     });
   });
 
@@ -1857,9 +1973,10 @@ describe("runWorkerCycle", () => {
     expect(refresh).toHaveBeenCalledWith(now);
     expect(schedule).toHaveBeenCalledWith(now, {
       planningRunId: "worker-run-1",
+      shopeeScope: "EXCLUDE",
     });
     expect(retry).toHaveBeenCalledWith(now);
-    expect(publish).toHaveBeenCalledWith(now);
+    expect(publish).toHaveBeenCalledWith(now, { shopeeScope: "EXCLUDE" });
     expect(result).toMatchObject({
       expired: 1,
       scheduled: 1,
@@ -2089,5 +2206,73 @@ describe("runWorkerCycle", () => {
         systemAlertCreate.mock.calls,
       ]),
     ).not.toContain(secret);
+  });
+
+  it("keeps the Shopee production stage disabled by default and isolates it when enabled", async () => {
+    const actual = await import("@affiliate/database");
+    Object.assign(actual.prisma, {
+      automationRun: {
+        create: vi.fn().mockResolvedValue({ id: "worker-run-production" }),
+        update: vi.fn().mockResolvedValue({}),
+      },
+      systemAlert: { create: vi.fn().mockResolvedValue({}) },
+    });
+    const production = vi.fn().mockRejectedValue(new Error("safe failure"));
+    const schedule = vi.fn().mockResolvedValue(workerJobMetrics());
+    const publish = vi.fn().mockResolvedValue(workerJobMetrics());
+    const dependencies = {
+      expireInvalidOffers: vi.fn().mockResolvedValue(workerJobMetrics()),
+      collectMercadoLivreCandidates: vi.fn().mockResolvedValue({
+        ok: true,
+        status: "SUCCEEDED",
+        metrics: createMercadoLivreDiscoveryMetrics(),
+      }),
+      processAffiliateLinkJobs: vi.fn().mockResolvedValue({
+        selected: 0,
+        processed: 0,
+        failed: 0,
+      }),
+      refreshMercadoLivreOffers: vi.fn().mockResolvedValue({
+        ...workerJobMetrics(),
+        selected: 0,
+        refreshed: 0,
+      }),
+      runShopeeProductionWorkerStage: production,
+      scheduleReadyOffers: schedule,
+      retryFailedPublications: vi.fn().mockResolvedValue(workerJobMetrics()),
+      publishScheduledOffers: publish,
+    } as never;
+    const previousPublication = process.env.SHOPEE_PUBLICATION_ENABLED;
+    const previousDistribution = process.env.SHOPEE_AUTO_DISTRIBUTION_ENABLED;
+    delete process.env.SHOPEE_PUBLICATION_ENABLED;
+    delete process.env.SHOPEE_AUTO_DISTRIBUTION_ENABLED;
+    try {
+      const disabled = await runWorkerCycle(
+        new Date("2026-08-24T12:00:00.000Z"),
+        dependencies,
+      );
+      expect(production).not.toHaveBeenCalled();
+      expect(disabled.stages["shopee-production"]).toBeUndefined();
+
+      process.env.SHOPEE_PUBLICATION_ENABLED = "true";
+      process.env.SHOPEE_AUTO_DISTRIBUTION_ENABLED = "true";
+      const enabled = await runWorkerCycle(
+        new Date("2026-08-24T12:01:00.000Z"),
+        dependencies,
+      );
+      expect(production).toHaveBeenCalledOnce();
+      expect(enabled.stages["shopee-production"]).toMatchObject({
+        status: "FAILED",
+      });
+      expect(schedule).toHaveBeenCalled();
+      expect(publish).toHaveBeenCalled();
+    } finally {
+      if (previousPublication === undefined)
+        delete process.env.SHOPEE_PUBLICATION_ENABLED;
+      else process.env.SHOPEE_PUBLICATION_ENABLED = previousPublication;
+      if (previousDistribution === undefined)
+        delete process.env.SHOPEE_AUTO_DISTRIBUTION_ENABLED;
+      else process.env.SHOPEE_AUTO_DISTRIBUTION_ENABLED = previousDistribution;
+    }
   });
 });

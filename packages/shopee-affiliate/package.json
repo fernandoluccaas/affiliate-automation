@@ -17,6 +17,7 @@
     "ranking": "node --env-file=../../.env --import tsx src/ranking-cli.ts",
     "enrichment": "node --env-file=../../.env --import tsx src/enrichment-cli.ts",
     "freshness": "node --env-file=../../.env --import tsx src/freshness-cli.ts",
+    "channel": "node --env-file=../../.env --import tsx src/channel-cli.ts",
     "build": "tsc -p tsconfig.json",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",

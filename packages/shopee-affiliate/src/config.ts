@@ -355,11 +355,13 @@ export function resolveShopeeAffiliateConfiguration(
     remoteDiscoveryReferenceIds,
     remoteDiscoveryFeedIds,
     publicationEnabled:
-      configurationValid &&
-      environment.SHOPEE_PUBLICATION_ENABLED === "true",
+      configurationValid && environment.SHOPEE_PUBLICATION_ENABLED === "true",
     autoDistributionEnabled:
       configurationValid &&
       environment.SHOPEE_AUTO_DISTRIBUTION_ENABLED === "true",
+    externalSendsEnabled:
+      configurationValid &&
+      environment.SHOPEE_EXTERNAL_SENDS_ENABLED === "true",
     publicationMaxPerCycle,
     publicationMaxPerDay,
     publicationMinIntervalMinutes,

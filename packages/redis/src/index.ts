@@ -34,6 +34,7 @@ export type RedisKeyFingerprint = {
   mode: RedisMode;
   exists: boolean;
   fingerprint: string | null;
+  ttlMs: number;
 };
 
 export type LockHandle = {
@@ -193,18 +194,29 @@ export async function getRedisKeyFingerprint(
 ): Promise<RedisKeyFingerprint> {
   const config = getRedisConfig(env);
   if (config.mode === "unavailable") {
-    return { mode: "unavailable", exists: false, fingerprint: null };
+    return { mode: "unavailable", exists: false, fingerprint: null, ttlMs: 0 };
   }
   let value: string | null = null;
+  let ttlMs = 0;
   if (config.mode === "upstash") {
     const redis = new Redis({ url: config.url, token: config.token });
-    value = await redis.get<string>(key);
+    [value, ttlMs] = await Promise.all([
+      redis.get<string>(key),
+      redis.pttl(key).then((value) => Math.max(0, Number(value))),
+    ]);
   } else {
-    const reply = await redisUrlCommand(config.url, ["GET", key]);
+    const [reply, ttlReply] = await Promise.all([
+      redisUrlCommand(config.url, ["GET", key]),
+      redisUrlCommand(config.url, ["PTTL", key]),
+    ]);
     if (!reply.startsWith("$-1")) {
       const separator = reply.indexOf("\r\n");
-      value = separator >= 0 ? reply.slice(separator + 2).replace(/\r\n$/, "") : null;
+      value =
+        separator >= 0 ? reply.slice(separator + 2).replace(/\r\n$/, "") : null;
     }
+    ttlMs = ttlReply.startsWith(":")
+      ? Math.max(0, Number(ttlReply.slice(1).trim()))
+      : 0;
   }
   return {
     mode: config.mode,
@@ -212,6 +224,7 @@ export async function getRedisKeyFingerprint(
     fingerprint: value
       ? createHash("sha256").update(value).digest("hex")
       : null,
+    ttlMs: value ? ttlMs : 0,
   };
 }
 
@@ -245,7 +258,8 @@ export async function acquireLock(
   if (config.mode === "upstash") {
     try {
       const redis: AtomicRedisClient =
-        options.upstashClient ?? new Redis({ url: config.url, token: config.token });
+        options.upstashClient ??
+        new Redis({ url: config.url, token: config.token });
       const result = await redis.set(key, token, { nx: true, px: ttlMs });
 
       return {
@@ -361,7 +375,9 @@ export async function consumeFixedWindow(
   try {
     let count: number;
     if (config.mode === "upstash") {
-      const redis = options.upstashClient ?? new Redis({ url: config.url, token: config.token });
+      const redis =
+        options.upstashClient ??
+        new Redis({ url: config.url, token: config.token });
       count = Number(
         await redis.eval(FIXED_WINDOW_INCREMENT_SCRIPT, [key], [ttlMs]),
       );
@@ -373,9 +389,12 @@ export async function consumeFixedWindow(
         key,
         ttlMs,
       ]);
-      count = reply.startsWith(":") ? Number(reply.slice(1).trim()) : Number.NaN;
+      count = reply.startsWith(":")
+        ? Number(reply.slice(1).trim())
+        : Number.NaN;
     }
-    if (!Number.isSafeInteger(count) || count <= 0) throw new Error("INVALID_REDIS_REPLY");
+    if (!Number.isSafeInteger(count) || count <= 0)
+      throw new Error("INVALID_REDIS_REPLY");
     return {
       available: true,
       allowed: count <= limit,

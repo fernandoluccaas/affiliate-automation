@@ -127,9 +127,7 @@ function published(): WhatsAppWebPublishResult {
   };
 }
 
-function dependencies(
-  overrides: Partial<AuthorizedDispatchDependencies> = {},
-) {
+function dependencies(overrides: Partial<AuthorizedDispatchDependencies> = {}) {
   const calls: string[] = [];
   const events: Array<Record<string, unknown>> = [];
   const deps: AuthorizedDispatchDependencies = {
@@ -151,27 +149,30 @@ function dependencies(
       calls.push("publication-lock");
       return lock();
     }),
-    createPublisher: vi.fn((_profileLock, recordState) => ({
-      publish: vi.fn(async () => {
-        calls.push("publisher");
-        await recordState({
-          publicationId: "publication-one",
-          stage: "SEND_CLICK_STARTED",
-          sendWasClicked: false,
-          sendClickStartedAt: "2026-08-03T12:00:00.000Z",
-          deliveryUncertain: true,
-        });
-        await recordState({
-          publicationId: "publication-one",
-          stage: "SEND_CLICK_COMPLETED",
-          sendWasClicked: true,
-          sendClickStartedAt: "2026-08-03T12:00:00.000Z",
-          sendClickedAt: "2026-08-03T12:00:01.000Z",
-          deliveryUncertain: true,
-        });
-        return published();
-      }),
-    }) as never),
+    createPublisher: vi.fn(
+      (_profileLock, recordState) =>
+        ({
+          publish: vi.fn(async () => {
+            calls.push("publisher");
+            await recordState({
+              publicationId: "publication-one",
+              stage: "SEND_CLICK_STARTED",
+              sendWasClicked: false,
+              sendClickStartedAt: "2026-08-03T12:00:00.000Z",
+              deliveryUncertain: true,
+            });
+            await recordState({
+              publicationId: "publication-one",
+              stage: "SEND_CLICK_COMPLETED",
+              sendWasClicked: true,
+              sendClickStartedAt: "2026-08-03T12:00:00.000Z",
+              sendClickedAt: "2026-08-03T12:00:01.000Z",
+              deliveryUncertain: true,
+            });
+            return published();
+          }),
+        }) as never,
+    ),
     createAttempt: vi.fn(async () => "attempt-one"),
     finishAttempt: vi.fn(async () => undefined),
     recordSendState: vi.fn(async () => undefined),
@@ -183,6 +184,62 @@ function dependencies(
 }
 
 describe("controlled WhatsApp authorized dispatch", () => {
+  it("applies the Shopee global kill switch before any browser or lock", async () => {
+    const previous = {
+      publication: process.env.SHOPEE_PUBLICATION_ENABLED,
+      distribution: process.env.SHOPEE_AUTO_DISTRIBUTION_ENABLED,
+      whatsapp: process.env.SHOPEE_PUBLICATION_WHATSAPP_ENABLED,
+      external: process.env.SHOPEE_EXTERNAL_SENDS_ENABLED,
+    };
+    process.env.SHOPEE_PUBLICATION_ENABLED = "true";
+    process.env.SHOPEE_AUTO_DISTRIBUTION_ENABLED = "true";
+    process.env.SHOPEE_PUBLICATION_WHATSAPP_ENABLED = "true";
+    process.env.SHOPEE_EXTERNAL_SENDS_ENABLED = "false";
+    const shopeeContext: AuthorizedDispatchContext = {
+      ...context(),
+      shopeeDispatchRecord: {
+        publicationId: "publication-one",
+        offerId: "offer-one",
+        channelId: "channel-web",
+        marketplace: "SHOPEE",
+        publicationStatus: "SCHEDULED",
+        channelType: "WHATSAPP_GROUPS",
+        channelEnabled: true,
+        allowedMarketplaces: ["SHOPEE"],
+        trackingUrl: "https://affiliate.test/go/shopee-fixture",
+        affiliateLinks: [
+          { active: true, destination: "https://s.shopee.com.br/AbCdEf" },
+        ],
+        deliveryUncertain: false,
+      },
+    };
+    const fixture = dependencies({
+      loadContext: vi.fn(async () => shopeeContext),
+    });
+    const result = await dispatchAuthorizedWhatsAppPublication(
+      { publicationId: "publication-one", confirmSend: true },
+      fixture.deps,
+    );
+    expect(result).toMatchObject({
+      status: "FAILED",
+      errorCode: "SHOPEE_EXTERNAL_SENDS_DISABLED",
+      browserOpened: false,
+      sendCalled: false,
+    });
+    expect(fixture.deps.acquireOperationalLock).not.toHaveBeenCalled();
+    expect(fixture.deps.createPublisher).not.toHaveBeenCalled();
+    for (const [key, value] of Object.entries(previous)) {
+      const environmentKey = {
+        publication: "SHOPEE_PUBLICATION_ENABLED",
+        distribution: "SHOPEE_AUTO_DISTRIBUTION_ENABLED",
+        whatsapp: "SHOPEE_PUBLICATION_WHATSAPP_ENABLED",
+        external: "SHOPEE_EXTERNAL_SENDS_ENABLED",
+      }[key]!;
+      if (value === undefined) delete process.env[environmentKey];
+      else process.env[environmentKey] = value;
+    }
+  });
+
   it("rejects dry-run before lock, claim, browser and send", async () => {
     const fixture = dependencies({ config: { ...config, dryRun: true } });
     const result = await dispatchAuthorizedWhatsAppPublication(
@@ -214,12 +271,36 @@ describe("controlled WhatsApp authorized dispatch", () => {
   });
 
   it.each([
-    ["paused channel", { input: { channel: { channelPaused: true } } }, "WHATSAPP_WEB_CHANNEL_PAUSED"],
-    ["revoked authorization", { metadata: { sendAuthorizationStatus: "REVOKED" } }, "WHATSAPP_WEB_SEND_AUTHORIZATION_REVOKED"],
-    ["consumed authorization", { metadata: { sendAuthorizationStatus: "CONSUMED" } }, "WHATSAPP_WEB_SEND_AUTHORIZATION_ALREADY_CONSUMED"],
-    ["expired authorization", { metadata: { sendAuthorizationExpiresAt: "2020-01-01T00:00:00.000Z" } }, "WHATSAPP_WEB_SEND_AUTHORIZATION_EXPIRED"],
-    ["fingerprint mismatch", { metadata: { sendAuthorizationFingerprint: "b".repeat(64) } }, "WHATSAPP_WEB_SEND_AUTHORIZATION_FINGERPRINT_MISMATCH"],
-    ["preflight mismatch", { metadata: { preflightFingerprint: "b".repeat(64) } }, "WHATSAPP_WEB_PREFLIGHT_REQUIRED"],
+    [
+      "paused channel",
+      { input: { channel: { channelPaused: true } } },
+      "WHATSAPP_WEB_CHANNEL_PAUSED",
+    ],
+    [
+      "revoked authorization",
+      { metadata: { sendAuthorizationStatus: "REVOKED" } },
+      "WHATSAPP_WEB_SEND_AUTHORIZATION_REVOKED",
+    ],
+    [
+      "consumed authorization",
+      { metadata: { sendAuthorizationStatus: "CONSUMED" } },
+      "WHATSAPP_WEB_SEND_AUTHORIZATION_ALREADY_CONSUMED",
+    ],
+    [
+      "expired authorization",
+      { metadata: { sendAuthorizationExpiresAt: "2020-01-01T00:00:00.000Z" } },
+      "WHATSAPP_WEB_SEND_AUTHORIZATION_EXPIRED",
+    ],
+    [
+      "fingerprint mismatch",
+      { metadata: { sendAuthorizationFingerprint: "b".repeat(64) } },
+      "WHATSAPP_WEB_SEND_AUTHORIZATION_FINGERPRINT_MISMATCH",
+    ],
+    [
+      "preflight mismatch",
+      { metadata: { preflightFingerprint: "b".repeat(64) } },
+      "WHATSAPP_WEB_PREFLIGHT_REQUIRED",
+    ],
   ])("rejects %s without browser", async (_label, patch, expected) => {
     const base = context();
     const metadataPatch = "metadata" in patch ? patch.metadata : undefined;
@@ -272,18 +353,21 @@ describe("controlled WhatsApp authorized dispatch", () => {
     const publisherWait = new Promise<void>((resolve) => {
       releasePublisher = resolve;
     });
-    fixture.deps.createPublisher = vi.fn(() => ({
-      publish: vi.fn(async () => {
-        await publisherWait;
-        return {
-          ...published(),
-          status: "FAILED",
-          errorCode: "WHATSAPP_WEB_SELECTOR_MISMATCH",
-          sendWasClicked: false,
-          deliveryUncertain: false,
-        };
-      }),
-    }) as never);
+    fixture.deps.createPublisher = vi.fn(
+      () =>
+        ({
+          publish: vi.fn(async () => {
+            await publisherWait;
+            return {
+              ...published(),
+              status: "FAILED",
+              errorCode: "WHATSAPP_WEB_SELECTOR_MISMATCH",
+              sendWasClicked: false,
+              deliveryUncertain: false,
+            };
+          }),
+        }) as never,
+    );
 
     const first = dispatchAuthorizedWhatsAppPublication(
       { publicationId: "publication-one", confirmSend: true },
@@ -304,24 +388,27 @@ describe("controlled WhatsApp authorized dispatch", () => {
 
   it("classifies an inconclusive confirmation as DELIVERY_UNCERTAIN", async () => {
     const fixture = dependencies({
-      createPublisher: vi.fn((_lock, recordState) => ({
-        publish: vi.fn(async () => {
-          await recordState({
-            publicationId: "publication-one",
-            stage: "SEND_CLICK_STARTED",
-            sendWasClicked: false,
-            sendClickStartedAt: "2026-08-03T12:00:00.000Z",
-            deliveryUncertain: true,
-          });
-          return {
-            ...published(),
-            status: "DELIVERY_UNCERTAIN",
-            errorCode: "WHATSAPP_WEB_DELIVERY_UNCERTAIN",
-            sendWasClicked: true,
-            deliveryUncertain: true,
-          };
-        }),
-      }) as never),
+      createPublisher: vi.fn(
+        (_lock, recordState) =>
+          ({
+            publish: vi.fn(async () => {
+              await recordState({
+                publicationId: "publication-one",
+                stage: "SEND_CLICK_STARTED",
+                sendWasClicked: false,
+                sendClickStartedAt: "2026-08-03T12:00:00.000Z",
+                deliveryUncertain: true,
+              });
+              return {
+                ...published(),
+                status: "DELIVERY_UNCERTAIN",
+                errorCode: "WHATSAPP_WEB_DELIVERY_UNCERTAIN",
+                sendWasClicked: true,
+                deliveryUncertain: true,
+              };
+            }),
+          }) as never,
+      ),
     });
     const result = await dispatchAuthorizedWhatsAppPublication(
       { publicationId: "publication-one", confirmSend: true },
@@ -335,15 +422,18 @@ describe("controlled WhatsApp authorized dispatch", () => {
 
   it("fails safe before click and requires new preflight", async () => {
     const fixture = dependencies({
-      createPublisher: vi.fn(() => ({
-        publish: vi.fn(async () => ({
-          ...published(),
-          status: "FAILED",
-          errorCode: "WHATSAPP_WEB_SELECTOR_MISMATCH",
-          sendWasClicked: false,
-          deliveryUncertain: false,
-        })),
-      }) as never),
+      createPublisher: vi.fn(
+        () =>
+          ({
+            publish: vi.fn(async () => ({
+              ...published(),
+              status: "FAILED",
+              errorCode: "WHATSAPP_WEB_SELECTOR_MISMATCH",
+              sendWasClicked: false,
+              deliveryUncertain: false,
+            })),
+          }) as never,
+      ),
     });
     const result = await dispatchAuthorizedWhatsAppPublication(
       { publicationId: "publication-one", confirmSend: true },

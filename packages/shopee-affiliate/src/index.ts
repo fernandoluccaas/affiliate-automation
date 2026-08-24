@@ -1,6 +1,8 @@
 export * from "./config";
+export * from "./channel";
 export * from "./discovery";
 export * from "./distribution";
+export * from "./dispatch";
 export * from "./enrichment";
 export * from "./freshness";
 export * from "./parser";
@@ -15,6 +17,7 @@ export * from "./official-product-offer-contract";
 export * from "./open-api-smoke";
 export * from "./operational";
 export * from "./publication";
+export * from "./production";
 export * from "./ranking";
 export * from "./schema";
 export * from "./source";

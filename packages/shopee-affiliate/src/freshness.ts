@@ -49,6 +49,40 @@ export function evaluateShopeeOfferFreshness(input: {
   );
 }
 
+export async function loadShopeeFreshnessSummary(
+  input: {
+    environment?: NodeJS.ProcessEnv;
+    now?: Date;
+    database?: PrismaClient;
+  } = {},
+) {
+  const environment = input.environment ?? process.env;
+  const now = input.now ?? new Date();
+  const database = input.database ?? prisma;
+  const configuration = resolveShopeeAffiliateConfiguration(environment);
+  const offers = await database.offer.findMany({
+    where: {
+      marketplace: "SHOPEE",
+      status: { in: ["READY_TO_PUBLISH", "SCHEDULED"] },
+    },
+    select: { collectedAt: true, verifiedAt: true },
+  });
+  const fresh = offers.filter((offer) =>
+    evaluateShopeeOfferFreshness({
+      ...offer,
+      now,
+      maxAgeHours: configuration.publicationMaxOfferAgeHours,
+    }),
+  ).length;
+  return {
+    total: offers.length,
+    fresh,
+    stale: offers.length - fresh,
+    maxOfferAgeHours: configuration.publicationMaxOfferAgeHours,
+    refreshBeforePublication: configuration.refreshBeforePublication,
+  };
+}
+
 function hasCanonicalAffiliateLink(record: ShopeeFreshnessRecord) {
   return record.affiliateLinks.some(
     (link) =>

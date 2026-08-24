@@ -1,11 +1,9 @@
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { prisma } from "@affiliate/database";
-import { resolveShopeeAffiliateConfiguration } from "./config";
 import {
   ensureShopeePublicationFreshness,
-  evaluateShopeeOfferFreshness,
   expireStaleShopeeOffers,
+  loadShopeeFreshnessSummary,
 } from "./freshness";
 
 function parseSingleOption(args: readonly string[], name: string) {
@@ -24,27 +22,7 @@ export async function loadShopeeFreshnessStatus(
   environment: NodeJS.ProcessEnv = process.env,
   now = new Date(),
 ) {
-  const configuration = resolveShopeeAffiliateConfiguration(environment);
-  const offers = await prisma.offer.findMany({
-    where: {
-      marketplace: "SHOPEE",
-      status: { in: ["READY_TO_PUBLISH", "SCHEDULED"] },
-    },
-    select: { collectedAt: true, verifiedAt: true },
-  });
-  const fresh = offers.filter((offer) =>
-    evaluateShopeeOfferFreshness({
-      ...offer,
-      now,
-      maxAgeHours: configuration.publicationMaxOfferAgeHours,
-    }),
-  ).length;
-  return {
-    fresh,
-    stale: offers.length - fresh,
-    maxOfferAgeHours: configuration.publicationMaxOfferAgeHours,
-    refreshBeforePublication: configuration.refreshBeforePublication,
-  };
+  return loadShopeeFreshnessSummary({ environment, now });
 }
 
 export async function runShopeeFreshnessCli(
