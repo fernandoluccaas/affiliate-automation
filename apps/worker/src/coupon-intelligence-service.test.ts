@@ -154,5 +154,83 @@ describe("coupon intelligence service", () => {
     expect(upsert.mock.calls[0]?.[0].where).toEqual(
       upsert.mock.calls[1]?.[0].where,
     );
+    expect(upsert.mock.calls[0]?.[0]).toMatchObject({
+      update: { code: "OFF10" },
+      create: {
+        code: "OFF10",
+        sourceKey: "SHOPEE_OFFICIAL_MOCK:voucher-1",
+      },
+    });
+  });
+
+  it("persists an automatic coupon with null code and a deterministic source key", async () => {
+    const upsert = vi.fn().mockResolvedValue({});
+    const updateMany = vi.fn().mockResolvedValue({ count: 0 });
+    const db = database({
+      offer: { findUnique: vi.fn().mockResolvedValue(offer) },
+      $transaction: vi.fn(async (callback) =>
+        callback({ coupon: { upsert, updateMany } }),
+      ),
+    });
+    const provider: CouponProvider = {
+      marketplace: "SHOPEE",
+      discoverCoupons: vi.fn(),
+      refreshCoupons: vi.fn().mockResolvedValue({
+        supported: true,
+        reason: null,
+        source: "SHOPEE_OFFICIAL_MOCK",
+        externalRequests: 1,
+        candidates: [
+          {
+            marketplace: "SHOPEE",
+            externalCouponId: null,
+            code: null,
+            benefitType: "AUTOMATIC",
+            percentage: "10",
+            autoApply: true,
+            scope: "PRODUCT",
+            sellerId: "seller-1",
+            productExternalId: "product-1",
+            source: "SHOPEE_OFFICIAL_MOCK",
+            status: "ACTIVE",
+            active: true,
+            lastValidatedAt: now,
+            applicability: "CONFIRMED",
+            confidence: 100,
+          },
+        ],
+      }),
+    };
+
+    const result = await refreshOfferCoupons({
+      offerId: "offer-1",
+      confirmRefresh: true,
+      database: db,
+      environment: enabled,
+      providers: { SHOPEE: provider },
+      now,
+    });
+
+    expect(upsert).toHaveBeenCalledOnce();
+    const upsertInput = upsert.mock.calls[0]?.[0];
+    const expectedSourceKey =
+      "SHOPEE_OFFICIAL_MOCK:AUTO:AUTOMATIC:10::::PRODUCT:seller-1:product-1";
+    expect(upsertInput).toMatchObject({
+      where: {
+        offerId_sourceKey: {
+          offerId: "offer-1",
+          sourceKey: expectedSourceKey,
+        },
+      },
+      update: { code: null },
+      create: { code: null, sourceKey: expectedSourceKey },
+    });
+    expect(upsertInput.create.sourceKey).not.toBe("");
+    expect(result.bestCoupon).toMatchObject({
+      code: null,
+      sourceKey: expectedSourceKey,
+      autoApply: true,
+      benefitType: "AUTOMATIC",
+    });
   });
 });

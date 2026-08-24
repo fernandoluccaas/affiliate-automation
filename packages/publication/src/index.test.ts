@@ -394,6 +394,9 @@ describe("structured coupon messages", () => {
     }).message;
     expect(message).toContain("cupom automático no checkout");
     expect(message).not.toContain("undefined");
+    expect(message).not.toContain("CUPOM:");
+    expect(message).not.toContain("CUPOM: undefined");
+    expect(message).not.toContain("CUPOM: AUTO");
   });
 
   it("preserves NFC Unicode and rejects known mojibake markers", () => {

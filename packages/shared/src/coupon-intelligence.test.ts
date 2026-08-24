@@ -103,6 +103,7 @@ describe("cross-marketplace coupon resolver", () => {
 
   it("represents an official automatic coupon without inventing a code", () => {
     const result = resolve({
+      externalCouponId: null,
       code: null,
       autoApply: true,
       benefitType: "AUTOMATIC",
@@ -110,6 +111,17 @@ describe("cross-marketplace coupon resolver", () => {
     });
     expect(result.resolutionStatus).toBe("CONFIRMED");
     expect(result.effectivePriceCalculated).toBeNull();
+    expect(result.code).toBeNull();
+    expect(result.sourceKey).toBe(
+      "SHOPEE_OFFICIAL_TEST:AUTO:AUTOMATIC:::::PRODUCT:seller-1:product-1",
+    );
+    expect(createCouponSnapshot(result)).toMatchObject({
+      code: null,
+      sourceKey:
+        "SHOPEE_OFFICIAL_TEST:AUTO:AUTOMATIC:::::PRODUCT:seller-1:product-1",
+      autoApply: true,
+      benefitType: "AUTOMATIC",
+    });
   });
 
   it("does not stack and deterministically chooses the largest real saving", () => {

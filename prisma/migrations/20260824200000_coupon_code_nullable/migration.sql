@@ -1,0 +1,2 @@
+ALTER TABLE "Coupon"
+  ALTER COLUMN "code" DROP NOT NULL;

@@ -14,7 +14,7 @@ type CouponRecord = {
   marketplace: "SHOPEE" | "MERCADO_LIVRE" | null;
   externalCouponId: string | null;
   sourceKey: string | null;
-  code: string;
+  code: string | null;
   benefitType: "PERCENTAGE" | "FIXED_AMOUNT" | "AUTOMATIC" | "OTHER";
   percentage: { toString(): string } | string | null;
   discountAmount: { toString(): string } | string | null;
@@ -52,7 +52,7 @@ export function persistedCouponCandidate(
     marketplace: coupon.marketplace ?? fallback.marketplace,
     externalCouponId: coupon.externalCouponId,
     sourceKey: coupon.sourceKey,
-    code: coupon.code || null,
+    code: coupon.code,
     benefitType: coupon.benefitType,
     percentage: text(coupon.percentage),
     fixedAmount: text(coupon.discountAmount),
@@ -364,7 +364,7 @@ export async function refreshOfferCoupons(input: {
           offerId_sourceKey: { offerId: offer.id, sourceKey: coupon.sourceKey },
         },
         update: {
-          code: coupon.code ?? "",
+          code: coupon.code,
           benefitType: coupon.benefitType,
           percentage: coupon.percentage,
           discountAmount: coupon.fixedAmount,
@@ -396,7 +396,7 @@ export async function refreshOfferCoupons(input: {
           marketplace: coupon.marketplace,
           externalCouponId: coupon.externalCouponId,
           sourceKey: coupon.sourceKey,
-          code: coupon.code ?? "",
+          code: coupon.code,
           benefitType: coupon.benefitType,
           percentage: coupon.percentage,
           discountAmount: coupon.fixedAmount,

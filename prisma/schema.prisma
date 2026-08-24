@@ -425,7 +425,7 @@ model Coupon {
   marketplace              Marketplace?
   externalCouponId         String?
   sourceKey                String?
-  code                     String
+  code                     String?
   description              String?
   benefitType              CouponBenefitType   @default(OTHER)
   percentage               Decimal?            @db.Decimal(7, 4)

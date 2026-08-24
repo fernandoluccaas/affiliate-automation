@@ -75,7 +75,7 @@ export type ShopeePublicationOffer = {
     marketplace: "SHOPEE" | "MERCADO_LIVRE" | null;
     externalCouponId: string | null;
     sourceKey: string | null;
-    code: string;
+    code: string | null;
     benefitType: "PERCENTAGE" | "FIXED_AMOUNT" | "AUTOMATIC" | "OTHER";
     percentage: string | null;
     discountAmount: string | null;
