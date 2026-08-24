@@ -1,5 +1,9 @@
 import { prisma, Prisma, type PrismaClient } from "@affiliate/database";
-import { buildPromoMessage, getZonedDayRange } from "@affiliate/publication";
+import {
+  buildPromoMessage,
+  getZonedDayRange,
+  validatePromoMessageEncoding,
+} from "@affiliate/publication";
 import { resolveShopeeAffiliateConfiguration } from "./config";
 import { nextShopeePublicationAt } from "./distribution";
 import { loadShopeeFreshnessSummary } from "./freshness";
@@ -8,6 +12,7 @@ import {
   inspectShopeeProductionLock,
   SHOPEE_PRODUCTION_RUN_NAME,
 } from "./production";
+import { resolveShopeePublicTrackingReadiness } from "./tracking-url";
 import { validateShopeeGeneratedShortLink } from "./validation";
 
 export type ShopeePublicationSkipCode =
@@ -24,7 +29,8 @@ export type ShopeePublicationSkipCode =
   | "SHOPEE_CHANNEL_MIN_SCORE"
   | "SHOPEE_CHANNEL_MIN_DISCOUNT"
   | "SHOPEE_PUBLICATION_DUPLICATE"
-  | "SHOPEE_PUBLICATION_LIMIT_REACHED";
+  | "SHOPEE_PUBLICATION_LIMIT_REACHED"
+  | "SHOPEE_MESSAGE_ENCODING_INVALID";
 
 export type ShopeePublicationOffer = {
   id: string;
@@ -308,7 +314,7 @@ export async function planShopeePublications(input: {
         continue;
       }
       const trackingUrl = `${appBaseUrl(environment)}/go/${encodeURIComponent(canonical.link.slug)}`;
-      const message = buildPromoMessage({
+      const generatedMessage = buildPromoMessage({
         title: offer.title,
         marketplace: "SHOPEE",
         originalPrice: offer.originalPrice,
@@ -321,6 +327,12 @@ export async function planShopeePublications(input: {
         trackingUrl,
         seed: `${channel.id}:${offer.id}`,
       }).message;
+      const messageValidation = validatePromoMessageEncoding(generatedMessage);
+      if (!messageValidation.ok) {
+        skip(output, offer.id, channel.id, "SHOPEE_MESSAGE_ENCODING_INVALID");
+        continue;
+      }
+      const message = messageValidation.normalizedMessage;
       output.planned += 1;
       if (preview) {
         output.decisions.push({
@@ -520,6 +532,7 @@ export async function loadShopeeProductionStatus(
   const database = input.database ?? prisma;
   const environment = input.environment ?? process.env;
   const configuration = resolveShopeeAffiliateConfiguration(environment);
+  const publicTracking = resolveShopeePublicTrackingReadiness(environment);
   const now = input.now ?? new Date();
   const timezone = input.timezone ?? "America/Fortaleza";
   const range = getZonedDayRange(now, timezone);
@@ -662,11 +675,17 @@ export async function loadShopeeProductionStatus(
         (configuration.publicationWhatsAppEnabled
           ? configuredShopeeChannels.whatsapp
           : 0),
+      publicTrackingReady: publicTracking.ready,
     }),
     enabled: configuration.publicationEnabled,
     publicationEnabled: configuration.publicationEnabled,
     autoDistributionEnabled: configuration.autoDistributionEnabled,
     externalSendsEnabled: configuration.externalSendsEnabled,
+    publicTracking: {
+      ready: publicTracking.ready,
+      configured: publicTracking.configured,
+      reason: publicTracking.reason,
+    },
     telegramEnabled: configuration.publicationTelegramEnabled,
     whatsappEnabled: configuration.publicationWhatsAppEnabled,
     configuredShopeeChannels,
@@ -756,11 +775,22 @@ export function auditShopeeProductionStatus(
       action: "ENABLE_ONE_SHOPEE_CHANNEL_OR_DISABLE_DISTRIBUTION",
     });
   }
-  if (status.externalSendsEnabled && status.mode !== "LIVE") {
+  if (
+    status.externalSendsEnabled &&
+    status.publicTracking.ready &&
+    status.mode !== "LIVE"
+  ) {
     findings.push({
       code: "SHOPEE_EXTERNAL_SENDS_NOT_READY",
       severity: "CRITICAL",
       action: "DISABLE_EXTERNAL_SENDS_OR_COMPLETE_CHANNEL_GATES",
+    });
+  }
+  if (status.externalSendsEnabled && !status.publicTracking.ready) {
+    findings.push({
+      code: "SHOPEE_PUBLIC_TRACKING_URL_NOT_CONFIGURED",
+      severity: "CRITICAL",
+      action: "CONFIGURE_PUBLIC_HTTPS_APP_BASE_URL",
     });
   }
   if (

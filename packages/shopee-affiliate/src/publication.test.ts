@@ -101,12 +101,17 @@ const enabledEnvironment = {
 
 describe("controlled Shopee publication", () => {
   it("surfaces stale production state through read-only audit findings", () => {
-    const findings = auditShopeeProductionStatus({
+    const status = {
       mode: "DRY_RUN",
       enabled: true,
       publicationEnabled: true,
       autoDistributionEnabled: true,
       externalSendsEnabled: false,
+      publicTracking: {
+        ready: false,
+        configured: false,
+        reason: "NOT_HTTPS",
+      },
       telegramEnabled: false,
       whatsappEnabled: false,
       configuredShopeeChannels: {
@@ -138,11 +143,18 @@ describe("controlled Shopee publication", () => {
       lock: { held: false, owner: null, ttlMs: 0, mode: "unavailable" },
       externalRequests: 0,
       stateModified: false,
-    });
+    } as const;
+    const findings = auditShopeeProductionStatus(status);
     expect(findings.map((finding) => finding.code)).toEqual([
       "SHOPEE_STALE_OFFERS_PENDING",
       "SHOPEE_DISTRIBUTION_WITHOUT_CHANNEL",
     ]);
+    expect(
+      auditShopeeProductionStatus({
+        ...status,
+        externalSendsEnabled: true,
+      }).map((finding) => finding.code),
+    ).toContain("SHOPEE_PUBLIC_TRACKING_URL_NOT_CONFIGURED");
   });
 
   it("rejects an offer without a canonical AffiliateLink", () => {
@@ -170,6 +182,43 @@ describe("controlled Shopee publication", () => {
     const created = [...store.created.values()][0]!;
     expect(created.affiliateDestination).toBe("https://s.shopee.com.br/AbCdEf");
     expect(created.trackingUrl).toBe("https://affiliate.test/go/shopee-link-1");
+  });
+
+  it("persists intact Portuguese and emoji through the production path", async () => {
+    const store = new MemoryStore(
+      [
+        offer({
+          id: "offer-0",
+          productId: "product-0",
+          title: "É promoção válida: coração e ação",
+          freeShipping: true,
+          shippingStatus: "FREE",
+        }),
+      ],
+      [{ ...channel, id: "channel-0" }],
+    );
+    const result = await planShopeePublications({
+      store,
+      environment: enabledEnvironment,
+      confirmCreatePublication: true,
+    });
+    const message = [...store.created.values()][0]?.message ?? "";
+    expect(result.publicationsCreated).toBe(1);
+    for (const expected of [
+      "PREÇO",
+      "É",
+      "R$",
+      "á",
+      "ç",
+      "✅",
+      "🛒",
+      "🤯",
+    ]) {
+      expect(message).toContain(expected);
+    }
+    for (const suspicious of ["├", "┬", "Ô£", "­ƒ", "Ã§", "âœ"]) {
+      expect(message).not.toContain(suspicious);
+    }
   });
 
   it("reports an existing Publication as a duplicate", async () => {

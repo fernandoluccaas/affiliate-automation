@@ -42,7 +42,11 @@ describe("Shopee production orchestration", () => {
   it("derives OFF, DRY_RUN, READY and LIVE without trusting one flag", () => {
     const configuration = resolveShopeeAffiliateConfiguration({});
     expect(
-      deriveShopeeProductionMode({ configuration, configuredChannelCount: 0 }),
+      deriveShopeeProductionMode({
+        configuration,
+        configuredChannelCount: 0,
+        publicTrackingReady: false,
+      }),
     ).toBe("OFF");
     expect(
       deriveShopeeProductionMode({
@@ -50,12 +54,14 @@ describe("Shopee production orchestration", () => {
           SHOPEE_PUBLICATION_ENABLED: "true",
         }),
         configuredChannelCount: 0,
+        publicTrackingReady: false,
       }),
     ).toBe("DRY_RUN");
     expect(
       deriveShopeeProductionMode({
         configuration: resolveShopeeAffiliateConfiguration(readyEnvironment),
         configuredChannelCount: 1,
+        publicTrackingReady: false,
       }),
     ).toBe("READY");
     expect(
@@ -65,9 +71,44 @@ describe("Shopee production orchestration", () => {
           SHOPEE_EXTERNAL_SENDS_ENABLED: "true",
         }),
         configuredChannelCount: 1,
+        publicTrackingReady: true,
       }),
     ).toBe("LIVE");
   });
+
+  it("never derives LIVE without a public tracking base", () => {
+    expect(
+      deriveShopeeProductionMode({
+        configuration: resolveShopeeAffiliateConfiguration({
+          ...readyEnvironment,
+          SHOPEE_EXTERNAL_SENDS_ENABLED: "true",
+        }),
+        configuredChannelCount: 1,
+        publicTrackingReady: false,
+      }),
+    ).toBe("READY");
+  });
+
+  it.each([
+    ["https://affiliate.example.com", "LIVE"],
+    ["http://affiliate.example.com", "READY"],
+    ["http://localhost:3000", "READY"],
+  ] as const)(
+    "derives %s tracking configuration as %s through the production entrypoint",
+    async (appBaseUrl, expectedMode) => {
+      const result = await runShopeeProductionCycle({
+        confirmRun: false,
+        preview: true,
+        environment: {
+          ...readyEnvironment,
+          SHOPEE_EXTERNAL_SENDS_ENABLED: "true",
+          APP_BASE_URL: appBaseUrl,
+        },
+        configuredChannelCount: 1,
+      });
+      expect(result.mode).toBe(expectedMode);
+    },
+  );
 
   it("keeps preview at zero writes, requests and messages", async () => {
     const result = await runShopeeProductionCycle({

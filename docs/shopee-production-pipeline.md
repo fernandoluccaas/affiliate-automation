@@ -180,7 +180,14 @@ SHOPEE_EXTERNAL_SENDS_ENABLED="false"
 ```
 
 O modo derivado é `OFF`, `DRY_RUN`, `READY` ou `LIVE`. `LIVE` só aparece quando
-todos os gates do pipeline e pelo menos um canal de envio estão configurados.
+todos os gates do pipeline, pelo menos um canal de envio e uma URL pública de
+tracking estão configurados. `APP_BASE_URL` (ou `NEXT_PUBLIC_APP_URL`) precisa
+ser uma URL absoluta HTTPS em hostname público. O dispatcher aceita somente a
+rota canônica `/go/<slug>` e bloqueia localhost, loopback, redes privadas,
+link-local, host `.local`, URL relativa, HTTP e credenciais embutidas com
+`SHOPEE_TRACKING_URL_NOT_PUBLIC_HTTPS`. Não há resolução DNS nesse preflight.
+O endereço `http://localhost:3000` continua válido para desenvolvimento e
+preview local, mas nunca deixa o modo externo em `LIVE`.
 O padrão continua fail-closed.
 
 ### Política de Channel
@@ -205,6 +212,16 @@ Channel, AffiliateLink, tracking ou freshness estiver inválido:
 npm run shopee:dispatch:preview -- --publication-id <Publication.id> --channel-id <Channel.id>
 npm run shopee:dispatch:send -- --publication-id <Publication.id> --channel-id <Channel.id> --confirm-send
 ```
+
+Invariantes estruturais do tracking são avaliadas antes dos kill switches, de
+modo que o preview mostre o bloqueio acionável mesmo quando os envios externos
+estão desativados. O dispatcher nunca substitui o tracking pela URL original do
+produto ou pelo destino do `AffiliateLink`.
+
+Mensagens novas são normalizadas em Unicode NFC e passam por uma validação de
+integridade antes da persistência. Sequências típicas de mojibake causam
+`SHOPEE_MESSAGE_ENCODING_INVALID`; elas não são reparadas silenciosamente e
+nenhum histórico de `Publication` é reescrito.
 
 No Telegram, um `PublicationAttempt` pendente é persistido antes do transporte
 e o `messageId` retornado é salvo em `Publication.externalId`. Falha de

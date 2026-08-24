@@ -12,6 +12,7 @@ import {
   isOfferCompatibleWithChannel,
   isWithinAllowedWindow,
   selectPromotionalHeadline,
+  validatePromoMessageEncoding,
   type ChannelPolicy,
 } from "./index";
 
@@ -290,6 +291,29 @@ describe("formatBRLCurrency", () => {
   it("uses pt-BR currency formatting", () => {
     expect(formatBRLCurrency(1234.5)).toBe("R$\u00a01.234,50");
   });
+});
+
+describe("promo message encoding integrity", () => {
+  it("normalizes valid Portuguese and emoji content to NFC", () => {
+    expect(
+      validatePromoMessageEncoding(
+        "PREÇO É promoção válida ação R$ 10,00 ✅ 🛒 🤯",
+      ),
+    ).toEqual({
+      ok: true,
+      normalizedMessage: "PREÇO É promoção válida ação R$ 10,00 ✅ 🛒 🤯",
+    });
+  });
+
+  it.each(["PRE├ÇO", "R$┬á", "Ô£à", "­ƒ¤¯", "PreÃ§o"])(
+    "rejects suspicious transcoding instead of repairing it: %s",
+    (message) => {
+      expect(validatePromoMessageEncoding(message)).toEqual({
+        ok: false,
+        code: "PROMO_MESSAGE_ENCODING_INVALID",
+      });
+    },
+  );
 });
 
 describe("channel policy", () => {

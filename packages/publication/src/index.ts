@@ -358,6 +358,21 @@ export function buildPromoMessage(input: PromoMessageInput) {
   return new PromoMessageBuilder().build(input);
 }
 
+export const PROMO_MESSAGE_ENCODING_INVALID =
+  "PROMO_MESSAGE_ENCODING_INVALID" as const;
+
+const SUSPICIOUS_MOJIBAKE =
+  /\uFFFD|\u00C3[\u0080-\u00BF]|\u00C2[\u0080-\u00BF]|\u00E2[\u0080-\u00BF\u0152\u0153\u20AC\u2026\u2122]|\u251C|\u252C|\u00D4\u00A3|\u00AD\u0192/u;
+
+export function validatePromoMessageEncoding(message: string):
+  | { ok: true; normalizedMessage: string }
+  | { ok: false; code: typeof PROMO_MESSAGE_ENCODING_INVALID } {
+  const normalizedMessage = message.normalize("NFC");
+  return SUSPICIOUS_MOJIBAKE.test(normalizedMessage)
+    ? { ok: false, code: PROMO_MESSAGE_ENCODING_INVALID }
+    : { ok: true, normalizedMessage };
+}
+
 export function deterministicMessageComposer(offer: MessageOffer) {
   return buildPromoMessage(offer).message;
 }

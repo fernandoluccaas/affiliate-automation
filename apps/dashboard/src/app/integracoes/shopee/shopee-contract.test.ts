@@ -72,6 +72,8 @@ describe("Shopee dashboard architecture", () => {
     expect(source).toContain("loadShopeeProductionStatus");
     expect(source).toContain("Modo de produção");
     expect(source).toContain("Envios externos");
+    expect(source).toContain("Tracking público");
+    expect(source).toContain("publicTracking.ready");
     expect(source).toContain("Último ciclo de produção");
     expect(source).toContain("Lock de distribuição");
     expect(source).toContain("Freshness");

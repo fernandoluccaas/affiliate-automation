@@ -1,6 +1,7 @@
 import { prisma, type PrismaClient } from "@affiliate/database";
 import { resolveShopeeAffiliateConfiguration } from "./config";
 import { validateShopeeGeneratedShortLink } from "./validation";
+import { validatePublicShopeeTrackingUrl } from "./tracking-url";
 import type { ShopeeAffiliateConfiguration } from "./types";
 
 export type ShopeeDispatchRecord = {
@@ -27,7 +28,7 @@ export type ShopeeDispatchGateCode =
   | "SHOPEE_CHANNEL_TYPE_UNSUPPORTED"
   | "SHOPEE_PUBLICATION_NOT_SCHEDULED"
   | "SHOPEE_AFFILIATE_LINK_MISSING"
-  | "SHOPEE_TRACKING_URL_INVALID"
+  | "SHOPEE_TRACKING_URL_NOT_PUBLIC_HTTPS"
   | "SHOPEE_DELIVERY_UNCERTAIN_REVIEW_REQUIRED";
 
 export function evaluateShopeeDispatchGates(input: {
@@ -35,6 +36,12 @@ export function evaluateShopeeDispatchGates(input: {
   record: ShopeeDispatchRecord;
 }): { ok: true } | { ok: false; code: ShopeeDispatchGateCode } {
   const { configuration, record } = input;
+  const trackingValidation = validatePublicShopeeTrackingUrl(
+    record.trackingUrl,
+  );
+  if (!trackingValidation.ok) {
+    return { ok: false, code: trackingValidation.code };
+  }
   if (!configuration.publicationEnabled) {
     return { ok: false, code: "SHOPEE_PUBLICATION_DISABLED" };
   }
@@ -76,12 +83,6 @@ export function evaluateShopeeDispatchGates(input: {
     )
   ) {
     return { ok: false, code: "SHOPEE_AFFILIATE_LINK_MISSING" };
-  }
-  try {
-    const tracking = new URL(record.trackingUrl, "https://local.invalid");
-    if (!tracking.pathname.startsWith("/go/")) throw new Error();
-  } catch {
-    return { ok: false, code: "SHOPEE_TRACKING_URL_INVALID" };
   }
   return { ok: true };
 }
@@ -161,6 +162,9 @@ export async function previewShopeeDispatch(input: {
     ),
     record,
   });
+  const trackingValidation = validatePublicShopeeTrackingUrl(
+    record.trackingUrl,
+  );
   return {
     status: gate.ok ? "READY" : "BLOCKED",
     allowed: gate.ok,
@@ -169,7 +173,10 @@ export async function previewShopeeDispatch(input: {
     offerId: record.offerId,
     channelId: record.channelId,
     channelType: record.channelType,
-    trackingUrlValid: record.trackingUrl.includes("/go/"),
+    trackingUrlValid: trackingValidation.ok,
+    trackingUrlReason: trackingValidation.ok
+      ? null
+      : trackingValidation.reason,
     canonicalAffiliateLink: record.affiliateLinks.some(
       (link) =>
         link.active && validateShopeeGeneratedShortLink(link.destination).ok,

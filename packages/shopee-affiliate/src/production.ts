@@ -6,6 +6,7 @@ import {
 } from "@affiliate/redis";
 import { resolveShopeeAffiliateConfiguration } from "./config";
 import type { ShopeeAffiliateConfiguration } from "./types";
+import { resolveShopeePublicTrackingReadiness } from "./tracking-url";
 
 export const SHOPEE_PRODUCTION_RUN_NAME = "shopee-production-distribution";
 export const SHOPEE_PRODUCTION_LOCK_KEY = "shopee:production-distribution";
@@ -17,8 +18,9 @@ export type ShopeeProductionMode = "OFF" | "DRY_RUN" | "READY" | "LIVE";
 export function deriveShopeeProductionMode(input: {
   configuration: ShopeeAffiliateConfiguration;
   configuredChannelCount: number;
+  publicTrackingReady: boolean;
 }): ShopeeProductionMode {
-  const { configuration, configuredChannelCount } = input;
+  const { configuration, configuredChannelCount, publicTrackingReady } = input;
   if (!configuration.publicationEnabled) return "OFF";
   const channelGate =
     configuration.publicationTelegramEnabled ||
@@ -30,7 +32,9 @@ export function deriveShopeeProductionMode(input: {
   ) {
     return "DRY_RUN";
   }
-  return configuration.externalSendsEnabled ? "LIVE" : "READY";
+  return configuration.externalSendsEnabled && publicTrackingReady
+    ? "LIVE"
+    : "READY";
 }
 
 export type ShopeeProductionMetrics = {
@@ -150,6 +154,9 @@ export async function runShopeeProductionCycle(input: {
   const mode = deriveShopeeProductionMode({
     configuration,
     configuredChannelCount: input.configuredChannelCount ?? 0,
+    publicTrackingReady: resolveShopeePublicTrackingReadiness(
+      input.environment ?? process.env,
+    ).ready,
   });
   if (input.preview) {
     return {

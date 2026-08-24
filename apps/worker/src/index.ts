@@ -289,24 +289,20 @@ function canDispatchShopeePublication(
         (value): value is string => typeof value === "string",
       )
     : [];
-  return evaluateShopeeDispatchGates({
-    configuration,
-    record: {
-      publicationId: "gate",
-      offerId: "gate",
-      channelId: "gate",
-      marketplace,
-      publicationStatus: "SCHEDULED",
-      channelType: channel.type,
-      channelEnabled: channel.enabled,
-      allowedMarketplaces,
-      trackingUrl: "/go/gate",
-      affiliateLinks: [
-        { active: true, destination: "https://s.shopee.com.br/gate" },
-      ],
-      deliveryUncertain: false,
-    },
-  }).ok;
+  const channelSendEnabled =
+    channel.type === "TELEGRAM"
+      ? configuration.publicationTelegramEnabled
+      : channel.type === "WHATSAPP_GROUPS"
+        ? configuration.publicationWhatsAppEnabled
+        : false;
+  return (
+    configuration.publicationEnabled &&
+    configuration.autoDistributionEnabled &&
+    configuration.externalSendsEnabled &&
+    channelSendEnabled &&
+    channel.enabled &&
+    allowedMarketplaces.includes("SHOPEE")
+  );
 }
 
 function stateForTimezone(

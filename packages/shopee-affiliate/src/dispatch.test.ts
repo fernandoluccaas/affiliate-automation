@@ -58,6 +58,33 @@ describe("Shopee dispatch gates", () => {
     expect(gate).toEqual({ ok: false, code: "SHOPEE_AFFILIATE_LINK_MISSING" });
   });
 
+  it.each([
+    "http://affiliate.test/go/shopee-fixture",
+    "http://localhost:3000/go/shopee-fixture",
+    "https://127.0.0.1/go/shopee-fixture",
+    "/go/shopee-fixture",
+  ])("blocks a non-public tracking URL before kill switches: %s", (trackingUrl) => {
+    const gate = evaluateShopeeDispatchGates({
+      configuration: resolveShopeeAffiliateConfiguration({}),
+      record: record({ trackingUrl }),
+    });
+    expect(gate).toEqual({
+      ok: false,
+      code: "SHOPEE_TRACKING_URL_NOT_PUBLIC_HTTPS",
+    });
+  });
+
+  it("does not use the affiliate destination as tracking fallback", () => {
+    const gate = evaluateShopeeDispatchGates({
+      configuration: resolveShopeeAffiliateConfiguration(liveEnvironment),
+      record: record({ trackingUrl: "https://s.shopee.com.br/AbCdEf" }),
+    });
+    expect(gate).toEqual({
+      ok: false,
+      code: "SHOPEE_TRACKING_URL_NOT_PUBLIC_HTTPS",
+    });
+  });
+
   it("blocks automatic retry for uncertain delivery", () => {
     const gate = evaluateShopeeDispatchGates({
       configuration: resolveShopeeAffiliateConfiguration(liveEnvironment),
@@ -86,5 +113,27 @@ describe("Shopee dispatch gates", () => {
       stateModified: false,
     });
     expect(load).toHaveBeenCalledOnce();
+  });
+
+  it("previews localhost as a structured blocker with zero effects", async () => {
+    const result = await previewShopeeDispatch({
+      publicationId: "publication-fixture",
+      channelId: "channel-fixture",
+      environment: liveEnvironment,
+      load: vi.fn(async () =>
+        record({ trackingUrl: "http://localhost:3000/go/shopee-fixture" }),
+      ),
+    });
+    expect(result).toMatchObject({
+      status: "BLOCKED",
+      allowed: false,
+      reason: "SHOPEE_TRACKING_URL_NOT_PUBLIC_HTTPS",
+      trackingUrlValid: false,
+      trackingUrlReason: "NOT_HTTPS",
+      externalRequests: 0,
+      writes: 0,
+      messagesSent: 0,
+      stateModified: false,
+    });
   });
 });

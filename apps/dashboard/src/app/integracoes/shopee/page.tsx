@@ -140,6 +140,17 @@ export default async function ShopeeIntegrationPage() {
             tone={productionStatus.externalSendsEnabled ? "warning" : "success"}
           />
           <MetricCard
+            label="Tracking público"
+            value={productionStatus.publicTracking.ready ? "Pronto" : "Bloqueado"}
+            detail={
+              productionStatus.publicTracking.ready
+                ? "HTTPS público com rota /go validada"
+                : "APP_BASE_URL público e HTTPS obrigatório para envios"
+            }
+            icon={ShieldCheck}
+            tone={productionStatus.publicTracking.ready ? "success" : "warning"}
+          />
+          <MetricCard
             label="Candidatas"
             value={productionStatus.candidateCount}
             detail={`${productionStatus.plannedCount} Publications planejadas`}
