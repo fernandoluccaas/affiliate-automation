@@ -4,11 +4,20 @@ import { runShopeeEnrichmentCli } from "./enrichment-cli";
 describe("Shopee enrichment CLI", () => {
   it("keeps help and status free from database and API calls", async () => {
     const countCandidates = vi.fn();
-    await runShopeeEnrichmentCli(["--help"], { countCandidates });
+    const help = await runShopeeEnrichmentCli(["preview", "-h"], {
+      countCandidates,
+    });
     const status = await runShopeeEnrichmentCli(["status"], {
       countCandidates,
     });
     expect(countCandidates).not.toHaveBeenCalled();
+    expect(help.output).toMatchObject({
+      status: "USAGE",
+      externalRequests: 0,
+      writes: 0,
+      messagesSent: 0,
+      stateModified: false,
+    });
     expect(status.output).toMatchObject({ externalRequests: 0, writes: 0 });
   });
 

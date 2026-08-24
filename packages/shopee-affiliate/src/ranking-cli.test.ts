@@ -1,11 +1,23 @@
 import { describe, expect, it, vi } from "vitest";
-import { runShopeeRankingCli } from "./ranking-cli";
+import {
+  previewPersistedShopeeRanking,
+  runShopeeRankingCli,
+} from "./ranking-cli";
 
 describe("Shopee ranking CLI", () => {
   it("keeps help read-only", async () => {
     const preview = vi.fn();
-    const result = await runShopeeRankingCli(["--help"], { preview });
+    const result = await runShopeeRankingCli(["preview", "--help"], {
+      preview,
+    });
     expect(result.exitCode).toBe(0);
+    expect(result.output).toMatchObject({
+      status: "USAGE",
+      externalRequests: 0,
+      writes: 0,
+      messagesSent: 0,
+      stateModified: false,
+    });
     expect(preview).not.toHaveBeenCalled();
   });
 
@@ -23,5 +35,20 @@ describe("Shopee ranking CLI", () => {
       writes: 0,
       stateModified: false,
     });
+  });
+
+  it("queries only offers that can enter the production publication pipeline", async () => {
+    const findMany = vi.fn().mockResolvedValue([]);
+    await previewPersistedShopeeRanking({
+      offer: { findMany },
+    } as never);
+    expect(findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          marketplace: "SHOPEE",
+          status: "READY_TO_PUBLISH",
+        },
+      }),
+    );
   });
 });

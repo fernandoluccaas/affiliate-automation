@@ -78,6 +78,24 @@ function enrichment(priceMin = 80) {
 }
 
 describe("Shopee publication freshness", () => {
+  it("fails closed when the requested Publication does not exist", async () => {
+    const result = await ensureShopeePublicationFreshness({
+      publicationId: "missing-publication",
+      environment,
+      now,
+      store: new MemoryStore(null),
+    });
+    expect(result).toMatchObject({
+      publicationId: "missing-publication",
+      offerId: null,
+      allowed: false,
+      reason: "SHOPEE_OFFER_NO_LONGER_ELIGIBLE",
+      externalRequests: 0,
+      writes: 0,
+      stateModified: false,
+    });
+  });
+
   it("accepts a fresh offer without Open API", async () => {
     const refreshClient = { enrichItem: vi.fn() };
     const result = await ensureShopeePublicationFreshness({
@@ -133,7 +151,9 @@ describe("Shopee publication freshness", () => {
       environment,
       now,
       store,
-      refreshClient: { enrichItem: vi.fn().mockRejectedValue(new Error("fixture")) },
+      refreshClient: {
+        enrichItem: vi.fn().mockRejectedValue(new Error("fixture")),
+      },
     });
     expect(result.reason).toBe("SHOPEE_OFFER_REFRESH_FAILED");
     expect(store.cancelled).toEqual(["SHOPEE_OFFER_REFRESH_FAILED"]);

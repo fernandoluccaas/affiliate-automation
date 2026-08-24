@@ -3,9 +3,21 @@ import { fileURLToPath } from "node:url";
 import { planShopeePublications } from "./publication";
 
 export function parseShopeePublicationCliArgs(args: readonly string[]) {
+  const offerIdIndexes = args.flatMap((value, index) =>
+    value === "--offer-id" ? [index] : [],
+  );
+  const offerId =
+    offerIdIndexes.length === 1
+      ? args[offerIdIndexes[0]! + 1]?.trim() || null
+      : null;
   return {
     command: args[0] ?? "help",
     confirmCreatePublication: args.includes("--confirm-create-publication"),
+    offerId,
+    argumentError:
+      offerIdIndexes.length > 1 ||
+      (offerIdIndexes.length === 1 &&
+        (offerId === null || offerId.startsWith("-"))),
   };
 }
 
@@ -16,17 +28,33 @@ export async function runShopeePublicationCli(
     environment?: NodeJS.ProcessEnv;
   } = {},
 ) {
-  const parsed = parseShopeePublicationCliArgs(args);
-  if (["help", "--help", "-h"].includes(parsed.command)) {
+  if (args.includes("--help") || args.includes("-h") || args[0] === "help") {
     return {
       exitCode: 0,
       output: {
         status: "USAGE",
         commands: [
           "status",
-          "preview",
-          "create --confirm-create-publication",
+          "preview [--offer-id <Offer.id>]",
+          "create [--offer-id <Offer.id>] --confirm-create-publication",
         ],
+        externalRequests: 0,
+        writes: 0,
+        messagesSent: 0,
+        stateModified: false,
+      },
+    };
+  }
+  const parsed = parseShopeePublicationCliArgs(args);
+  if (parsed.argumentError) {
+    return {
+      exitCode: 2,
+      output: {
+        status: "FAILED",
+        errorCode: "SHOPEE_PUBLICATION_OFFER_ID_INVALID",
+        externalRequests: 0,
+        writes: 0,
+        messagesSent: 0,
         stateModified: false,
       },
     };
@@ -34,7 +62,10 @@ export async function runShopeePublicationCli(
   if (!["status", "preview", "create"].includes(parsed.command)) {
     return {
       exitCode: 2,
-      output: { status: "FAILED", errorCode: "SHOPEE_PUBLICATION_COMMAND_INVALID" },
+      output: {
+        status: "FAILED",
+        errorCode: "SHOPEE_PUBLICATION_COMMAND_INVALID",
+      },
     };
   }
   if (parsed.command === "create" && !parsed.confirmCreatePublication) {
@@ -43,6 +74,7 @@ export async function runShopeePublicationCli(
       output: {
         status: "FAILED",
         errorCode: "SHOPEE_PUBLICATION_NOT_CONFIRMED",
+        externalRequests: 0,
         writes: 0,
         publicationsCreated: 0,
         messagesSent: 0,
@@ -54,6 +86,7 @@ export async function runShopeePublicationCli(
     environment: dependencies.environment ?? process.env,
     preview: parsed.command !== "create",
     confirmCreatePublication: parsed.confirmCreatePublication,
+    ...(parsed.offerId ? { offerId: parsed.offerId } : {}),
   });
   return { exitCode: 0, output };
 }

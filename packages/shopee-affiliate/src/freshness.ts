@@ -44,7 +44,9 @@ export function evaluateShopeeOfferFreshness(input: {
   maxAgeHours: number;
 }) {
   const reference = input.verifiedAt ?? input.collectedAt;
-  return input.now.getTime() - reference.getTime() <= input.maxAgeHours * 3_600_000;
+  return (
+    input.now.getTime() - reference.getTime() <= input.maxAgeHours * 3_600_000
+  );
 }
 
 function hasCanonicalAffiliateLink(record: ShopeeFreshnessRecord) {
@@ -68,11 +70,15 @@ export async function ensureShopeePublicationFreshness(input: {
   const record = await store.load(input.publicationId);
   if (!record || record.marketplace !== "SHOPEE") {
     return {
-      allowed: record?.marketplace !== "SHOPEE",
+      publicationId: input.publicationId,
+      offerId: record?.offerId ?? null,
+      allowed: false,
       reason: "SHOPEE_OFFER_NO_LONGER_ELIGIBLE" as const,
       refreshAttempted: false,
       refreshSucceeded: false,
       externalRequests: 0,
+      writes: 0,
+      stateModified: false,
     };
   }
   const cancel = async (
@@ -85,11 +91,15 @@ export async function ensureShopeePublicationFreshness(input: {
       reason,
     });
     return {
+      publicationId: record.publicationId,
+      offerId: record.offerId,
       allowed: false,
       reason,
       refreshAttempted,
       refreshSucceeded: false,
       externalRequests: refreshAttempted ? 1 : 0,
+      writes: 2,
+      stateModified: true,
     };
   };
   if (record.duplicate) return cancel("SHOPEE_PUBLICATION_DUPLICATE");
@@ -105,11 +115,15 @@ export async function ensureShopeePublicationFreshness(input: {
     })
   ) {
     return {
+      publicationId: record.publicationId,
+      offerId: record.offerId,
       allowed: true,
       reason: "SHOPEE_OFFER_FRESH" as const,
       refreshAttempted: false,
       refreshSucceeded: false,
       externalRequests: 0,
+      writes: 0,
+      stateModified: false,
     };
   }
   if (!configuration.refreshBeforePublication || !configuration.openApiReady) {
@@ -141,11 +155,15 @@ export async function ensureShopeePublicationFreshness(input: {
   }
   await store.markRefreshed(record.offerId, now);
   return {
+    publicationId: record.publicationId,
+    offerId: record.offerId,
     allowed: true,
     reason: "SHOPEE_OFFER_FRESH" as const,
     refreshAttempted: true,
     refreshSucceeded: true,
     externalRequests: 1,
+    writes: 1,
+    stateModified: true,
   };
 }
 

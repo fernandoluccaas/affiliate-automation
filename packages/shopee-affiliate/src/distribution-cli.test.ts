@@ -5,8 +5,17 @@ describe("Shopee distribution CLI", () => {
   it("keeps help and status free from database and external calls", async () => {
     const plan = vi.fn();
     await expect(
-      runShopeeDistributionCli(["--help"], { plan }),
-    ).resolves.toMatchObject({ exitCode: 0 });
+      runShopeeDistributionCli(["preview", "--help"], { plan }),
+    ).resolves.toMatchObject({
+      exitCode: 0,
+      output: {
+        status: "USAGE",
+        externalRequests: 0,
+        writes: 0,
+        messagesSent: 0,
+        stateModified: false,
+      },
+    });
     const status = await runShopeeDistributionCli(["status"], { plan });
     expect(status.output).toMatchObject({
       externalRequests: 0,

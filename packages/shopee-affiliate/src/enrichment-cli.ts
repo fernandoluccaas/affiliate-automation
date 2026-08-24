@@ -16,17 +16,20 @@ export async function runShopeeEnrichmentCli(
     countCandidates?: typeof inspectShopeeEnrichmentShortlist;
   } = {},
 ) {
-  const command = args[0] ?? "help";
-  if (["help", "--help", "-h"].includes(command)) {
+  if (args.includes("--help") || args.includes("-h") || args[0] === "help") {
     return {
       exitCode: 0,
       output: {
         status: "USAGE",
         commands: ["status", "preview"],
+        externalRequests: 0,
+        writes: 0,
+        messagesSent: 0,
         stateModified: false,
       },
     };
   }
+  const command = args[0] ?? "help";
   if (!["status", "preview"].includes(command)) {
     return {
       exitCode: 2,

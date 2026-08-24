@@ -23,12 +23,16 @@ SHOPEE_PUBLICATION_MAX_PER_CYCLE="2"
 ```powershell
 npm run shopee:publication:status
 npm run shopee:publication:preview
+npm run shopee:publication:preview -- --offer-id <Offer.id>
 npm run shopee:publication:create -- --confirm-create-publication
+npm run shopee:publication:create -- --offer-id <Offer.id> --confirm-create-publication
 ```
 
 `status`, `preview`, and `--help` perform no external requests. Without the
 confirmation flag, creation performs no writes. None of these commands
-dispatches Telegram or WhatsApp.
+dispatches Telegram or WhatsApp. `--offer-id` loads only that immutable Offer
+ID, verifies that it is the current Shopee version, and never falls through to
+another candidate.
 
 ## Automated distribution (Phase 6A.8)
 
@@ -82,9 +86,11 @@ SHOPEE_PRODUCT_COOLDOWN_HOURS="168"
 SHOPEE_SELLER_COOLDOWN_HOURS="24"
 ```
 
-`npm run shopee:ranking:preview` reads the current Shopee Offer versions and
-their persisted tracking counts, returns the complete score breakdown, and
-performs zero writes or external requests.
+`npm run shopee:ranking:preview` reads only `READY_TO_PUBLISH` Shopee Offers
+that are candidates for the production publication pipeline and their
+persisted tracking counts. It excludes already published, scheduled, rejected,
+and pending-link history, returns the complete score breakdown, and performs
+zero writes or external requests.
 
 ## Open API enrichment (Phase 6A.10)
 
@@ -140,7 +146,12 @@ SHOPEE_REFRESH_BEFORE_PUBLICATION="true"
 ```powershell
 npm run shopee:freshness:status
 npm run shopee:freshness:expire -- --confirm-expire-stale
+npm run shopee:freshness:check -- --publication-id <Publication.id> --confirm-refresh
 ```
 
 Status is read-only and never calls Open API. Maintenance requires the exact
-confirmation flag and sends no message.
+confirmation flag and sends no message. The single-Publication check reuses the
+same pre-dispatch freshness service. Without `--confirm-refresh`, it performs
+no database read, write, or Open API request. Every production CLI in this
+document treats `--help` and `-h` as globally safe flags regardless of their
+argument position.

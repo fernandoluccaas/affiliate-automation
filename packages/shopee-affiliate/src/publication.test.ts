@@ -70,6 +70,11 @@ class MemoryStore implements ShopeePublicationStore {
     return this.offers;
   }
 
+  async loadOfferById(offerId: string) {
+    const selected = this.offers.find((candidate) => candidate.id === offerId);
+    return selected ? { offer: selected, isCurrent: true } : null;
+  }
+
   async listChannels() {
     return this.channels;
   }
@@ -130,9 +135,9 @@ describe("controlled Shopee publication", () => {
   });
 
   it("rejects an offer from the wrong marketplace", () => {
-    expect(evaluateShopeePublicationOffer(offer({ marketplace: "AMAZON" }))).toBe(
-      "SHOPEE_OFFER_WRONG_MARKETPLACE",
-    );
+    expect(
+      evaluateShopeePublicationOffer(offer({ marketplace: "AMAZON" })),
+    ).toBe("SHOPEE_OFFER_WRONG_MARKETPLACE");
   });
 
   it("uses only the canonical AffiliateLink destination and internal slug", async () => {
@@ -144,17 +149,16 @@ describe("controlled Shopee publication", () => {
     });
     expect(result.publicationsCreated).toBe(1);
     const created = [...store.created.values()][0]!;
-    expect(created.affiliateDestination).toBe(
-      "https://s.shopee.com.br/AbCdEf",
-    );
-    expect(created.trackingUrl).toBe(
-      "https://affiliate.test/go/shopee-link-1",
-    );
+    expect(created.affiliateDestination).toBe("https://s.shopee.com.br/AbCdEf");
+    expect(created.trackingUrl).toBe("https://affiliate.test/go/shopee-link-1");
   });
 
   it("reports an existing Publication as a duplicate", async () => {
     const store = new MemoryStore();
-    store.created.set("publication:channel-1:offer-1", {} as ShopeePublicationCreateInput);
+    store.created.set(
+      "publication:channel-1:offer-1",
+      {} as ShopeePublicationCreateInput,
+    );
     const result = await planShopeePublications({
       store,
       environment: enabledEnvironment,
@@ -195,6 +199,57 @@ describe("controlled Shopee publication", () => {
     expect(result.messagesSent).toBe(0);
     expect(result.stateModified).toBe(false);
     expect(store.created).toHaveLength(0);
+  });
+
+  it("loads and plans only the requested current Offer", async () => {
+    const store = new MemoryStore([
+      offer({ id: "offer-not-requested", productId: "product-other" }),
+      offer({ id: "offer-canary", productId: "product-canary" }),
+    ]);
+    const result = await planShopeePublications({
+      store,
+      environment: enabledEnvironment,
+      offerId: "offer-canary",
+      preview: true,
+    });
+    expect(result.candidates).toBe(1);
+    expect(result.planned).toBe(1);
+    expect(result.decisions).toEqual([
+      expect.objectContaining({ offerId: "offer-canary", result: "PLANNED" }),
+    ]);
+  });
+
+  it("fails closed when the requested Offer does not exist", async () => {
+    const store = new MemoryStore();
+    const result = await planShopeePublications({
+      store,
+      environment: enabledEnvironment,
+      offerId: "missing-offer",
+      preview: true,
+    });
+    expect(result).toMatchObject({
+      candidates: 0,
+      planned: 0,
+      reasons: { SHOPEE_OFFER_NOT_FOUND: 1 },
+      writes: 0,
+      stateModified: false,
+    });
+  });
+
+  it("fails closed when the requested Offer is not the current version", async () => {
+    const store = new MemoryStore();
+    store.loadOfferById = async () => ({
+      offer: offer(),
+      isCurrent: false,
+    });
+    const result = await planShopeePublications({
+      store,
+      environment: enabledEnvironment,
+      offerId: "offer-1",
+      preview: true,
+    });
+    expect(result.reasons).toEqual({ SHOPEE_OFFER_NOT_CURRENT: 1 });
+    expect(result.planned).toBe(0);
   });
 
   it("fails closed without reading the store when disabled", async () => {

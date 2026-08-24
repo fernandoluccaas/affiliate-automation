@@ -6,6 +6,8 @@ import { validateShopeeGeneratedShortLink } from "./validation";
 
 export type ShopeePublicationSkipCode =
   | "SHOPEE_PUBLICATION_DISABLED"
+  | "SHOPEE_OFFER_NOT_FOUND"
+  | "SHOPEE_OFFER_NOT_CURRENT"
   | "SHOPEE_OFFER_WRONG_MARKETPLACE"
   | "SHOPEE_OFFER_NOT_READY"
   | "SHOPEE_AFFILIATE_LINK_MISSING"
@@ -73,6 +75,9 @@ export type ShopeePublicationCreateInput = {
 
 export interface ShopeePublicationStore {
   listReadyOffers(): Promise<ShopeePublicationOffer[]>;
+  loadOfferById(
+    offerId: string,
+  ): Promise<{ offer: ShopeePublicationOffer; isCurrent: boolean } | null>;
   listChannels(): Promise<ShopeePublicationChannel[]>;
   publicationExists(idempotencyKey: string): Promise<boolean>;
   createControlledPublication(
@@ -212,6 +217,7 @@ export async function planShopeePublications(input: {
   environment?: NodeJS.ProcessEnv;
   preview?: boolean;
   confirmCreatePublication?: boolean;
+  offerId?: string;
   now?: Date;
 }): Promise<ShopeePublicationPlanResult> {
   const environment = input.environment ?? process.env;
@@ -233,10 +239,30 @@ export async function planShopeePublications(input: {
   }
 
   const store = input.store ?? createPrismaShopeePublicationStore();
-  const [allOffers, channels] = await Promise.all([
-    store.listReadyOffers(),
-    store.listChannels(),
-  ]);
+  let allOffers: ShopeePublicationOffer[];
+  let channels: ShopeePublicationChannel[];
+  if (input.offerId) {
+    const [target, loadedChannels] = await Promise.all([
+      store.loadOfferById(input.offerId),
+      store.listChannels(),
+    ]);
+    if (!target) {
+      skip(output, input.offerId, null, "SHOPEE_OFFER_NOT_FOUND");
+      return output;
+    }
+    if (!target.isCurrent) {
+      output.candidates = 1;
+      skip(output, target.offer.id, null, "SHOPEE_OFFER_NOT_CURRENT");
+      return output;
+    }
+    allOffers = [target.offer];
+    channels = loadedChannels;
+  } else {
+    [allOffers, channels] = await Promise.all([
+      store.listReadyOffers(),
+      store.listChannels(),
+    ]);
+  }
   const currentByProduct = new Map<string, ShopeePublicationOffer>();
   for (const offer of allOffers) {
     const key = offer.productId ?? `external:${offer.externalProductId}`;
@@ -354,6 +380,34 @@ export function createPrismaShopeePublicationStore(
         affiliateLinks: offer.affiliateLinks,
       }));
     },
+    async loadOfferById(offerId) {
+      const offer = await database.offer.findUnique({
+        where: { id: offerId },
+        include: { affiliateLinks: { where: { active: true } } },
+      });
+      if (!offer) return null;
+      const current = await database.offer.findFirst({
+        where: offer.productId
+          ? { productId: offer.productId }
+          : {
+              marketplace: offer.marketplace,
+              externalProductId: offer.externalProductId,
+            },
+        orderBy: [{ version: "desc" }, { createdAt: "desc" }],
+        select: { id: true },
+      });
+      return {
+        offer: {
+          ...offer,
+          originalPrice: offer.originalPrice?.toString() ?? null,
+          currentPrice: offer.currentPrice.toString(),
+          discountPercentage: offer.discountPercentage?.toString() ?? null,
+          shippingStatus: offer.shippingStatus,
+          affiliateLinks: offer.affiliateLinks,
+        },
+        isCurrent: current?.id === offer.id,
+      };
+    },
     async listChannels() {
       const channels = await database.channel.findMany({
         where: {
@@ -419,9 +473,7 @@ export function createPrismaShopeePublicationStore(
             couponExpirationSnapshot: input.offer.couponExpiration,
             freeShippingSnapshot: input.offer.freeShipping,
             shippingStatusSnapshot: input.offer.shippingStatus as
-              | "FREE"
-              | "NOT_FREE"
-              | "UNKNOWN",
+              "FREE" | "NOT_FREE" | "UNKNOWN",
             affiliateUrlSnapshot: input.affiliateDestination,
             trackingUrlSnapshot: input.trackingUrl,
             offerVersionSnapshot: input.offer.version,
@@ -451,12 +503,14 @@ export function createPrismaShopeePublicationStore(
   };
 }
 
-export async function loadShopeeProductionStatus(input: {
-  database?: PrismaClient;
-  environment?: NodeJS.ProcessEnv;
-  now?: Date;
-  timezone?: string;
-} = {}) {
+export async function loadShopeeProductionStatus(
+  input: {
+    database?: PrismaClient;
+    environment?: NodeJS.ProcessEnv;
+    now?: Date;
+    timezone?: string;
+  } = {},
+) {
   const database = input.database ?? prisma;
   const environment = input.environment ?? process.env;
   const configuration = resolveShopeeAffiliateConfiguration(environment);
@@ -513,10 +567,11 @@ export async function loadShopeeProductionStatus(input: {
     plannedCount,
     publishedToday,
     dailyLimit: configuration.publicationMaxPerDay,
-    nextAllowedPublicationAt: nextShopeePublicationAt({
-      configuration,
-      lastPublicationAt,
-    })?.toISOString() ?? null,
+    nextAllowedPublicationAt:
+      nextShopeePublicationAt({
+        configuration,
+        lastPublicationAt,
+      })?.toISOString() ?? null,
     lastPublicationAt: lastPublicationAt?.toISOString() ?? null,
     lastPublicationStatus: last?.status ?? null,
     lastErrorCode:

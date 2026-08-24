@@ -10,7 +10,7 @@ export async function previewPersistedShopeeRanking(
   const offers = await database.offer.findMany({
     where: {
       marketplace: "SHOPEE",
-      status: { in: ["READY_TO_PUBLISH", "SCHEDULED", "PUBLISHED"] },
+      status: "READY_TO_PUBLISH",
     },
     orderBy: [{ externalProductId: "asc" }, { version: "desc" }],
     include: {
@@ -68,17 +68,20 @@ export async function runShopeeRankingCli(
   args: readonly string[],
   dependencies: { preview?: typeof previewPersistedShopeeRanking } = {},
 ) {
-  const command = args[0] ?? "help";
-  if (["help", "--help", "-h"].includes(command)) {
+  if (args.includes("--help") || args.includes("-h") || args[0] === "help") {
     return {
       exitCode: 0,
       output: {
         status: "USAGE",
         commands: ["preview"],
+        externalRequests: 0,
+        writes: 0,
+        messagesSent: 0,
         stateModified: false,
       },
     };
   }
+  const command = args[0] ?? "help";
   if (command !== "preview") {
     return {
       exitCode: 2,
