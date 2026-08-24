@@ -155,3 +155,107 @@ same pre-dispatch freshness service. Without `--confirm-refresh`, it performs
 no database read, write, or Open API request. Every production CLI in this
 document treats `--help` and `-h` as globally safe flags regardless of their
 argument position.
+
+## Produção automática e canais (Fases 6A.12–6A.16)
+
+O fluxo final reutiliza os modelos, scheduler, conectores e filas existentes:
+
+```text
+Discovery oficial → AffiliateLink canônico → ranking preliminar
+→ shortlist → enrichment limitado → ranking final → Publication
+→ freshness → distribuição → Telegram / fila WhatsApp
+```
+
+Nenhum caminho usa `productUrl` como link afiliado. A mensagem preserva o
+snapshot imutável e aponta para `/go/[slug]`; o destino oficial fica no
+`AffiliateLink` ativo. Telegram e WhatsApp são independentes e cada
+Publication/canal mantém sua própria chave de idempotência.
+
+Envio Shopee real exige simultaneamente publicação, distribuição automática,
+o kill switch global, a flag específica do transporte, `Channel.enabled` e
+`SHOPEE` em `Channel.allowedMarketplaces`:
+
+```dotenv
+SHOPEE_EXTERNAL_SENDS_ENABLED="false"
+```
+
+O modo derivado é `OFF`, `DRY_RUN`, `READY` ou `LIVE`. `LIVE` só aparece quando
+todos os gates do pipeline e pelo menos um canal de envio estão configurados.
+O padrão continua fail-closed.
+
+### Política de Channel
+
+Status e preview não escrevem nem fazem requests externos. Enable/disable
+preservam credenciais, destino, configuração e os demais marketplaces:
+
+```powershell
+npm run shopee:channel:status
+npm run shopee:channel:preview -- --channel-id <Channel.id>
+npm run shopee:channel:enable -- --channel-id <Channel.id> --confirm-enable-shopee
+npm run shopee:channel:disable -- --channel-id <Channel.id> --confirm-disable-shopee
+```
+
+### Canary controlado de dispatch
+
+O preview passa pelos mesmos gates do dispatcher de produção e tem zero
+efeitos. O send exige confirmação, mas ainda falha fechado se qualquer flag,
+Channel, AffiliateLink, tracking ou freshness estiver inválido:
+
+```powershell
+npm run shopee:dispatch:preview -- --publication-id <Publication.id> --channel-id <Channel.id>
+npm run shopee:dispatch:send -- --publication-id <Publication.id> --channel-id <Channel.id> --confirm-send
+```
+
+No Telegram, um `PublicationAttempt` pendente é persistido antes do transporte
+e o `messageId` retornado é salvo em `Publication.externalId`. Falha de
+transporte inconclusiva vira `DELIVERY_UNCERTAIN` nos metadados e bloqueia
+retry automático até reconciliação manual.
+
+No WhatsApp, a Publication Shopee entra na fila/state machine existente, com o
+marketplace preservado nos snapshots. O dispatch autorizado reaplica todos os
+gates Shopee antes dos locks, claim e browser, além de todas as proteções já
+existentes do modo Web Experimental. `WHATSAPP_WEB_DRY_RUN=true` continua
+bloqueando envio real e nenhuma fila paralela foi criada.
+
+### Ciclo de produção
+
+O worker existente chama o serviço central; não existe timer ou processo
+Shopee adicional. O ciclo usa o lock proprietário
+`shopee:production-distribution`, TTL renovável e release condicionado ao token
+do owner. Um segundo worker retorna `SKIPPED_LOCKED`. Depois de adquirir o lock,
+um `AutomationRun` abandonado pode ser recuperado condicionalmente; falhas de
+Telegram e WhatsApp permanecem isoladas.
+
+```powershell
+npm run shopee:production:status
+npm run shopee:production:preview
+npm run shopee:production:tick -- --confirm-run
+```
+
+Preview tem zero writes, requests e mensagens. Tick confirmado pode fazer
+writes internos em modo `READY`; mensagens externas continuam impossíveis até
+o kill switch global e todos os gates específicos estarem habilitados.
+
+Freshness no CLI, ops status e dashboard usa a mesma query de Offers Shopee em
+`READY_TO_PUBLISH`/`SCHEDULED` e a mesma referência
+`verifiedAt ?? collectedAt`. Isso evita divergência entre as superfícies.
+
+## GO-LIVE CHECKLIST
+
+Não execute os passos abaixo em lote. Faça um canary por vez e reconcilie o
+resultado externo antes de avançar.
+
+1. Confirmar que o Channel Telegram está habilitado e permite `SHOPEE`.
+2. Executar preview e um único canary Telegram confirmado.
+3. Repetir o preview e verificar a proteção contra duplicidade.
+4. Confirmar que o Channel WhatsApp está habilitado, permite `SHOPEE` e mantém todos os gates Web Experimental.
+5. Executar preflight/dry-run e um único canary WhatsApp explicitamente autorizado.
+6. Executar um production tick interno limitado primeiro com envios externos bloqueados.
+7. Habilitar e observar um único ciclo automático do worker.
+8. Executar burn-in controlado e revisar locks, freshness, tentativas e entregas incertas.
+9. Somente então habilitar produção contínua; o kill switch deve permanecer disponível para interrupção imediata.
+
+Para desabilitar imediatamente envios Shopee, defina
+`SHOPEE_EXTERNAL_SENDS_ENABLED=false`. Para desabilitar também planejamento,
+use `SHOPEE_AUTO_DISTRIBUTION_ENABLED=false` ou
+`SHOPEE_PUBLICATION_ENABLED=false`.

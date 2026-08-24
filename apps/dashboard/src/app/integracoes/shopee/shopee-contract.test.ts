@@ -70,7 +70,10 @@ describe("Shopee dashboard architecture", () => {
   it("shows read-only production pipeline observability", () => {
     const source = app("page.tsx");
     expect(source).toContain("loadShopeeProductionStatus");
-    expect(source).toContain("Publicação Shopee");
+    expect(source).toContain("Modo de produção");
+    expect(source).toContain("Envios externos");
+    expect(source).toContain("Último ciclo de produção");
+    expect(source).toContain("Lock de distribuição");
     expect(source).toContain("Freshness");
     expect(source).toContain("Enrichment");
   });

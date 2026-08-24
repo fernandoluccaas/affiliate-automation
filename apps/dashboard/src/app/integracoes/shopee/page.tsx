@@ -122,15 +122,22 @@ export default async function ShopeeIntegrationPage() {
 
         <MetricGrid>
           <MetricCard
-            label="Publicação Shopee"
-            value={productionStatus.enabled ? "Habilitada" : "Desabilitada"}
-            detail={
-              productionStatus.autoDistributionEnabled
-                ? "Distribuição automática ativa"
-                : "Distribuição automática fail-closed"
-            }
+            label="Modo de produção"
+            value={productionStatus.mode}
+            detail={`Publication ${productionStatus.publicationEnabled ? "on" : "off"} · distribuição ${productionStatus.autoDistributionEnabled ? "on" : "off"}`}
             icon={ShieldCheck}
-            tone={productionStatus.autoDistributionEnabled ? "success" : "default"}
+            tone={productionStatus.mode === "LIVE" ? "success" : "warning"}
+          />
+          <MetricCard
+            label="Envios externos"
+            value={
+              productionStatus.externalSendsEnabled
+                ? "Habilitados"
+                : "Bloqueados"
+            }
+            detail="Kill switch global da Shopee"
+            icon={ShieldCheck}
+            tone={productionStatus.externalSendsEnabled ? "warning" : "success"}
           />
           <MetricCard
             label="Candidatas"
@@ -150,12 +157,8 @@ export default async function ShopeeIntegrationPage() {
           />
           <MetricCard
             label="Canais Shopee"
-            value={
-              productionStatus.telegramEnabled || productionStatus.whatsappEnabled
-                ? "Configurados"
-                : "Desabilitados"
-            }
-            detail={`Telegram ${productionStatus.telegramEnabled ? "on" : "off"} · WhatsApp ${productionStatus.whatsappEnabled ? "on" : "off"}`}
+            value={productionStatus.configuredShopeeChannels.total}
+            detail={`Telegram ${productionStatus.configuredShopeeChannels.telegram} · WhatsApp ${productionStatus.configuredShopeeChannels.whatsapp} · manual ${productionStatus.configuredShopeeChannels.manual}`}
             icon={ShieldCheck}
           />
           <MetricCard
@@ -171,7 +174,46 @@ export default async function ShopeeIntegrationPage() {
             detail={`Shortlist máxima: ${productionStatus.enrichment.maxItems}`}
             icon={DatabaseZap}
           />
+          <MetricCard
+            label="Último ciclo de produção"
+            value={
+              productionStatus.lastProductionRun?.status ??
+              "Ainda não executado"
+            }
+            detail={
+              productionStatus.lastProductionRun
+                ? dateTime(productionStatus.lastProductionRun.startedAt)
+                : "AutomationRun sem histórico"
+            }
+            icon={Clock3}
+          />
+          <MetricCard
+            label="Lock de distribuição"
+            value={productionStatus.lock.held ? "Ocupado" : "Livre"}
+            detail={
+              productionStatus.lock.held
+                ? `owner ${productionStatus.lock.owner ?? "sanitizado"} · TTL até ${productionStatus.lock.ttlMs} ms`
+                : `Redis ${productionStatus.lock.mode}`
+            }
+            icon={ShieldCheck}
+            tone={productionStatus.lock.held ? "warning" : "success"}
+          />
         </MetricGrid>
+
+        {productionStatus.lastErrorCode ||
+        productionStatus.freshness.stale > 0 ||
+        productionStatus.telegram.deliveryUncertain > 0 ||
+        productionStatus.whatsapp.deliveryUncertain > 0 ? (
+          <Alert tone="warning" title="Produção requer atenção">
+            Fresh: {productionStatus.freshness.fresh}; stale:{" "}
+            {productionStatus.freshness.stale}; Telegram pendentes:{" "}
+            {productionStatus.telegram.pending}; WhatsApp na fila:{" "}
+            {productionStatus.whatsapp.queued}; entregas incertas:{" "}
+            {productionStatus.telegram.deliveryUncertain +
+              productionStatus.whatsapp.deliveryUncertain}
+            .
+          </Alert>
+        ) : null}
 
         <MetricGrid>
           <MetricCard
