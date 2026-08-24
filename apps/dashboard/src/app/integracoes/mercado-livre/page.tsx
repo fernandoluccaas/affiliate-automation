@@ -554,6 +554,11 @@ export default async function MercadoLivreIntegrationPage({
 
   return (
     <AdminShell currentPath="/integracoes/mercado-livre" title="Mercado Livre">
+      <Alert tone="info" title="Coupon Intelligence">
+        Descoberta de cupons indisponível na integração/API oficial atualmente
+        implementada. Isso não afeta OAuth, discovery, geração de links
+        afiliados ou publicação sem cupom.
+      </Alert>
       <div className="flex flex-wrap gap-2">
         <Button asChild variant="outline">
           <Link href="/integracoes">

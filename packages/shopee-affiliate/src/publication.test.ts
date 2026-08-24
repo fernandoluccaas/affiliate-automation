@@ -17,6 +17,7 @@ function offer(
     productId: "product-1",
     marketplace: "SHOPEE",
     externalProductId: "1001",
+    sellerId: null,
     version: 1,
     status: "READY_TO_PUBLISH",
     title: "Produto sanitizado",
@@ -44,6 +45,7 @@ function offer(
         active: true,
       },
     ],
+    coupons: [],
     ...overrides,
   };
 }
@@ -267,6 +269,73 @@ describe("controlled Shopee publication", () => {
     expect(result.messagesSent).toBe(0);
     expect(result.stateModified).toBe(false);
     expect(store.created).toHaveLength(0);
+  });
+
+  it("persists one verified coupon decision in the Publication snapshot", async () => {
+    const store = new MemoryStore([
+      offer({
+        coupons: [
+          {
+            marketplace: "SHOPEE",
+            externalCouponId: "voucher-10",
+            sourceKey: "fixture:voucher-10",
+            code: "SHOPEE10",
+            benefitType: "PERCENTAGE",
+            percentage: "10",
+            discountAmount: null,
+            minimumSpend: null,
+            maximumDiscount: null,
+            startsAt: null,
+            expiresAt: new Date("2026-08-25T12:00:00.000Z"),
+            autoApply: false,
+            scope: "PRODUCT",
+            sellerId: null,
+            productExternalId: "1001",
+            source: "SHOPEE_OFFICIAL_TEST",
+            status: "ACTIVE",
+            active: true,
+            lastValidatedAt: new Date("2026-08-24T12:00:00.000Z"),
+            applicability: "CONFIRMED",
+            applicabilityReason: null,
+            confidence: 90,
+          },
+        ],
+      }),
+    ]);
+    const result = await planShopeePublications({
+      store,
+      environment: {
+        ...enabledEnvironment,
+        COUPON_INTELLIGENCE_ENABLED: "true",
+      },
+      now: new Date("2026-08-24T12:00:00.000Z"),
+      confirmCreatePublication: true,
+    });
+    expect(result.publicationsCreated).toBe(1);
+    expect([...store.created.values()][0]).toMatchObject({
+      couponCodeSnapshot: "SHOPEE10",
+      couponSnapshot: {
+        code: "SHOPEE10",
+        applicability: "CONFIRMED",
+        effectivePriceCalculated: "81.00",
+      },
+    });
+  });
+
+  it("continues publication normally when coupon discovery is unsupported", async () => {
+    const store = new MemoryStore([offer({ coupons: [] })]);
+    const result = await planShopeePublications({
+      store,
+      environment: {
+        ...enabledEnvironment,
+        COUPON_INTELLIGENCE_ENABLED: "true",
+        SHOPEE_COUPON_DISCOVERY_ENABLED: "true",
+      },
+      now: new Date("2026-08-24T12:00:00.000Z"),
+      confirmCreatePublication: true,
+    });
+    expect(result.publicationsCreated).toBe(1);
+    expect([...store.created.values()][0]?.couponSnapshot).toBeNull();
   });
 
   it("loads and plans only the requested current Offer", async () => {

@@ -480,14 +480,28 @@ export async function ingestOfferInTransaction(
   }
 
   if (!offerIsImmutable) {
-    await tx.coupon.deleteMany({ where: { offerId: offer.id } });
+    await tx.coupon.deleteMany({
+      where: {
+        offerId: offer.id,
+        source: { in: ["LEGACY_MANUAL", "LEGACY_INGESTION"] },
+      },
+    });
 
     if (input.couponCode) {
       await tx.coupon.create({
         data: {
           offerId: offer.id,
+          marketplace: input.marketplace,
+          sourceKey: `LEGACY_INGESTION:${input.couponCode.trim().toUpperCase()}`,
           code: input.couponCode,
           expiresAt: input.couponExpiration ?? null,
+          source: "LEGACY_INGESTION",
+          status: "ACTIVE",
+          active: true,
+          selected: false,
+          lastValidatedAt: options.now,
+          applicability: "UNKNOWN",
+          applicabilityReason: "LEGACY_COUPON_WITHOUT_OFFICIAL_APPLICABILITY",
         },
       });
     }

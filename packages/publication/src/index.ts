@@ -1,4 +1,4 @@
-import type { Marketplace } from "@affiliate/shared";
+import type { CouponSnapshot, Marketplace } from "@affiliate/shared";
 
 export type MessageOffer = {
   title: string;
@@ -9,6 +9,7 @@ export type MessageOffer = {
   couponUrl?: string | null;
   couponDescription?: string | null;
   couponExpiration?: Date | string | null;
+  couponSnapshot?: CouponSnapshot | null;
   freeShipping?: boolean | null;
   shippingStatus?: "FREE" | "NOT_FREE" | "UNKNOWN" | string | null;
   marketplace: Marketplace | string;
@@ -233,6 +234,54 @@ function validOriginalPrice(
     : null;
 }
 
+function formatCouponExpiration(value: string) {
+  const date = new Date(value);
+  return Number.isFinite(date.getTime())
+    ? new Intl.DateTimeFormat("pt-BR", {
+        dateStyle: "short",
+        timeStyle: "short",
+        timeZone: "America/Fortaleza",
+      }).format(date)
+    : null;
+}
+
+function structuredCouponLines(snapshot: CouponSnapshot) {
+  const lines: string[] = [];
+  if (snapshot.code) {
+    lines.push(`🎟️ CUPOM: ${normalizeProductTitle(snapshot.code)}`);
+  }
+  if (snapshot.autoApply && !snapshot.code) {
+    const benefit = snapshot.percentage
+      ? `${snapshot.percentage}% OFF`
+      : snapshot.fixedAmount
+        ? `${formatBRLCurrency(snapshot.fixedAmount)} OFF`
+        : "desconto";
+    lines.push(`🎟️ + ${benefit} com cupom automático no checkout`);
+  } else if (snapshot.percentage) {
+    lines.push(`💸 ${snapshot.percentage}% OFF`);
+  } else if (snapshot.fixedAmount) {
+    lines.push(`💸 ${formatBRLCurrency(snapshot.fixedAmount)} OFF`);
+  }
+  if (snapshot.minimumSpend) {
+    lines.push(`📌 Compra mínima: ${formatBRLCurrency(snapshot.minimumSpend)}`);
+  }
+  if (
+    snapshot.applicability === "CONFIRMED" &&
+    snapshot.effectivePriceCalculated &&
+    snapshot.discountAmountCalculated
+  ) {
+    lines.push(
+      `🎟️ Com cupom: ${formatBRLCurrency(snapshot.effectivePriceCalculated)}`,
+      `💰 Economia com cupom: ${formatBRLCurrency(snapshot.discountAmountCalculated)}`,
+    );
+  }
+  if (snapshot.expiresAt) {
+    const expiration = formatCouponExpiration(snapshot.expiresAt);
+    if (expiration) lines.push(`⏰ Válido até ${expiration}`);
+  }
+  return lines;
+}
+
 export class PromoMessageBuilder {
   build(input: PromoMessageInput): PromoMessageResult {
     const options = {
@@ -275,7 +324,9 @@ export class PromoMessageBuilder {
       : null;
     const couponUrl = validOptionalUrl(input.couponUrl);
 
-    if (options.showCoupon && (couponCode || couponUrl)) {
+    if (options.showCoupon && input.couponSnapshot) {
+      lines.push("", ...structuredCouponLines(input.couponSnapshot));
+    } else if (options.showCoupon && (couponCode || couponUrl)) {
       if (couponUrl && couponUrl !== input.trackingUrl) {
         const description = normalizeProductTitle(
           input.couponDescription ?? couponCode ?? "",
@@ -334,7 +385,9 @@ export class WhatsAppMessageFormatter {
     const couponCode = input.couponCode
       ? normalizeProductTitle(input.couponCode)
       : null;
-    if (couponCode) {
+    if (input.couponSnapshot) {
+      lines.push("", ...structuredCouponLines(input.couponSnapshot));
+    } else if (couponCode) {
       lines.push("", "🎟️ Use o cupom:", couponCode);
     }
 

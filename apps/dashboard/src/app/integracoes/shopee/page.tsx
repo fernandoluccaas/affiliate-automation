@@ -58,6 +58,11 @@ export default async function ShopeeIntegrationPage() {
       }
     >
       <div className="grid gap-6">
+        <Alert tone="info" title="Coupon Intelligence">
+          Descoberta de cupons indisponível no Datafeed e no contrato
+          productOfferV2 atualmente implementados. Ofertas sem cupom continuam
+          normalmente; nenhum dado é fabricado.
+        </Alert>
         <MetricGrid>
           <MetricCard
             label="Integração"

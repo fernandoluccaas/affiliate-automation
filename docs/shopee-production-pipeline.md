@@ -101,6 +101,12 @@ expanded into one request per product. The implementation reuses the existing
 signed Open API transport, timeout, rate limiter, sanitized error mapping, and
 the confirmed `productOfferV2` single-item contract.
 
+Coupon Intelligence is documented in `docs/coupon-intelligence.md`. The
+currently implemented Datafeed columns and `productOfferV2` selection expose no
+coupon, voucher or promotion fact. Consequently `ShopeeCouponProvider` is
+explicitly unsupported, performs zero external requests and does not affect
+offers without coupons. No GraphQL field or operation was inferred.
+
 Returned price, sales, rating, and commission values are enrichment metadata.
 `offerLink` is retained only as metadata: it never creates, replaces, or updates
 the canonical `AffiliateLink.destination`; `generateShortLink` remains the only

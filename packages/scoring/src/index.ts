@@ -1,3 +1,8 @@
+import {
+  applyCouponRankingBonus,
+  type CouponSnapshot,
+} from "@affiliate/shared";
+
 export type ScoreWeights = {
   discount: number;
   commission: number;
@@ -17,10 +22,16 @@ export type ScoreInput = {
   shippingStatus?: "FREE" | "NOT_FREE" | "UNKNOWN" | string | null;
   couponExpiration?: Date | null;
   collectedAt: Date;
+  couponSnapshot?: CouponSnapshot | null;
+  couponRankingEnabled?: boolean;
+  couponFresh?: boolean;
+  couponRankingMaxBonus?: number;
 };
 
 export type ScoreBreakdown = {
   total: number;
+  baseTotal?: number;
+  couponBonus?: number;
   discountComponent: number;
   commissionComponent: number;
   ratingComponent: number;
@@ -107,12 +118,22 @@ export function calculateOfferScore(
     (sum, item) => sum + item.component * item.weight,
     0,
   );
-  const total = availableWeight > 0 ? Math.round(weightedScore / availableWeight) : 0;
+  const baseTotal = availableWeight > 0 ? Math.round(weightedScore / availableWeight) : 0;
+  const couponScore = applyCouponRankingBonus({
+    baseScore: baseTotal,
+    snapshot: input.couponSnapshot ?? null,
+    enabled: input.couponRankingEnabled === true,
+    fresh: input.couponFresh === true,
+    maxBonus: input.couponRankingMaxBonus ?? 0,
+  });
   const scoreCompletenessPercentage =
     totalWeight > 0 ? Number(((availableWeight / totalWeight) * 100).toFixed(2)) : 0;
 
   return {
-    total,
+    total: Math.round(couponScore.finalScore),
+    ...(input.couponRankingEnabled === true
+      ? { baseTotal, couponBonus: Math.round(couponScore.couponBonus) }
+      : {}),
     discountComponent: Math.round(discountComponent),
     commissionComponent: Math.round(commissionComponent),
     ratingComponent: Math.round(ratingComponent),

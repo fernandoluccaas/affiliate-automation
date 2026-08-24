@@ -1,8 +1,10 @@
 import {
+  buildPromoMessage,
   canScheduleInWindow,
   WhatsAppMessageFormatter,
   getZonedDayRange,
   isOfferCompatibleWithChannel,
+  validatePromoMessageEncoding,
   type ChannelPolicy,
   type PolicyFailureCode,
 } from "@affiliate/publication";
@@ -28,6 +30,7 @@ import {
   Prisma,
   type Channel,
   type Offer,
+  type Coupon,
   type Publication,
 } from "@affiliate/database";
 import {
@@ -48,6 +51,16 @@ import {
   type ShopeeProductionMetrics,
   type ShopeeScheduledDiscoveryTickResult,
 } from "@affiliate/shopee-affiliate";
+import {
+  applyCouponRankingBonus,
+  createCouponSnapshot,
+  evaluateCouponSnapshotFreshness,
+  isCouponSnapshot,
+  resolveBestCoupon,
+  resolveCouponIntelligenceConfiguration,
+  type CouponSnapshot,
+} from "@affiliate/shared";
+import { persistedCouponCandidate } from "./coupon-intelligence-service";
 import {
   getWorkerCadences,
   runContinuousWorker,
@@ -79,6 +92,14 @@ type JobMetrics = {
   skipped: number;
   aiGenerated: number;
   aiFallbackUsed: number;
+  couponCandidates: number;
+  couponResolved: number;
+  couponConfirmed: number;
+  couponConditional: number;
+  couponRejected: number;
+  couponExpired: number;
+  couponRefreshCalls: number;
+  couponRefreshFailures: number;
   whatsappGroupAssistedPrepared: number;
   whatsappGroupAssistedConfirmed: number;
   whatsappGroupAssistedSkipped: number;
@@ -133,6 +154,7 @@ type OfferWithLinks = Offer & {
     destination: string;
     active: boolean;
   }>;
+  coupons?: Coupon[];
 };
 
 type PublicationWithRelations = Publication & {
@@ -149,6 +171,7 @@ type GeneratedPublicationPayload = PublicationPayload & {
   aiValidationPassed: boolean;
   aiValidationReasons: string[];
   generatedAt: string;
+  couponSnapshot?: CouponSnapshot | null;
 };
 
 function emptyMetrics(): JobMetrics {
@@ -170,6 +193,14 @@ function emptyMetrics(): JobMetrics {
     skipped: 0,
     aiGenerated: 0,
     aiFallbackUsed: 0,
+    couponCandidates: 0,
+    couponResolved: 0,
+    couponConfirmed: 0,
+    couponConditional: 0,
+    couponRejected: 0,
+    couponExpired: 0,
+    couponRefreshCalls: 0,
+    couponRefreshFailures: 0,
     whatsappGroupAssistedPrepared: 0,
     whatsappGroupAssistedConfirmed: 0,
     whatsappGroupAssistedSkipped: 0,
@@ -216,6 +247,14 @@ function mergeMetrics(target: JobMetrics, source: JobMetrics) {
     "skipped",
     "aiGenerated",
     "aiFallbackUsed",
+    "couponCandidates",
+    "couponResolved",
+    "couponConfirmed",
+    "couponConditional",
+    "couponRejected",
+    "couponExpired",
+    "couponRefreshCalls",
+    "couponRefreshFailures",
     "whatsappGroupAssistedPrepared",
     "whatsappGroupAssistedConfirmed",
     "whatsappGroupAssistedSkipped",
@@ -379,6 +418,40 @@ export function resolvePublicationUrl(offer: OfferWithLinks) {
     : null;
 }
 
+function offerCouponSnapshot(offer: OfferWithLinks, now = new Date()) {
+  const configuration = resolveCouponIntelligenceConfiguration();
+  if (!configuration.enabled || !offer.coupons?.length) return null;
+  const minimumValidatedAt = new Date(
+    now.getTime() - configuration.refreshTtlMinutes * 60_000,
+  );
+  const resolution = resolveBestCoupon({
+    candidates: offer.coupons
+      .filter(
+        (coupon) =>
+          coupon.lastValidatedAt !== null &&
+          coupon.lastValidatedAt >= minimumValidatedAt,
+      )
+      .map((coupon) =>
+        persistedCouponCandidate(coupon, {
+          marketplace: offer.marketplace,
+          externalProductId: offer.externalProductId,
+          sellerId: offer.sellerId,
+          now,
+        }),
+      ),
+    price: offer.currentPrice.toString(),
+    marketplace: offer.marketplace,
+    externalProductId: offer.externalProductId,
+    sellerId: offer.sellerId,
+    now,
+    refreshTtlMinutes: configuration.refreshTtlMinutes,
+    expirySafetyMinutes: configuration.expirySafetyMinutes,
+  });
+  return resolution.bestCoupon
+    ? createCouponSnapshot(resolution.bestCoupon)
+    : null;
+}
+
 async function messagePayloadFor(
   offer: OfferWithLinks,
   channel: Channel,
@@ -389,6 +462,15 @@ async function messagePayloadFor(
     return null;
   }
 
+  const couponConfiguration = resolveCouponIntelligenceConfiguration();
+  const couponSnapshot = offerCouponSnapshot(offer);
+  const couponCode = couponConfiguration.enabled
+    ? (couponSnapshot?.code ?? null)
+    : offer.couponCode;
+  const couponExpiration = couponConfiguration.enabled
+    ? couponSnapshot?.expiresAt
+    : offer.couponExpiration;
+
   const recentHeadlines = await recentChannelHeadlines(channel.id);
   const generated = await generateMessageForOffer({
     title: offer.title,
@@ -397,8 +479,9 @@ async function messagePayloadFor(
     originalPrice: offer.originalPrice?.toString() ?? null,
     currentPrice: offer.currentPrice.toString(),
     discountPercentage: offer.discountPercentage?.toString() ?? null,
-    couponCode: offer.couponCode,
-    couponExpiration: offer.couponExpiration,
+    couponCode,
+    couponExpiration,
+    couponSnapshot,
     freeShipping: offer.freeShipping,
     shippingStatus: offer.shippingStatus,
     rating: offer.rating?.toString() ?? null,
@@ -416,8 +499,9 @@ async function messagePayloadFor(
         originalPrice: offer.originalPrice?.toString() ?? null,
         currentPrice: offer.currentPrice.toString(),
         discountPercentage: offer.discountPercentage?.toString() ?? null,
-        couponCode: offer.couponCode,
-        couponExpiration: offer.couponExpiration,
+        couponCode,
+        couponExpiration,
+        couponSnapshot,
         freeShipping: offer.freeShipping,
         shippingStatus: offer.shippingStatus,
         trackingUrl: publicationUrl.url,
@@ -448,6 +532,7 @@ async function messagePayloadFor(
     aiValidationPassed: generated.aiValidationPassed,
     aiValidationReasons: generated.aiValidationReasons,
     generatedAt: generated.generatedAt.toISOString(),
+    couponSnapshot,
   };
 }
 
@@ -896,8 +981,20 @@ export async function createPublicationIdempotently(
       originalPriceSnapshot: offer.originalPrice,
       currentPriceSnapshot: offer.currentPrice,
       discountPercentageSnapshot: offer.discountPercentage,
-      couponCodeSnapshot: offer.couponCode,
-      couponExpirationSnapshot: offer.couponExpiration,
+      couponCodeSnapshot:
+        payload.couponSnapshot?.code ??
+        (resolveCouponIntelligenceConfiguration().enabled
+          ? null
+          : offer.couponCode),
+      couponExpirationSnapshot: payload.couponSnapshot?.expiresAt
+        ? new Date(payload.couponSnapshot.expiresAt)
+        : resolveCouponIntelligenceConfiguration().enabled
+          ? null
+          : offer.couponExpiration,
+      couponSnapshot:
+        payload.couponSnapshot === null || payload.couponSnapshot === undefined
+          ? Prisma.JsonNull
+          : (payload.couponSnapshot as Prisma.InputJsonValue),
       freeShippingSnapshot: offer.freeShipping,
       shippingStatusSnapshot: offer.shippingStatus,
       affiliateUrlSnapshot: offer.affiliateUrl,
@@ -941,7 +1038,7 @@ export async function scheduleReadyOffers(
       },
       orderBy: { publishedAt: "asc" },
       take: 50,
-      include: { affiliateLinks: true },
+      include: { affiliateLinks: true, coupons: { where: { active: true } } },
     }),
     preferredOfferIds.length > 0
       ? prisma.offer.findMany({
@@ -950,7 +1047,10 @@ export async function scheduleReadyOffers(
             ...marketplaceWhere,
             status: { in: ["READY_TO_PUBLISH", "SCHEDULED", "PUBLISHED"] },
           },
-          include: { affiliateLinks: true },
+          include: {
+            affiliateLinks: true,
+            coupons: { where: { active: true } },
+          },
         })
       : Promise.resolve([]),
     prisma.channel.findMany({ orderBy: { createdAt: "asc" } }),
@@ -961,6 +1061,46 @@ export async function scheduleReadyOffers(
     ).values(),
   ];
   metrics.readyOffersFound = offers.length;
+  const couponConfiguration = resolveCouponIntelligenceConfiguration();
+  const couponAwareScores = new Map<string, number>();
+  for (const offer of offers) {
+    const snapshot = offerCouponSnapshot(offer, now);
+    const ranked = applyCouponRankingBonus({
+      baseScore: offer.score ?? 0,
+      snapshot,
+      enabled: couponConfiguration.rankingEnabled,
+      fresh: snapshot !== null,
+      maxBonus: couponConfiguration.rankingMaxBonus,
+    });
+    couponAwareScores.set(offer.id, ranked.finalScore);
+    if (couponConfiguration.enabled) {
+      metrics.couponCandidates += offer.coupons?.length ?? 0;
+      if (snapshot) metrics.couponResolved += 1;
+      metrics.couponConfirmed +=
+        offer.coupons?.filter(
+          (coupon) => coupon.applicability === "CONFIRMED",
+        ).length ?? 0;
+      metrics.couponConditional +=
+        offer.coupons?.filter(
+          (coupon) => coupon.applicability === "CONDITIONAL",
+        ).length ?? 0;
+      metrics.couponRejected +=
+        offer.coupons?.filter(
+          (coupon) =>
+            !coupon.active ||
+            coupon.applicability === "UNKNOWN" ||
+            coupon.applicability === "NOT_APPLICABLE",
+        ).length ?? 0;
+      metrics.couponExpired +=
+        offer.coupons?.filter(
+          (coupon) =>
+            coupon.expiresAt !== null &&
+            coupon.expiresAt.getTime() <=
+              now.getTime() +
+                couponConfiguration.expirySafetyMinutes * 60_000,
+        ).length ?? 0;
+    }
+  }
   const preferredOrder = new Map(
     preferredOfferIds.map((offerId, index) => [offerId, index]),
   );
@@ -971,6 +1111,12 @@ export async function scheduleReadyOffers(
       if (leftOrder === undefined) return 1;
       if (rightOrder === undefined) return -1;
       if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+    }
+    if (couponConfiguration.rankingEnabled) {
+      const couponScoreDifference =
+        (couponAwareScores.get(right.id) ?? right.score ?? 0) -
+        (couponAwareScores.get(left.id) ?? left.score ?? 0);
+      if (couponScoreDifference !== 0) return couponScoreDifference;
     }
     return compareReadyOfferPriority(left, right);
   });
@@ -1118,7 +1264,9 @@ export async function scheduleReadyOffers(
           {
             marketplace: offer.marketplace,
             category: offer.category,
-            score: offer.score,
+            score: couponConfiguration.rankingEnabled
+              ? (couponAwareScores.get(offer.id) ?? offer.score)
+              : offer.score,
             scoreCompletenessPercentage:
               offer.scoreCompletenessPercentage?.toString() ?? null,
             discountPercentage: offer.discountPercentage?.toString() ?? null,
@@ -1427,6 +1575,203 @@ async function payloadFromPublication(
   return messagePayloadFor(publication.offer, publication.channel);
 }
 
+function regeneratedPublicationMessage(
+  publication: PublicationWithRelations,
+  couponSnapshot: CouponSnapshot | null,
+  now: Date,
+) {
+  const previousPayload =
+    publication.messagePayload &&
+    typeof publication.messagePayload === "object" &&
+    !Array.isArray(publication.messagePayload)
+      ? (publication.messagePayload as Record<string, unknown>)
+      : {};
+  const messageInput = {
+    title: publication.offerTitleSnapshot,
+    marketplace: publication.marketplaceSnapshot,
+    originalPrice: publication.originalPriceSnapshot?.toString() ?? null,
+    currentPrice: publication.currentPriceSnapshot.toString(),
+    discountPercentage:
+      publication.discountPercentageSnapshot?.toString() ?? null,
+    couponCode: couponSnapshot?.code ?? null,
+    couponExpiration: couponSnapshot?.expiresAt ?? null,
+    couponSnapshot,
+    freeShipping: publication.freeShippingSnapshot,
+    shippingStatus: publication.shippingStatusSnapshot,
+    trackingUrl: publication.trackingUrlSnapshot,
+    seed: `${publication.channelId}:${publication.offerId}`,
+    headlineSuggestion: headlineFromMessagePayload(previousPayload),
+  };
+  const message = isAssistedWhatsAppGroup(publication.channel)
+    ? new WhatsAppMessageFormatter().format({
+        ...messageInput,
+        customHeader: channelConfigString(
+          publication.channel,
+          "customHeader",
+        ),
+        customFooter: channelConfigString(
+          publication.channel,
+          "customFooter",
+        ),
+      }).message
+    : buildPromoMessage({
+        ...messageInput,
+        footer: getChannelMessageFooter(publication.channel.configuration),
+      }).message;
+  const encoding = validatePromoMessageEncoding(message);
+  if (!encoding.ok) throw new Error(encoding.code);
+  return {
+    ...previousPayload,
+    offerId: publication.offerId,
+    channelId: publication.channelId,
+    trackingUrl: publication.trackingUrlSnapshot,
+    message: encoding.normalizedMessage,
+    imageUrl: publication.imageUrlSnapshot,
+    couponSnapshot,
+    messageSource: "DETERMINISTIC_FALLBACK",
+    aiProvider: "DETERMINISTIC",
+    aiModel: null,
+    aiGenerationDurationMs: null,
+    aiValidationPassed: true,
+    aiValidationReasons: [],
+    generatedAt: now.toISOString(),
+  };
+}
+
+export async function ensurePublicationCouponFreshness(input: {
+  publication: PublicationWithRelations;
+  now: Date;
+}) {
+  const { publication, now } = input;
+  const configuration = resolveCouponIntelligenceConfiguration();
+  if (
+    !configuration.enabled ||
+    publication.couponSnapshot === null ||
+    publication.couponSnapshot === undefined
+  ) {
+    return {
+      allowed: true,
+      refreshed: false,
+      reason: "COUPON_INTELLIGENCE_NOT_APPLICABLE",
+      snapshot: null,
+    } as const;
+  }
+  if (publication.status !== "SCHEDULED") {
+    return {
+      allowed: false,
+      refreshed: false,
+      reason: "COUPON_HISTORICAL_SNAPSHOT_IMMUTABLE",
+      snapshot: null,
+    } as const;
+  }
+  const storedSnapshot = isCouponSnapshot(publication.couponSnapshot)
+    ? publication.couponSnapshot
+    : null;
+  let staleReason = storedSnapshot
+    ? "COUPON_SNAPSHOT_REQUIRES_REFRESH"
+    : "COUPON_SNAPSHOT_INVALID";
+  if (storedSnapshot) {
+    const freshness = evaluateCouponSnapshotFreshness({
+      snapshot: storedSnapshot,
+      now,
+      currentPrice: publication.offer.currentPrice.toString(),
+      ttlMinutes: configuration.refreshTtlMinutes,
+      expirySafetyMinutes: configuration.expirySafetyMinutes,
+    });
+    if (freshness.fresh) {
+      return {
+        allowed: true,
+        refreshed: false,
+        reason: freshness.reason,
+        snapshot: storedSnapshot,
+      } as const;
+    }
+    staleReason = freshness.reason;
+  }
+
+  const minimumValidatedAt = new Date(
+    now.getTime() - configuration.refreshTtlMinutes * 60_000,
+  );
+  const currentCandidates = (publication.offer.coupons ?? []).filter(
+    (coupon) =>
+      coupon.active &&
+      coupon.lastValidatedAt !== null &&
+      coupon.lastValidatedAt >= minimumValidatedAt,
+  );
+  const resolution = resolveBestCoupon({
+    candidates: currentCandidates.map((coupon) =>
+      persistedCouponCandidate(coupon, {
+        marketplace: publication.offer.marketplace,
+        externalProductId: publication.offer.externalProductId,
+        sellerId: publication.offer.sellerId,
+        now,
+      }),
+    ),
+    price: publication.offer.currentPrice.toString(),
+    marketplace: publication.offer.marketplace,
+    externalProductId: publication.offer.externalProductId,
+    sellerId: publication.offer.sellerId,
+    now,
+    refreshTtlMinutes: configuration.refreshTtlMinutes,
+    expirySafetyMinutes: configuration.expirySafetyMinutes,
+  });
+  const replacementSnapshot = resolution.bestCoupon
+    ? createCouponSnapshot(resolution.bestCoupon)
+    : null;
+  const policy = isOfferCompatibleWithChannel(
+    publication.offer,
+    channelPolicy(publication.channel),
+  );
+  if (!replacementSnapshot && !policy.ok) {
+    return {
+      allowed: false,
+      refreshed: false,
+      reason: "COUPON_REFRESH_MADE_OFFER_INELIGIBLE",
+      snapshot: null,
+    } as const;
+  }
+  const messagePayload = regeneratedPublicationMessage(
+    publication,
+    replacementSnapshot,
+    now,
+  );
+  await prisma.publication.update({
+    where: { id: publication.id, status: "SCHEDULED" },
+    data: {
+      messagePayload: messagePayload as Prisma.InputJsonValue,
+      couponSnapshot: replacementSnapshot
+        ? (replacementSnapshot as Prisma.InputJsonValue)
+        : Prisma.JsonNull,
+      couponCodeSnapshot: replacementSnapshot?.code ?? null,
+      couponExpirationSnapshot: replacementSnapshot?.expiresAt
+        ? new Date(replacementSnapshot.expiresAt)
+        : null,
+      messageSource: "DETERMINISTIC_FALLBACK",
+      aiProvider: "DETERMINISTIC",
+      aiModel: null,
+      aiGenerationDurationMs: null,
+      aiValidationPassed: true,
+      aiValidationReasons: [],
+      generatedAt: now,
+    },
+  });
+  publication.messagePayload = messagePayload as Prisma.JsonValue;
+  publication.couponSnapshot = replacementSnapshot as Prisma.JsonValue;
+  publication.couponCodeSnapshot = replacementSnapshot?.code ?? null;
+  publication.couponExpirationSnapshot = replacementSnapshot?.expiresAt
+    ? new Date(replacementSnapshot.expiresAt)
+    : null;
+  return {
+    allowed: true,
+    refreshed: true,
+    reason: replacementSnapshot
+      ? "COUPON_SNAPSHOT_REPLACED"
+      : "COUPON_SNAPSHOT_REMOVED",
+    staleReason,
+    snapshot: replacementSnapshot,
+  } as const;
+}
+
 async function recordPublicationResult(
   publication: PublicationWithRelations,
   result: PublisherResult,
@@ -1606,7 +1951,12 @@ export async function publishScheduledOffers(
     orderBy: { scheduledAt: "asc" },
     include: {
       channel: true,
-      offer: { include: { affiliateLinks: true } },
+      offer: {
+        include: {
+          affiliateLinks: true,
+          coupons: { where: { active: true } },
+        },
+      },
       attempts: { select: { id: true, status: true } },
     },
   });
@@ -1747,6 +2097,41 @@ export async function publishScheduledOffers(
         metrics.skipped += 1;
         metrics.skipReasons.SHOPEE_OFFER_REFRESH_FAILED =
           (metrics.skipReasons.SHOPEE_OFFER_REFRESH_FAILED ?? 0) + 1;
+        continue;
+      }
+    }
+    const couponConfiguration = resolveCouponIntelligenceConfiguration();
+    if (
+      couponConfiguration.enabled &&
+      publication.couponSnapshot !== null &&
+      publication.couponSnapshot !== undefined
+    ) {
+      try {
+        const couponFreshness = await ensurePublicationCouponFreshness({
+          publication,
+          now,
+        });
+        if (!couponFreshness.allowed) {
+          metrics.couponRefreshCalls += 1;
+          metrics.skipped += 1;
+          metrics.couponRefreshFailures += 1;
+          metrics.skipReasons[couponFreshness.reason] =
+            (metrics.skipReasons[couponFreshness.reason] ?? 0) + 1;
+          continue;
+        }
+        if (couponFreshness.refreshed) metrics.couponRefreshCalls += 1;
+        if (
+          "staleReason" in couponFreshness &&
+          couponFreshness.staleReason === "COUPON_EXPIRED_OR_EXPIRING"
+        ) {
+          metrics.couponExpired += 1;
+        }
+      } catch {
+        metrics.couponRefreshCalls += 1;
+        metrics.skipped += 1;
+        metrics.couponRefreshFailures += 1;
+        metrics.skipReasons.COUPON_REFRESH_FAILED =
+          (metrics.skipReasons.COUPON_REFRESH_FAILED ?? 0) + 1;
         continue;
       }
     }
@@ -2011,6 +2396,12 @@ function productionPlanningMetrics(
     candidates: result.readyOffersFound,
     ranked: result.offersSelected,
     publicationsCreated: result.publicationsCreated,
+    couponCandidates: result.couponCandidates,
+    couponResolved: result.couponResolved,
+    couponConfirmed: result.couponConfirmed,
+    couponConditional: result.couponConditional,
+    couponRejected: result.couponRejected,
+    couponExpired: result.couponExpired,
     whatsappQueued:
       result.whatsappGroupAssistedPrepared + result.publicationsDeferred,
     skipped: result.skipped,
@@ -2025,6 +2416,9 @@ function productionDispatchMetrics(
   return {
     freshnessChecked:
       result.published + result.exported + result.failed + result.expired,
+    couponExpired: result.couponExpired,
+    couponRefreshCalls: result.couponRefreshCalls,
+    couponRefreshFailures: result.couponRefreshFailures,
     telegramAttempted: result.published + result.failed,
     telegramSent: result.published,
     skipped: result.skipped,

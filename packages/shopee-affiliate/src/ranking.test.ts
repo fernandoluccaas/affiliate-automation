@@ -92,4 +92,79 @@ describe("Shopee advanced ranking", () => {
       { itemId: "b", score: 80 },
     ]);
   });
+
+  it("keeps legacy ranking byte-for-byte compatible when coupons are disabled", () => {
+    const legacy = scoreShopeeAdvancedCandidate(base);
+    const disabled = scoreShopeeAdvancedCandidate({
+      ...base,
+      couponRankingEnabled: false,
+      couponRankingMaxBonus: 8,
+      couponSnapshot: {
+        marketplace: "SHOPEE",
+        externalCouponId: "voucher-1",
+        sourceKey: "fixture:voucher-1",
+        code: "OFF10",
+        benefitType: "PERCENTAGE",
+        percentage: "10",
+        fixedAmount: null,
+        minimumSpend: null,
+        maximumDiscount: null,
+        autoApply: false,
+        scope: "PRODUCT",
+        applicability: "CONFIRMED",
+        startsAt: null,
+        expiresAt: "2026-08-25T12:00:00.000Z",
+        validatedAt: "2026-08-24T12:00:00.000Z",
+        source: "SHOPEE_OFFICIAL_TEST",
+        itemPrice: "100.00",
+        discountAmountCalculated: "10.00",
+        effectivePriceCalculated: "90.00",
+        effectiveDiscountPercentage: "10.00",
+      },
+    });
+    expect(disabled.score).toBe(legacy.score);
+    expect(disabled.components).toEqual(legacy.components);
+  });
+
+  it("requires an explicitly fresh confirmed snapshot before adding a bonus", () => {
+    const snapshot = {
+      marketplace: "SHOPEE" as const,
+      externalCouponId: "voucher-1",
+      sourceKey: "fixture:voucher-1",
+      code: "OFF10",
+      benefitType: "PERCENTAGE" as const,
+      percentage: "10",
+      fixedAmount: null,
+      minimumSpend: null,
+      maximumDiscount: null,
+      autoApply: false,
+      scope: "PRODUCT" as const,
+      applicability: "CONFIRMED" as const,
+      startsAt: null,
+      expiresAt: "2026-08-25T12:00:00.000Z",
+      validatedAt: "2026-08-24T12:00:00.000Z",
+      source: "SHOPEE_OFFICIAL_TEST",
+      itemPrice: "100.00",
+      discountAmountCalculated: "10.00",
+      effectivePriceCalculated: "90.00",
+      effectiveDiscountPercentage: "10.00",
+    };
+    const stale = scoreShopeeAdvancedCandidate({
+      ...base,
+      couponSnapshot: snapshot,
+      couponRankingEnabled: true,
+      couponFresh: false,
+      couponRankingMaxBonus: 8,
+    });
+    const fresh = scoreShopeeAdvancedCandidate({
+      ...base,
+      couponSnapshot: snapshot,
+      couponRankingEnabled: true,
+      couponFresh: true,
+      couponRankingMaxBonus: 8,
+    });
+    expect(stale.components.couponBonus).toBe(0);
+    expect(fresh.components.couponBonus).toBe(4);
+    expect(fresh.score).toBeGreaterThan(stale.score);
+  });
 });

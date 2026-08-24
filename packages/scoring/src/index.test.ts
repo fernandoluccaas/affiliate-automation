@@ -78,4 +78,47 @@ describe("calculateOfferScore", () => {
     expect(score.discountComponent).toBe(0);
     expect(score.freeShippingComponent).toBe(0);
   });
+
+  it("adds only the configured bounded coupon bonus", () => {
+    const input = {
+      discountPercentage: 20,
+      collectedAt: new Date("2026-08-24T12:00:00.000Z"),
+      couponSnapshot: {
+        marketplace: "MERCADO_LIVRE" as const,
+        externalCouponId: "coupon-1",
+        sourceKey: "fixture:coupon-1",
+        code: "OFF10",
+        benefitType: "PERCENTAGE" as const,
+        percentage: "10",
+        fixedAmount: null,
+        minimumSpend: null,
+        maximumDiscount: null,
+        autoApply: false,
+        scope: "PRODUCT" as const,
+        applicability: "CONFIRMED" as const,
+        startsAt: null,
+        expiresAt: "2026-08-25T12:00:00.000Z",
+        validatedAt: "2026-08-24T12:00:00.000Z",
+        source: "MERCADO_LIVRE_OFFICIAL_TEST",
+        itemPrice: "100.00",
+        discountAmountCalculated: "10.00",
+        effectivePriceCalculated: "90.00",
+        effectiveDiscountPercentage: "10.00",
+      },
+    };
+    const disabled = calculateOfferScore(input, undefined, input.collectedAt);
+    const enabled = calculateOfferScore(
+      {
+        ...input,
+        couponRankingEnabled: true,
+        couponFresh: true,
+        couponRankingMaxBonus: 8,
+      },
+      undefined,
+      input.collectedAt,
+    );
+    expect(disabled.baseTotal).toBeUndefined();
+    expect(enabled.total).toBe(disabled.total + 4);
+    expect(enabled.couponBonus).toBe(4);
+  });
 });

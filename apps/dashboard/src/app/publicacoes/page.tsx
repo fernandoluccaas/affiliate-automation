@@ -3,6 +3,7 @@ import {
   prisma,
   type WhatsAppWebQueueItem,
 } from "@affiliate/database";
+import { isCouponSnapshot } from "@affiliate/shared";
 import { AdminShell } from "@/components/admin-shell";
 import { EmptyState } from "@/components/empty-state";
 import { formatCurrency, formatDateTime, formatPercentage } from "@/lib/format";
@@ -132,6 +133,11 @@ export default async function PublicationsPage() {
               </thead>
               <tbody>
                 {publications.map((publication) => {
+                  const couponSnapshot = isCouponSnapshot(
+                    publication.couponSnapshot,
+                  )
+                    ? publication.couponSnapshot
+                    : null;
                   const payload =
                     publication.messagePayload &&
                     typeof publication.messagePayload === "object" &&
@@ -228,7 +234,18 @@ export default async function PublicationsPage() {
                           : `${formatPercentage(publication.discountPercentageSnapshot)}%`}
                       </td>
                       <td className="px-4 py-3">
-                        {publication.couponCodeSnapshot ?? "-"}
+                        {couponSnapshot?.code ??
+                          (couponSnapshot?.autoApply
+                            ? "Automático"
+                            : publication.couponCodeSnapshot ?? "Sem cupom")}
+                        {couponSnapshot ? (
+                          <div className="text-xs text-[var(--muted-foreground)]">
+                            {couponSnapshot.applicability} / {couponSnapshot.source}
+                            {couponSnapshot.effectivePriceCalculated
+                              ? ` / efetivo ${formatCurrency(couponSnapshot.effectivePriceCalculated)}`
+                              : ""}
+                          </div>
+                        ) : null}
                         {publication.couponExpirationSnapshot ? (
                           <div className="text-xs text-[var(--muted-foreground)]">
                             ate{" "}

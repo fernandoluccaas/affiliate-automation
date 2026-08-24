@@ -17,6 +17,13 @@ PostgreSQL is the source of truth. Prisma owns schema evolution.
 - `ImportJob`, `AutomationRun`, `SystemAlert`, `SystemSetting`: operations and observability.
 - `MercadoLivreDiscoveryConfig`: persisted Mercado Livre discovery settings and last run summary.
 
+Coupon Intelligence extends the existing `Coupon` model additively with
+official source identity, benefit type, scope, applicability, validation
+freshness and calculated money facts. `offerId + sourceKey` is the stable
+reconciliation key. The selected coupon is copied to structured
+`Publication.couponSnapshot`; historical Publications never depend on the
+mutable Coupon row. See `docs/coupon-intelligence.md`.
+
 ## Monetary Values
 
 Monetary and percentage values use Prisma `Decimal`. Discount percentage is calculated internally from original and current prices and is not accepted from AI output.

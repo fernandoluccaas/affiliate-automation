@@ -10,6 +10,16 @@ If a connector cannot provide an affiliate URL yet, ingestion may persist a vali
 
 ## Mercado Livre
 
+### Coupon Intelligence
+
+The official Mercado Livre client currently implemented here exposes items,
+item prices, catalog products, user products, highlights and categories. The
+narrowly authorized affiliate-session resources expose tags and link generation,
+not generic coupon discovery. `MercadoLivreCouponProvider` therefore reports
+`MERCADO_LIVRE_AFFILIATE_COUPON_DISCOVERY_UNAVAILABLE`, makes no request and
+allows the normal no-coupon pipeline to continue. Details and the future
+activation contract are in `docs/coupon-intelligence.md`.
+
 Phase 3A implements Mercado Livre through official HTTP APIs only:
 
 - OAuth authorization from `/integracoes`.

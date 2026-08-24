@@ -4,6 +4,14 @@ import {
   getZonedDayRange,
   validatePromoMessageEncoding,
 } from "@affiliate/publication";
+import {
+  applyCouponRankingBonus,
+  createCouponSnapshot,
+  resolveBestCoupon,
+  resolveCouponIntelligenceConfiguration,
+  type CouponCandidate,
+  type CouponSnapshot,
+} from "@affiliate/shared";
 import { resolveShopeeAffiliateConfiguration } from "./config";
 import { nextShopeePublicationAt } from "./distribution";
 import { loadShopeeFreshnessSummary } from "./freshness";
@@ -37,6 +45,7 @@ export type ShopeePublicationOffer = {
   productId: string | null;
   marketplace: string;
   externalProductId: string;
+  sellerId: string | null;
   version: number;
   status: string;
   title: string;
@@ -62,6 +71,30 @@ export type ShopeePublicationOffer = {
     destination: string;
     active: boolean;
   }>;
+  coupons: Array<{
+    marketplace: "SHOPEE" | "MERCADO_LIVRE" | null;
+    externalCouponId: string | null;
+    sourceKey: string | null;
+    code: string;
+    benefitType: "PERCENTAGE" | "FIXED_AMOUNT" | "AUTOMATIC" | "OTHER";
+    percentage: string | null;
+    discountAmount: string | null;
+    minimumSpend: string | null;
+    maximumDiscount: string | null;
+    startsAt: Date | null;
+    expiresAt: Date | null;
+    autoApply: boolean;
+    scope: "PRODUCT" | "SELLER" | "STORE" | "PLATFORM" | "CATEGORY" | "UNKNOWN";
+    sellerId: string | null;
+    productExternalId: string | null;
+    source: string;
+    status: "ACTIVE" | "INACTIVE" | "UNKNOWN";
+    active: boolean;
+    lastValidatedAt: Date | null;
+    applicability: "CONFIRMED" | "CONDITIONAL" | "UNKNOWN" | "NOT_APPLICABLE";
+    applicabilityReason: string | null;
+    confidence: number | null;
+  }>;
 };
 
 export type ShopeePublicationChannel = {
@@ -82,6 +115,9 @@ export type ShopeePublicationCreateInput = {
   affiliateLinkId: string;
   trackingUrl: string;
   message: string;
+  couponSnapshot: CouponSnapshot | null;
+  couponCodeSnapshot: string | null;
+  couponExpirationSnapshot: Date | null;
   now: Date;
 };
 
@@ -149,6 +185,37 @@ function canonicalLink(offer: ShopeePublicationOffer) {
     invalid = true;
   }
   return invalid ? "INVALID" : null;
+}
+
+function couponCandidate(
+  coupon: ShopeePublicationOffer["coupons"][number],
+  now: Date,
+): CouponCandidate {
+  return {
+    marketplace: coupon.marketplace ?? "SHOPEE",
+    externalCouponId: coupon.externalCouponId,
+    sourceKey: coupon.sourceKey,
+    code: coupon.code || null,
+    benefitType: coupon.benefitType,
+    percentage: coupon.percentage,
+    fixedAmount: coupon.discountAmount,
+    minimumSpend: coupon.minimumSpend,
+    maximumDiscount: coupon.maximumDiscount,
+    startsAt: coupon.startsAt,
+    expiresAt: coupon.expiresAt,
+    autoApply: coupon.autoApply,
+    scope: coupon.scope,
+    sellerId: coupon.sellerId,
+    productExternalId: coupon.productExternalId,
+    source: coupon.source,
+    status: coupon.status,
+    active: coupon.active,
+    lastValidatedAt: coupon.lastValidatedAt ?? now,
+    applicability: coupon.applicability,
+    applicabilityReason: coupon.applicabilityReason,
+    confidence: coupon.confidence ?? 0,
+    metadata: null,
+  };
 }
 
 export function evaluateShopeePublicationOffer(
@@ -286,8 +353,50 @@ export async function planShopeePublications(input: {
   const currentOffers = [...currentByProduct.values()];
   output.candidates = currentOffers.length;
   const now = input.now ?? new Date();
+  const couponConfiguration =
+    resolveCouponIntelligenceConfiguration(environment);
+  const preparedOffers = currentOffers.map((offer) => {
+    const couponResolution = couponConfiguration.enabled
+      ? resolveBestCoupon({
+          candidates: offer.coupons
+            .filter(
+              (coupon) =>
+                coupon.lastValidatedAt !== null &&
+                now.getTime() - coupon.lastValidatedAt.getTime() <=
+                  couponConfiguration.refreshTtlMinutes * 60_000,
+            )
+            .map((coupon) => couponCandidate(coupon, now)),
+          price: offer.currentPrice,
+          marketplace: "SHOPEE",
+          externalProductId: offer.externalProductId,
+          sellerId: offer.sellerId,
+          now,
+          refreshTtlMinutes: couponConfiguration.refreshTtlMinutes,
+          expirySafetyMinutes: couponConfiguration.expirySafetyMinutes,
+        })
+      : null;
+    const couponSnapshot = couponResolution?.bestCoupon
+      ? createCouponSnapshot(couponResolution.bestCoupon)
+      : null;
+    const couponScore = applyCouponRankingBonus({
+      baseScore: offer.score ?? 0,
+      snapshot: couponSnapshot,
+      enabled: couponConfiguration.rankingEnabled,
+      fresh: couponSnapshot !== null,
+      maxBonus: couponConfiguration.rankingMaxBonus,
+    });
+    return { offer, couponSnapshot, couponScore };
+  });
+  if (couponConfiguration.rankingEnabled) {
+    preparedOffers.sort(
+      (left, right) =>
+        right.couponScore.finalScore - left.couponScore.finalScore ||
+        left.offer.id.localeCompare(right.offer.id),
+    );
+  }
 
-  for (const offer of currentOffers) {
+  for (const prepared of preparedOffers) {
+    const { offer, couponSnapshot, couponScore } = prepared;
     const offerReason = evaluateShopeePublicationOffer(offer);
     if (offerReason) {
       skip(output, offer.id, null, offerReason);
@@ -296,13 +405,26 @@ export async function planShopeePublications(input: {
     output.eligible += 1;
     const canonical = canonicalLink(offer);
     if (!canonical || canonical === "INVALID") continue;
+    const couponCodeSnapshot = couponConfiguration.enabled
+      ? (couponSnapshot?.code ?? null)
+      : offer.couponCode;
+    const couponExpirationSnapshot = couponConfiguration.enabled
+      ? couponSnapshot?.expiresAt
+        ? new Date(couponSnapshot.expiresAt)
+        : null
+      : offer.couponExpiration;
 
     for (const channel of channels) {
       if (output.planned >= configuration.publicationMaxPerCycle) {
         skip(output, offer.id, channel.id, "SHOPEE_PUBLICATION_LIMIT_REACHED");
         continue;
       }
-      const channelReason = evaluateChannel(offer, channel);
+      const channelReason = evaluateChannel(
+        couponConfiguration.rankingEnabled
+          ? { ...offer, score: couponScore.finalScore }
+          : offer,
+        channel,
+      );
       if (channelReason) {
         skip(output, offer.id, channel.id, channelReason);
         continue;
@@ -320,8 +442,9 @@ export async function planShopeePublications(input: {
         originalPrice: offer.originalPrice,
         currentPrice: offer.currentPrice,
         discountPercentage: offer.discountPercentage,
-        couponCode: offer.couponCode,
-        couponExpiration: offer.couponExpiration,
+        couponCode: couponCodeSnapshot,
+        couponExpiration: couponExpirationSnapshot,
+        couponSnapshot,
         freeShipping: offer.freeShipping,
         shippingStatus: offer.shippingStatus,
         trackingUrl,
@@ -352,6 +475,9 @@ export async function planShopeePublications(input: {
         affiliateLinkId: canonical.link.id,
         trackingUrl,
         message,
+        couponSnapshot,
+        couponCodeSnapshot,
+        couponExpirationSnapshot,
         now,
       });
       if (created.created) {
@@ -387,7 +513,10 @@ export function createPrismaShopeePublicationStore(
           { version: "desc" },
           { score: "desc" },
         ],
-        include: { affiliateLinks: { where: { active: true } } },
+        include: {
+          affiliateLinks: { where: { active: true } },
+          coupons: { where: { active: true } },
+        },
       });
       return offers.map((offer) => ({
         ...offer,
@@ -396,12 +525,22 @@ export function createPrismaShopeePublicationStore(
         discountPercentage: offer.discountPercentage?.toString() ?? null,
         shippingStatus: offer.shippingStatus,
         affiliateLinks: offer.affiliateLinks,
+        coupons: offer.coupons.map((coupon) => ({
+          ...coupon,
+          percentage: coupon.percentage?.toString() ?? null,
+          discountAmount: coupon.discountAmount?.toString() ?? null,
+          minimumSpend: coupon.minimumSpend?.toString() ?? null,
+          maximumDiscount: coupon.maximumDiscount?.toString() ?? null,
+        })),
       }));
     },
     async loadOfferById(offerId) {
       const offer = await database.offer.findUnique({
         where: { id: offerId },
-        include: { affiliateLinks: { where: { active: true } } },
+        include: {
+          affiliateLinks: { where: { active: true } },
+          coupons: { where: { active: true } },
+        },
       });
       if (!offer) return null;
       const current = await database.offer.findFirst({
@@ -422,6 +561,13 @@ export function createPrismaShopeePublicationStore(
           discountPercentage: offer.discountPercentage?.toString() ?? null,
           shippingStatus: offer.shippingStatus,
           affiliateLinks: offer.affiliateLinks,
+          coupons: offer.coupons.map((coupon) => ({
+            ...coupon,
+            percentage: coupon.percentage?.toString() ?? null,
+            discountAmount: coupon.discountAmount?.toString() ?? null,
+            minimumSpend: coupon.minimumSpend?.toString() ?? null,
+            maximumDiscount: coupon.maximumDiscount?.toString() ?? null,
+          })),
         },
         isCurrent: current?.id === offer.id,
       };
@@ -487,8 +633,12 @@ export function createPrismaShopeePublicationStore(
             originalPriceSnapshot: input.offer.originalPrice,
             currentPriceSnapshot: input.offer.currentPrice,
             discountPercentageSnapshot: input.offer.discountPercentage,
-            couponCodeSnapshot: input.offer.couponCode,
-            couponExpirationSnapshot: input.offer.couponExpiration,
+            couponCodeSnapshot: input.couponCodeSnapshot,
+            couponExpirationSnapshot: input.couponExpirationSnapshot,
+            couponSnapshot:
+              input.couponSnapshot === null
+                ? Prisma.JsonNull
+                : (input.couponSnapshot as Prisma.InputJsonValue),
             freeShippingSnapshot: input.offer.freeShipping,
             shippingStatusSnapshot: input.offer.shippingStatus as
               "FREE" | "NOT_FREE" | "UNKNOWN",

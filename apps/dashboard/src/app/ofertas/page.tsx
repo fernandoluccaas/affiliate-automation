@@ -2,7 +2,12 @@ import { Plus } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
 import { prisma } from "@affiliate/database";
-import { marketplaces, offerStatuses, stockStatuses } from "@affiliate/shared";
+import {
+  marketplaces,
+  offerStatuses,
+  resolveCouponIntelligenceConfiguration,
+  stockStatuses,
+} from "@affiliate/shared";
 import { AdminShell } from "@/components/admin-shell";
 import { EmptyState } from "@/components/empty-state";
 import { Button } from "@/components/ui/button";
@@ -29,7 +34,40 @@ function buildPageHref(params: URLSearchParams, page: number) {
   return `/ofertas?${next.toString()}`;
 }
 
+function couponBadge(input: {
+  applicability: string;
+  expiresAt: Date | null;
+  lastValidatedAt: Date | null;
+  itemPrice: { toString(): string } | null;
+  currentPrice: { toString(): string };
+  now: Date;
+  ttlMinutes: number;
+  safetyMinutes: number;
+}) {
+  if (
+    !input.lastValidatedAt ||
+    input.now.getTime() - input.lastValidatedAt.getTime() >
+      input.ttlMinutes * 60_000 ||
+    (input.itemPrice !== null &&
+      input.itemPrice.toString() !== input.currentPrice.toString())
+  ) {
+    return { status: "WARNING", label: "Cupom stale" } as const;
+  }
+  if (
+    input.expiresAt &&
+    input.expiresAt.getTime() <=
+      input.now.getTime() + input.safetyMinutes * 60_000
+  ) {
+    return { status: "WARNING", label: "Cupom expirando" } as const;
+  }
+  return input.applicability === "CONFIRMED"
+    ? { status: "ACTIVE", label: "Cupom confirmado" }
+    : { status: "WARNING", label: "Cupom condicional" };
+}
+
 export default async function OffersPage({ searchParams }: OffersPageProps) {
+  const now = new Date();
+  const couponConfiguration = resolveCouponIntelligenceConfiguration();
   const params = await searchParams;
   const marketplace = single(params?.marketplace);
   const status = single(params?.status);
@@ -115,6 +153,22 @@ export default async function OffersPage({ searchParams }: OffersPageProps) {
         affiliateUrl: true,
         affiliateEligibility: true,
         trackingStrategy: true,
+        coupons: {
+          where: { active: true, selected: true },
+          take: 1,
+          select: {
+            code: true,
+            percentage: true,
+            discountAmount: true,
+            autoApply: true,
+            applicability: true,
+            calculatedEffectivePrice: true,
+            expiresAt: true,
+            source: true,
+            lastValidatedAt: true,
+            itemPrice: true,
+          },
+        },
       },
     }),
     prisma.offer.count({ where }),
@@ -327,7 +381,48 @@ export default async function OffersPage({ searchParams }: OffersPageProps) {
                       {offer.shippingStatus}
                     </div>
                   </td>
-                  <td className="px-4 py-3">{offer.couponCode ?? "-"}</td>
+                  <td className="px-4 py-3">
+                    {offer.coupons[0] ? (
+                      <div className="grid gap-1">
+                        <StatusBadge
+                          {...couponBadge({
+                            ...offer.coupons[0],
+                            currentPrice: offer.currentPrice,
+                            now,
+                            ttlMinutes:
+                              couponConfiguration.refreshTtlMinutes,
+                            safetyMinutes:
+                              couponConfiguration.expirySafetyMinutes,
+                          })}
+                        />
+                        <span className="font-mono text-xs">
+                          {offer.coupons[0].code ||
+                            (offer.coupons[0].autoApply
+                              ? "Automático"
+                              : "Sem código")}
+                        </span>
+                        <span className="text-xs text-[var(--muted-foreground)]">
+                          {offer.coupons[0].percentage
+                            ? `${offer.coupons[0].percentage.toString()}% OFF`
+                            : offer.coupons[0].discountAmount
+                              ? `${formatCurrency(offer.coupons[0].discountAmount)} OFF`
+                              : "Benefício não calculado"}
+                        </span>
+                        {offer.coupons[0].calculatedEffectivePrice ? (
+                          <span className="text-xs">
+                            Efetivo: {formatCurrency(
+                              offer.coupons[0].calculatedEffectivePrice,
+                            )}
+                          </span>
+                        ) : null}
+                        <span className="text-xs text-[var(--muted-foreground)]">
+                          {offer.coupons[0].source}
+                        </span>
+                      </div>
+                    ) : (
+                      offer.couponCode ?? "Sem cupom"
+                    )}
+                  </td>
                   <td className="px-4 py-3">
                     {formatDateTime(offer.collectedAt)}
                   </td>

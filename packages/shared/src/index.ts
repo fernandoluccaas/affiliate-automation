@@ -84,3 +84,5 @@ export function calculateDiscountPercentage(originalPrice: number, currentPrice:
 
   return Number((((originalPrice - currentPrice) / originalPrice) * 100).toFixed(2));
 }
+
+export * from "./coupon-intelligence";

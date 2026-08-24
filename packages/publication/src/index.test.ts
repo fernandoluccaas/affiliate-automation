@@ -316,6 +316,104 @@ describe("promo message encoding integrity", () => {
   );
 });
 
+describe("structured coupon messages", () => {
+  const snapshot = {
+    marketplace: "SHOPEE" as const,
+    externalCouponId: "voucher-1",
+    sourceKey: "fixture:voucher-1",
+    code: "OFERTA20",
+    benefitType: "FIXED_AMOUNT" as const,
+    percentage: null,
+    fixedAmount: "20.00",
+    minimumSpend: "100.00",
+    maximumDiscount: null,
+    autoApply: false,
+    scope: "PRODUCT" as const,
+    applicability: "CONFIRMED" as const,
+    startsAt: null,
+    expiresAt: "2026-08-25T12:00:00.000Z",
+    validatedAt: "2026-08-24T12:00:00.000Z",
+    source: "SHOPEE_OFFICIAL_TEST",
+    itemPrice: "129.90",
+    discountAmountCalculated: "20.00",
+    effectivePriceCalculated: "109.90",
+    effectiveDiscountPercentage: "15.40",
+  };
+
+  it("renders the same confirmed coupon facts for Telegram and WhatsApp", () => {
+    const input = {
+      title: "Produto com cupom",
+      marketplace: "SHOPEE",
+      currentPrice: "129.90",
+      trackingUrl: "https://affiliate.test/go/coupon",
+      couponSnapshot: snapshot,
+      seed: "coupon-message",
+    };
+    const telegram = buildPromoMessage(input).message;
+    const whatsapp = formatWhatsAppMessage(input).message;
+    for (const message of [telegram, whatsapp]) {
+      expect(message).toContain("CUPOM: OFERTA20");
+      expect(message).toContain("Com cupom: R$\u00a0109,90");
+      expect(message).toContain("Economia com cupom: R$\u00a020,00");
+      expect(message).toContain("https://affiliate.test/go/coupon");
+    }
+  });
+
+  it("does not invent an effective price for a conditional coupon", () => {
+    const message = buildPromoMessage({
+      title: "Produto condicional",
+      marketplace: "MERCADO_LIVRE",
+      currentPrice: "80",
+      trackingUrl: "https://affiliate.test/go/conditional",
+      couponSnapshot: {
+        ...snapshot,
+        marketplace: "MERCADO_LIVRE",
+        applicability: "CONDITIONAL",
+        minimumSpend: "200.00",
+        effectivePriceCalculated: null,
+        discountAmountCalculated: null,
+      },
+    }).message;
+    expect(message).toContain("Compra mínima: R$\u00a0200,00");
+    expect(message).not.toContain("Com cupom:");
+  });
+
+  it("renders automatic coupons without undefined codes", () => {
+    const message = buildPromoMessage({
+      title: "Produto automático",
+      marketplace: "SHOPEE",
+      currentPrice: "100",
+      trackingUrl: "https://affiliate.test/go/automatic",
+      couponSnapshot: {
+        ...snapshot,
+        code: null,
+        autoApply: true,
+        benefitType: "AUTOMATIC",
+        percentage: "10",
+      },
+    }).message;
+    expect(message).toContain("cupom automático no checkout");
+    expect(message).not.toContain("undefined");
+  });
+
+  it("preserves NFC Unicode and rejects known mojibake markers", () => {
+    const message = buildPromoMessage({
+      title: "PREÇO É válido ✅ 🛒 🤯 🎟 🔥 💰",
+      marketplace: "SHOPEE",
+      currentPrice: "100",
+      trackingUrl: "https://affiliate.test/go/unicode",
+      couponSnapshot: snapshot,
+    }).message;
+    for (const expected of ["PREÇO", "É", "R$", "✅", "🛒", "🤯", "🎟", "🔥", "💰"]) {
+      expect(message).toContain(expected);
+    }
+    for (const invalid of ["├", "¬", "Ô£", "ƒ", "�"]) {
+      expect(message).not.toContain(invalid);
+    }
+    expect(validatePromoMessageEncoding(message).ok).toBe(true);
+  });
+});
+
 describe("channel policy", () => {
   const sparseOffer = {
     marketplace: "SHOPEE",

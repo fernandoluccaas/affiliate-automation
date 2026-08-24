@@ -102,6 +102,35 @@ enum AiProviderName {
   DETERMINISTIC
 }
 
+enum CouponBenefitType {
+  PERCENTAGE
+  FIXED_AMOUNT
+  AUTOMATIC
+  OTHER
+}
+
+enum CouponScope {
+  PRODUCT
+  SELLER
+  STORE
+  PLATFORM
+  CATEGORY
+  UNKNOWN
+}
+
+enum CouponApplicability {
+  CONFIRMED
+  CONDITIONAL
+  UNKNOWN
+  NOT_APPLICABLE
+}
+
+enum CouponSourceStatus {
+  ACTIVE
+  INACTIVE
+  UNKNOWN
+}
+
 enum PublicationAttemptStatus {
   PENDING
   SUCCESS
@@ -391,18 +420,45 @@ model MercadoLivreDiscoveryConfig {
 }
 
 model Coupon {
-  id             String    @id @default(cuid())
-  offerId        String
-  code           String
-  description    String?
-  discountAmount Decimal?  @db.Decimal(12, 2)
-  expiresAt      DateTime?
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+  id                       String              @id @default(cuid())
+  offerId                  String
+  marketplace              Marketplace?
+  externalCouponId         String?
+  sourceKey                String?
+  code                     String
+  description              String?
+  benefitType              CouponBenefitType   @default(OTHER)
+  percentage               Decimal?            @db.Decimal(7, 4)
+  discountAmount           Decimal?            @db.Decimal(12, 2)
+  minimumSpend             Decimal?            @db.Decimal(12, 2)
+  maximumDiscount          Decimal?            @db.Decimal(12, 2)
+  startsAt                 DateTime?
+  expiresAt                DateTime?
+  autoApply                Boolean              @default(false)
+  scope                    CouponScope          @default(UNKNOWN)
+  sellerId                 String?
+  productExternalId        String?
+  source                   String               @default("LEGACY_MANUAL")
+  status                   CouponSourceStatus   @default(UNKNOWN)
+  active                   Boolean              @default(true)
+  selected                 Boolean              @default(false)
+  lastValidatedAt          DateTime?
+  applicability            CouponApplicability  @default(UNKNOWN)
+  applicabilityReason      String?
+  confidence               Int?
+  itemPrice                Decimal?             @db.Decimal(12, 2)
+  calculatedDiscount       Decimal?             @db.Decimal(12, 2)
+  calculatedEffectivePrice Decimal?             @db.Decimal(12, 2)
+  metadata                 Json?
+  createdAt                DateTime              @default(now())
+  updatedAt                DateTime              @updatedAt
 
   offer Offer @relation(fields: [offerId], references: [id], onDelete: Cascade)
 
   @@index([code, expiresAt])
+  @@index([marketplace, active, selected])
+  @@index([offerId, applicability, lastValidatedAt])
+  @@unique([offerId, sourceKey])
 }
 
 model AffiliateLink {
@@ -471,6 +527,7 @@ model Publication {
   discountPercentageSnapshot  Decimal?          @db.Decimal(5, 2)
   couponCodeSnapshot          String?
   couponExpirationSnapshot    DateTime?
+  couponSnapshot              Json?
   freeShippingSnapshot        Boolean
   shippingStatusSnapshot      ShippingStatus    @default(UNKNOWN)
   affiliateUrlSnapshot        String?

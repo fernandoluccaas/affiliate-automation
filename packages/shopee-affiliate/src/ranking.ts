@@ -1,3 +1,8 @@
+import {
+  applyCouponRankingBonus,
+  type CouponSnapshot,
+} from "@affiliate/shared";
+
 export type ShopeeAdvancedRankingWeights = {
   quality: number;
   discount: number;
@@ -46,6 +51,10 @@ export type ShopeeAdvancedRankingInput = {
   duplicateSimilarity?: number;
   categorySelectedCount?: number;
   sellerSelectedCount?: number;
+  couponSnapshot?: CouponSnapshot | null;
+  couponRankingEnabled?: boolean;
+  couponFresh?: boolean;
+  couponRankingMaxBonus?: number;
 };
 
 export type ShopeeAdvancedScoreBreakdown = {
@@ -62,6 +71,8 @@ export type ShopeeAdvancedScoreBreakdown = {
   categoryConcentrationPenalty: number;
   sellerConcentrationPenalty: number;
   availablePositiveWeight: number;
+  baseScore?: number;
+  couponBonus?: number;
 };
 
 function bounded(value: number, minimum = 0, maximum = 100) {
@@ -166,7 +177,7 @@ export function scoreShopeeAdvancedCandidate(
   const sellerConcentrationPenalty =
     Math.max(0, input.sellerSelectedCount ?? 0) *
     weights.sellerConcentrationPenalty;
-  const score = bounded(
+  const baseScore = rounded(bounded(
     (availablePositiveWeight > 0
       ? positiveScore / availablePositiveWeight
       : 0) -
@@ -175,9 +186,16 @@ export function scoreShopeeAdvancedCandidate(
       duplicatePenalty -
       categoryConcentrationPenalty -
       sellerConcentrationPenalty,
-  );
+  ));
+  const couponScore = applyCouponRankingBonus({
+    baseScore,
+    snapshot: input.couponSnapshot ?? null,
+    enabled: input.couponRankingEnabled === true,
+    fresh: input.couponFresh === true,
+    maxBonus: input.couponRankingMaxBonus ?? 0,
+  });
   return {
-    score: rounded(score),
+    score: couponScore.finalScore,
     components: {
       quality: rounded(bounded(input.qualityScore)),
       discount: discount === null ? null : rounded(discount),
@@ -196,6 +214,9 @@ export function scoreShopeeAdvancedCandidate(
       categoryConcentrationPenalty: rounded(categoryConcentrationPenalty),
       sellerConcentrationPenalty: rounded(sellerConcentrationPenalty),
       availablePositiveWeight,
+      ...(input.couponRankingEnabled === true
+        ? { baseScore, couponBonus: couponScore.couponBonus }
+        : {}),
     } satisfies ShopeeAdvancedScoreBreakdown,
   };
 }

@@ -41,6 +41,14 @@ export type ShopeeProductionMetrics = {
   candidates: number;
   ranked: number;
   enriched: number;
+  couponCandidates: number;
+  couponResolved: number;
+  couponConfirmed: number;
+  couponConditional: number;
+  couponRejected: number;
+  couponExpired: number;
+  couponRefreshCalls: number;
+  couponRefreshFailures: number;
   publicationsCreated: number;
   freshnessChecked: number;
   telegramAttempted: number;
@@ -59,6 +67,14 @@ function emptyMetrics(): ShopeeProductionMetrics {
     candidates: 0,
     ranked: 0,
     enriched: 0,
+    couponCandidates: 0,
+    couponResolved: 0,
+    couponConfirmed: 0,
+    couponConditional: 0,
+    couponRejected: 0,
+    couponExpired: 0,
+    couponRefreshCalls: 0,
+    couponRefreshFailures: 0,
     publicationsCreated: 0,
     freshnessChecked: 0,
     telegramAttempted: 0,

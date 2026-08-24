@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
-import type { Channel, Offer, Prisma } from "@affiliate/database";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { prisma, type Channel, type Offer, type Prisma } from "@affiliate/database";
 import { createMercadoLivreDiscoveryMetrics } from "@affiliate/marketplace-discovery";
 import { generateMessageForOffer } from "@affiliate/ai-copywriter";
 import {
@@ -7,6 +7,7 @@ import {
   controlledChannelPlanningBlock,
   createLockedWorkerDependencies,
   createPublicationIdempotently,
+  ensurePublicationCouponFreshness,
   getChannelMessageFooter,
   hasBlockedWhatsAppWebSendState,
   hasAssistedGroupPendingCapacity,
@@ -40,6 +41,187 @@ vi.mock("@affiliate/ai-copywriter", () => ({
     generatedAt: new Date("2026-07-24T12:00:00.000Z"),
   }),
 }));
+
+describe("pre-transport coupon freshness", () => {
+  const previousEnabled = process.env.COUPON_INTELLIGENCE_ENABLED;
+  const previousTtl = process.env.COUPON_REFRESH_TTL_MINUTES;
+
+  afterEach(() => {
+    if (previousEnabled === undefined)
+      delete process.env.COUPON_INTELLIGENCE_ENABLED;
+    else process.env.COUPON_INTELLIGENCE_ENABLED = previousEnabled;
+    if (previousTtl === undefined)
+      delete process.env.COUPON_REFRESH_TTL_MINUTES;
+    else process.env.COUPON_REFRESH_TTL_MINUTES = previousTtl;
+  });
+
+  function publication(overrides: Record<string, unknown> = {}) {
+    const snapshot = {
+      marketplace: "SHOPEE",
+      externalCouponId: "old-coupon",
+      sourceKey: "fixture:old-coupon",
+      code: "OLD10",
+      benefitType: "PERCENTAGE",
+      percentage: "10",
+      fixedAmount: null,
+      minimumSpend: null,
+      maximumDiscount: null,
+      autoApply: false,
+      scope: "PRODUCT",
+      applicability: "CONFIRMED",
+      startsAt: null,
+      expiresAt: "2026-08-25T12:00:00.000Z",
+      validatedAt: "2026-08-24T10:00:00.000Z",
+      source: "SHOPEE_OFFICIAL_TEST",
+      itemPrice: "100.00",
+      discountAmountCalculated: "10.00",
+      effectivePriceCalculated: "90.00",
+      effectiveDiscountPercentage: "10.00",
+    };
+    return {
+      id: "publication-coupon",
+      offerId: "offer-coupon",
+      channelId: "channel-coupon",
+      status: "SCHEDULED",
+      marketplaceSnapshot: "SHOPEE",
+      offerTitleSnapshot: "Produto com cupom",
+      productExternalIdSnapshot: "product-1",
+      originalPriceSnapshot: null,
+      currentPriceSnapshot: { toString: () => "100.00" },
+      discountPercentageSnapshot: null,
+      couponCodeSnapshot: "OLD10",
+      couponExpirationSnapshot: new Date("2026-08-25T12:00:00.000Z"),
+      couponSnapshot: snapshot,
+      freeShippingSnapshot: false,
+      shippingStatusSnapshot: "UNKNOWN",
+      trackingUrlSnapshot: "https://affiliate.test/go/coupon",
+      imageUrlSnapshot: null,
+      messagePayload: {
+        message: "Mensagem antiga com OLD10",
+        trackingUrl: "https://affiliate.test/go/coupon",
+      },
+      channel: {
+        id: "channel-coupon",
+        type: "TELEGRAM",
+        enabled: true,
+        timezone: "America/Fortaleza",
+        dailyPublicationLimit: 10,
+        minimumIntervalMinutes: 30,
+        allowedStartTime: null,
+        allowedEndTime: null,
+        minimumScore: 50,
+        minDiscountPercentage: null,
+        productRepeatIntervalDays: 7,
+        allowedMarketplaces: ["SHOPEE"],
+        allowedCategories: [],
+        configuration: {},
+      },
+      offer: {
+        id: "offer-coupon",
+        marketplace: "SHOPEE",
+        externalProductId: "product-1",
+        sellerId: "seller-1",
+        title: "Produto atual",
+        category: null,
+        score: 80,
+        discountPercentage: null,
+        currentPrice: { toString: () => "100.00" },
+        coupons: [],
+        affiliateLinks: [],
+      },
+      attempts: [],
+      ...overrides,
+    };
+  }
+
+  it("removes a stale coupon and regenerates a pending message without transport", async () => {
+    process.env.COUPON_INTELLIGENCE_ENABLED = "true";
+    process.env.COUPON_REFRESH_TTL_MINUTES = "30";
+    const update = vi.fn().mockResolvedValue({});
+    Object.assign(prisma, { publication: { update } });
+    const record = publication();
+    const result = await ensurePublicationCouponFreshness({
+      publication: record as never,
+      now: new Date("2026-08-24T12:00:00.000Z"),
+    });
+    expect(result).toMatchObject({
+      allowed: true,
+      refreshed: true,
+      reason: "COUPON_SNAPSHOT_REMOVED",
+      snapshot: null,
+    });
+    expect(update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "publication-coupon", status: "SCHEDULED" },
+        data: expect.objectContaining({ couponCodeSnapshot: null }),
+      }),
+    );
+    expect((record.messagePayload as { message: string }).message).not.toContain(
+      "OLD10",
+    );
+  });
+
+  it("never rewrites a historical published coupon snapshot", async () => {
+    process.env.COUPON_INTELLIGENCE_ENABLED = "true";
+    const update = vi.fn();
+    Object.assign(prisma, { publication: { update } });
+    const result = await ensurePublicationCouponFreshness({
+      publication: publication({ status: "PUBLISHED" }) as never,
+      now: new Date("2026-08-24T12:00:00.000Z"),
+    });
+    expect(result.reason).toBe("COUPON_HISTORICAL_SNAPSHOT_IMMUTABLE");
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("replaces a stale snapshot with the best currently fresh persisted coupon", async () => {
+    process.env.COUPON_INTELLIGENCE_ENABLED = "true";
+    process.env.COUPON_REFRESH_TTL_MINUTES = "30";
+    const update = vi.fn().mockResolvedValue({});
+    Object.assign(prisma, { publication: { update } });
+    const record = publication({
+      offer: {
+        ...(publication().offer as object),
+        coupons: [
+          {
+            marketplace: "SHOPEE",
+            externalCouponId: "new-coupon",
+            sourceKey: "fixture:new-coupon",
+            code: "NEW20",
+            benefitType: "PERCENTAGE",
+            percentage: "20",
+            discountAmount: null,
+            minimumSpend: null,
+            maximumDiscount: null,
+            startsAt: null,
+            expiresAt: new Date("2026-08-26T12:00:00.000Z"),
+            autoApply: false,
+            scope: "PRODUCT",
+            sellerId: "seller-1",
+            productExternalId: "product-1",
+            source: "SHOPEE_OFFICIAL_TEST",
+            status: "ACTIVE",
+            active: true,
+            lastValidatedAt: new Date("2026-08-24T11:55:00.000Z"),
+            applicability: "CONFIRMED",
+            applicabilityReason: null,
+            confidence: 100,
+          },
+        ],
+      },
+    });
+    const result = await ensurePublicationCouponFreshness({
+      publication: record as never,
+      now: new Date("2026-08-24T12:00:00.000Z"),
+    });
+    expect(result).toMatchObject({
+      reason: "COUPON_SNAPSHOT_REPLACED",
+      snapshot: { code: "NEW20", effectivePriceCalculated: "80.00" },
+    });
+    expect((record.messagePayload as { message: string }).message).toContain(
+      "NEW20",
+    );
+  });
+});
 
 describe("promotional message channel context", () => {
   it("reads only an explicitly configured footer", () => {
@@ -1302,6 +1484,98 @@ describe("createPublicationIdempotently", () => {
     if (previous.external === undefined)
       delete process.env.SHOPEE_EXTERNAL_SENDS_ENABLED;
     else process.env.SHOPEE_EXTERNAL_SENDS_ENABLED = previous.external;
+  });
+
+  it("does not call transport when stale coupon removal makes the offer ineligible", async () => {
+    const actual = await import("@affiliate/database");
+    const previousEnabled = process.env.COUPON_INTELLIGENCE_ENABLED;
+    process.env.COUPON_INTELLIGENCE_ENABLED = "true";
+    const publish = vi.fn();
+    Object.assign(actual.prisma, {
+      publication: {
+        findMany: vi.fn().mockResolvedValue([
+          {
+            id: "publication-stale-coupon",
+            offerId: "offer-stale-coupon",
+            channelId: "manual-coupon",
+            status: "SCHEDULED",
+            scheduledAt: new Date("2026-08-24T12:00:00.000Z"),
+            messagePayload: {
+              trackingUrl: "https://affiliate.test/go/stale-coupon",
+              message: "Mensagem com OLD10",
+            },
+            trackingUrlSnapshot: "https://affiliate.test/go/stale-coupon",
+            couponSnapshot: {
+              marketplace: "MERCADO_LIVRE",
+              externalCouponId: "old",
+              sourceKey: "fixture:old",
+              code: "OLD10",
+              benefitType: "PERCENTAGE",
+              percentage: "10",
+              fixedAmount: null,
+              minimumSpend: null,
+              maximumDiscount: null,
+              autoApply: false,
+              scope: "PRODUCT",
+              applicability: "CONFIRMED",
+              startsAt: null,
+              expiresAt: "2026-08-23T12:00:00.000Z",
+              validatedAt: "2026-08-23T11:00:00.000Z",
+              source: "MERCADO_LIVRE_OFFICIAL_TEST",
+              itemPrice: "100.00",
+              discountAmountCalculated: "10.00",
+              effectivePriceCalculated: "90.00",
+              effectiveDiscountPercentage: "10.00",
+            },
+            metadata: null,
+            offer: {
+              id: "offer-stale-coupon",
+              marketplace: "MERCADO_LIVRE",
+              externalProductId: "MLB-COUPON",
+              sellerId: "seller-1",
+              category: null,
+              score: 10,
+              discountPercentage: null,
+              currentPrice: { toString: () => "100.00" },
+              imageUrl: null,
+              affiliateLinks: [],
+              coupons: [],
+            },
+            channel: {
+              id: "manual-coupon",
+              type: "MANUAL_EXPORT",
+              enabled: true,
+              timezone: "America/Fortaleza",
+              dailyPublicationLimit: 10,
+              minimumIntervalMinutes: 0,
+              allowedStartTime: null,
+              allowedEndTime: null,
+              minimumScore: 70,
+              minDiscountPercentage: null,
+              productRepeatIntervalDays: 0,
+              allowedMarketplaces: ["MERCADO_LIVRE"],
+              allowedCategories: [],
+              configuration: null,
+            },
+            attempts: [],
+          },
+        ]),
+        update: vi.fn(),
+      },
+    });
+    const metrics = await publishScheduledOffers(
+      new Date("2026-08-24T12:00:00.000Z"),
+      {
+        publisherFactory: () => ({ publish }),
+      },
+    );
+    expect(metrics.skipReasons).toMatchObject({
+      COUPON_REFRESH_MADE_OFFER_INELIGIBLE: 1,
+    });
+    expect(publish).not.toHaveBeenCalled();
+    if (previousEnabled === undefined)
+      delete process.env.COUPON_INTELLIGENCE_ENABLED;
+    else process.env.COUPON_INTELLIGENCE_ENABLED = previousEnabled;
   });
 
   it("blocks retry after an uncertain Shopee Telegram transport", async () => {
