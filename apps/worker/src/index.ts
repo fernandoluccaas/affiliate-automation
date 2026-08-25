@@ -467,9 +467,10 @@ async function messagePayloadFor(
   const couponCode = couponConfiguration.enabled
     ? (couponSnapshot?.code ?? null)
     : offer.couponCode;
-  const couponExpiration = couponConfiguration.enabled
-    ? couponSnapshot?.expiresAt
-    : offer.couponExpiration;
+  const couponExpiration =
+    (couponConfiguration.enabled
+      ? couponSnapshot?.expiresAt
+      : offer.couponExpiration) ?? null;
 
   const recentHeadlines = await recentChannelHeadlines(channel.id);
   const generated = await generateMessageForOffer({
@@ -1719,7 +1720,17 @@ export async function ensurePublicationCouponFreshness(input: {
     ? createCouponSnapshot(resolution.bestCoupon)
     : null;
   const policy = isOfferCompatibleWithChannel(
-    publication.offer,
+    {
+      marketplace: publication.offer.marketplace,
+      category: publication.offer.category,
+      score: publication.offer.score,
+      scoreCompletenessPercentage:
+        publication.offer.scoreCompletenessPercentage?.toString() ?? null,
+      discountPercentage:
+        publication.offer.discountPercentage?.toString() ?? null,
+      stockStatus: publication.offer.stockStatus,
+      shippingStatus: publication.offer.shippingStatus,
+    },
     channelPolicy(publication.channel),
   );
   if (!replacementSnapshot && !policy.ok) {

@@ -222,8 +222,24 @@ describe("coupon intelligence service", () => {
           sourceKey: expectedSourceKey,
         },
       },
-      update: { code: null },
-      create: { code: null, sourceKey: expectedSourceKey },
+      update: {
+        code: null,
+        discountAmount: null,
+        minimumSpend: null,
+        maximumDiscount: null,
+        startsAt: null,
+        expiresAt: null,
+      },
+      create: {
+        externalCouponId: null,
+        sourceKey: expectedSourceKey,
+        code: null,
+        discountAmount: null,
+        minimumSpend: null,
+        maximumDiscount: null,
+        startsAt: null,
+        expiresAt: null,
+      },
     });
     expect(upsertInput.create.sourceKey).not.toBe("");
     expect(result.bestCoupon).toMatchObject({

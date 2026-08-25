@@ -1566,7 +1566,15 @@ describe("createPublicationIdempotently", () => {
     const metrics = await publishScheduledOffers(
       new Date("2026-08-24T12:00:00.000Z"),
       {
-        publisherFactory: () => ({ publish }),
+        publisherFactory: () => ({
+          publish,
+          validateCredentials: vi.fn().mockResolvedValue(true),
+          getPublicationStatus: vi
+            .fn()
+            .mockResolvedValue({ status: "PUBLISHED" }),
+          retry: vi.fn().mockResolvedValue({ status: "PUBLISHED" }),
+          healthCheck: vi.fn().mockResolvedValue(true),
+        }),
       },
     );
     expect(metrics.skipReasons).toMatchObject({
