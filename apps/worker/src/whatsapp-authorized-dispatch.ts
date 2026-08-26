@@ -555,6 +555,7 @@ export function createAuthorizedDispatchDependencies(): AuthorizedDispatchDepend
       });
       if (!publication) throw new Error("PUBLICATION_NOT_FOUND");
       const payload = record(publication.messagePayload);
+      const publicationMetadata = record(publication.metadata);
       const message = text(payload.message);
       const affiliateUrl = publication.affiliateUrlSnapshot || "";
       if (!message || !affiliateUrl)
@@ -587,6 +588,10 @@ export function createAuthorizedDispatchDependencies(): AuthorizedDispatchDepend
                 channelId: publication.channelId,
                 marketplace: "SHOPEE",
                 publicationStatus: publication.status,
+                publicationMode:
+                  typeof publicationMetadata.publicationMode === "string"
+                    ? publicationMetadata.publicationMode
+                    : null,
                 channelType: publication.channel.type,
                 channelEnabled: publication.channel.enabled,
                 allowedMarketplaces: Array.isArray(
@@ -604,9 +609,8 @@ export function createAuthorizedDispatchDependencies(): AuthorizedDispatchDepend
                   }),
                 ),
                 deliveryUncertain:
-                  record(publication.metadata).deliveryUncertain === true ||
-                  record(publication.metadata).deliveryState ===
-                    "DELIVERY_UNCERTAIN",
+                  publicationMetadata.deliveryUncertain === true ||
+                  publicationMetadata.deliveryState === "DELIVERY_UNCERTAIN",
               },
             }
           : {}),

@@ -61,6 +61,7 @@ import {
   type CouponSnapshot,
 } from "@affiliate/shared";
 import { persistedCouponCandidate } from "./coupon-intelligence-service";
+import { activateControlledShopeeTelegramPublication } from "./shopee-controlled-publication";
 import {
   getWorkerCadences,
   runContinuousWorker,
@@ -1362,46 +1363,39 @@ export async function scheduleReadyOffers(
           select: { id: true, status: true, metadata: true },
         });
         if (existingPublication) {
-          const controlledMetadata =
-            existingPublication.metadata &&
-            typeof existingPublication.metadata === "object" &&
-            !Array.isArray(existingPublication.metadata)
-              ? (existingPublication.metadata as Record<string, unknown>)
-              : {};
           if (
             offer.marketplace === "SHOPEE" &&
-            channel.type === "TELEGRAM" &&
-            existingPublication.status === "AWAITING_MANUAL_PUBLICATION" &&
-            controlledMetadata.publicationMode === "SHOPEE_CONTROLLED" &&
-            controlledMetadata.distributionState === "PLANNED"
+            channel.type === "TELEGRAM"
           ) {
-            await prisma.publication.update({
-              where: { id: existingPublication.id },
-              data: {
-                status: "SCHEDULED",
-                scheduledAt: now,
-                metadata: {
-                  ...controlledMetadata,
-                  distributionState: "SCHEDULED",
-                  autoDistributionActivatedAt: now.toISOString(),
-                } as Prisma.InputJsonValue,
-              },
-            });
-            shopeeScheduledThisCycle += 1;
-            stateForTimezone(
-              shopeeDistributionStates,
-              channel.timezone,
-            ).publicationsToday += 1;
-            metrics.scheduled += 1;
-            metrics.publicationsPlanned += 1;
-            selectedOfferIds.add(offer.id);
-            recordPlanningDecision(metrics, offer, channel, "ALREADY_EXISTS", {
-              executionResult: "PENDING",
-              reason: "SHOPEE_CONTROLLED_PUBLICATION_ACTIVATED",
-              publicationId: existingPublication.id,
-            });
-            scheduledChannelIds.add(channel.id);
-            continue;
+            const activation =
+              await activateControlledShopeeTelegramPublication({
+                publicationId: existingPublication.id,
+                channelId: channel.id,
+                now,
+              });
+            if (activation.ok && activation.status === "ACTIVATED") {
+              shopeeScheduledThisCycle += 1;
+              stateForTimezone(
+                shopeeDistributionStates,
+                channel.timezone,
+              ).publicationsToday += 1;
+              metrics.scheduled += 1;
+              metrics.publicationsPlanned += 1;
+              selectedOfferIds.add(offer.id);
+              recordPlanningDecision(
+                metrics,
+                offer,
+                channel,
+                "ALREADY_EXISTS",
+                {
+                  executionResult: "PENDING",
+                  reason: "SHOPEE_CONTROLLED_PUBLICATION_ACTIVATED",
+                  publicationId: existingPublication.id,
+                },
+              );
+              scheduledChannelIds.add(channel.id);
+              continue;
+            }
           }
           recordSkip(metrics, "DUPLICATE_PUBLICATION");
           metrics.publicationsAlreadyExisting += 1;
@@ -2053,6 +2047,10 @@ export async function publishScheduledOffers(
           channelId: publication.channelId,
           marketplace: "SHOPEE",
           publicationStatus: publication.status,
+          publicationMode:
+            typeof metadata.publicationMode === "string"
+              ? metadata.publicationMode
+              : null,
           channelType: publication.channel.type,
           channelEnabled: publication.channel.enabled,
           allowedMarketplaces: Array.isArray(

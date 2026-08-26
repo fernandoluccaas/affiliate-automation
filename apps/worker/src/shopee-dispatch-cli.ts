@@ -1,4 +1,5 @@
 import { previewShopeeDispatch } from "@affiliate/shopee-affiliate";
+import { activateControlledShopeeTelegramPublication } from "./shopee-controlled-publication";
 import { dispatchAuthorizedWhatsAppPublication } from "./whatsapp-authorized-dispatch";
 
 function argument(args: string[], name: string) {
@@ -10,8 +11,14 @@ export async function executeShopeeDispatchCommand(
   args: string[],
   dependencies: {
     preview?: typeof previewShopeeDispatch;
-    telegram?: (publicationId: string, channelId: string) => Promise<unknown>;
+    activateTelegram?: typeof activateControlledShopeeTelegramPublication;
+    telegram?: (
+      publicationId: string,
+      channelId: string,
+      now: Date,
+    ) => Promise<unknown>;
     whatsapp?: (publicationId: string) => Promise<unknown>;
+    now?: () => Date;
   } = {},
 ) {
   const command = args[0];
@@ -43,18 +50,40 @@ export async function executeShopeeDispatchCommand(
   }
   if (!preview.allowed) return preview;
   if (preview.channelType === "TELEGRAM") {
+    const now = dependencies.now?.() ?? new Date();
+    const activation = await (
+      dependencies.activateTelegram ??
+      activateControlledShopeeTelegramPublication
+    )({
+      publicationId,
+      channelId,
+      now,
+    });
+    if (!activation.ok) {
+      return {
+        status: "BLOCKED",
+        allowed: false,
+        reason: activation.code,
+        publicationId,
+        channelId,
+        externalRequests: 0,
+        writes: 0,
+        messagesSent: 0,
+        stateModified: false,
+      } as const;
+    }
     const telegram =
       dependencies.telegram ??
-      (async (id: string, selectedChannelId: string) => {
+      (async (id: string, selectedChannelId: string, dispatchAt: Date) => {
         process.env.AFFILIATE_WORKER_IMPORT_ONLY = "true";
         const { publishScheduledOffers } = await import("./index");
-        return publishScheduledOffers(new Date(), {
+        return publishScheduledOffers(dispatchAt, {
           publicationId: id,
           channelId: selectedChannelId,
           shopeeScope: "ONLY",
         });
       });
-    return telegram(publicationId, channelId);
+    return telegram(publicationId, channelId, now);
   }
   if (preview.channelType === "WHATSAPP_GROUPS") {
     return (

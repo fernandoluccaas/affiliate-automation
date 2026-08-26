@@ -203,6 +203,7 @@ describe("controlled WhatsApp authorized dispatch", () => {
         channelId: "channel-web",
         marketplace: "SHOPEE",
         publicationStatus: "SCHEDULED",
+        publicationMode: null,
         channelType: "WHATSAPP_GROUPS",
         channelEnabled: true,
         allowedMarketplaces: ["SHOPEE"],
