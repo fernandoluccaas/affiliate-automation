@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
+import type { PrismaClient } from "@affiliate/database";
 import { resolveShopeeAffiliateConfiguration } from "./config";
 import {
   evaluateShopeeDispatchGates,
+  loadShopeeDispatchRecord,
   previewShopeeDispatch,
   type ShopeeDispatchRecord,
 } from "./dispatch";
@@ -22,6 +24,7 @@ function record(
     channelId: "channel-fixture",
     marketplace: "SHOPEE",
     publicationStatus: "SCHEDULED",
+    publicationMode: null,
     channelType: "TELEGRAM",
     channelEnabled: true,
     allowedMarketplaces: ["MERCADO_LIVRE", "SHOPEE"],
@@ -35,6 +38,115 @@ function record(
 }
 
 describe("Shopee dispatch gates", () => {
+  it("keeps a scheduled publication dispatchable", () => {
+    const gate = evaluateShopeeDispatchGates({
+      configuration: resolveShopeeAffiliateConfiguration(liveEnvironment),
+      record: record(),
+    });
+    expect(gate).toEqual({ ok: true });
+  });
+
+  it("allows a controlled publication awaiting dispatch", () => {
+    const gate = evaluateShopeeDispatchGates({
+      configuration: resolveShopeeAffiliateConfiguration(liveEnvironment),
+      record: record({
+        publicationStatus: "AWAITING_MANUAL_PUBLICATION",
+        publicationMode: "SHOPEE_CONTROLLED",
+      }),
+    });
+    expect(gate).toEqual({ ok: true });
+  });
+
+  it.each([null, "ASSISTED"])(
+    "blocks an awaiting publication with mode %s",
+    (publicationMode) => {
+      const gate = evaluateShopeeDispatchGates({
+        configuration: resolveShopeeAffiliateConfiguration(liveEnvironment),
+        record: record({
+          publicationStatus: "AWAITING_MANUAL_PUBLICATION",
+          publicationMode,
+        }),
+      });
+      expect(gate).toEqual({
+        ok: false,
+        code: "SHOPEE_PUBLICATION_NOT_SCHEDULED",
+      });
+    },
+  );
+
+  it("keeps the external-send kill switch above controlled awaiting dispatch", () => {
+    const gate = evaluateShopeeDispatchGates({
+      configuration: resolveShopeeAffiliateConfiguration({
+        ...liveEnvironment,
+        SHOPEE_EXTERNAL_SENDS_ENABLED: "false",
+      }),
+      record: record({
+        publicationStatus: "AWAITING_MANUAL_PUBLICATION",
+        publicationMode: "SHOPEE_CONTROLLED",
+      }),
+    });
+    expect(gate).toEqual({
+      ok: false,
+      code: "SHOPEE_EXTERNAL_SENDS_DISABLED",
+    });
+  });
+
+  it("keeps uncertain controlled awaiting delivery blocked for review", () => {
+    const gate = evaluateShopeeDispatchGates({
+      configuration: resolveShopeeAffiliateConfiguration(liveEnvironment),
+      record: record({
+        publicationStatus: "AWAITING_MANUAL_PUBLICATION",
+        publicationMode: "SHOPEE_CONTROLLED",
+        deliveryUncertain: true,
+      }),
+    });
+    expect(gate).toEqual({
+      ok: false,
+      code: "SHOPEE_DELIVERY_UNCERTAIN_REVIEW_REQUIRED",
+    });
+  });
+
+  it("loads the controlled publication mode from sanitized metadata", async () => {
+    const findFirst = vi.fn().mockResolvedValue({
+      id: "publication-fixture",
+      offerId: "offer-fixture",
+      channelId: "channel-fixture",
+      status: "AWAITING_MANUAL_PUBLICATION",
+      trackingUrlSnapshot: "https://affiliate.test/go/shopee-fixture",
+      metadata: {
+        publicationMode: "SHOPEE_CONTROLLED",
+        distributionState: "PLANNED",
+      },
+      channel: {
+        type: "TELEGRAM",
+        enabled: true,
+        allowedMarketplaces: ["SHOPEE"],
+      },
+      offer: {
+        marketplace: "SHOPEE",
+        affiliateLinks: [
+          { active: true, destination: "https://s.shopee.com.br/AbCdEf" },
+        ],
+      },
+    });
+    const database = {
+      publication: { findFirst },
+    } as unknown as PrismaClient;
+
+    const loaded = await loadShopeeDispatchRecord(
+      "publication-fixture",
+      "channel-fixture",
+      database,
+    );
+
+    expect(loaded).toMatchObject({
+      publicationStatus: "AWAITING_MANUAL_PUBLICATION",
+      publicationMode: "SHOPEE_CONTROLLED",
+      deliveryUncertain: false,
+    });
+    expect(findFirst).toHaveBeenCalledOnce();
+  });
+
   it("blocks every external dispatch while the global kill switch is off", () => {
     const gate = evaluateShopeeDispatchGates({
       configuration: resolveShopeeAffiliateConfiguration({
@@ -97,7 +209,12 @@ describe("Shopee dispatch gates", () => {
   });
 
   it("previews a ready Telegram dispatch with zero effects", async () => {
-    const load = vi.fn(async () => record());
+    const load = vi.fn(async () =>
+      record({
+        publicationStatus: "AWAITING_MANUAL_PUBLICATION",
+        publicationMode: "SHOPEE_CONTROLLED",
+      }),
+    );
     const result = await previewShopeeDispatch({
       publicationId: "publication-fixture",
       channelId: "channel-fixture",

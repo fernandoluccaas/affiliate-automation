@@ -10,6 +10,7 @@ export type ShopeeDispatchRecord = {
   channelId: string;
   marketplace: string;
   publicationStatus: string;
+  publicationMode: string | null;
   channelType: string;
   channelEnabled: boolean;
   allowedMarketplaces: string[];
@@ -67,7 +68,13 @@ export function evaluateShopeeDispatchGates(input: {
   if (!["TELEGRAM", "WHATSAPP_GROUPS"].includes(record.channelType)) {
     return { ok: false, code: "SHOPEE_CHANNEL_TYPE_UNSUPPORTED" };
   }
-  if (record.publicationStatus !== "SCHEDULED") {
+  const controlledAwaitingPublication =
+    record.publicationStatus === "AWAITING_MANUAL_PUBLICATION" &&
+    record.publicationMode === "SHOPEE_CONTROLLED";
+  if (
+    record.publicationStatus !== "SCHEDULED" &&
+    !controlledAwaitingPublication
+  ) {
     return { ok: false, code: "SHOPEE_PUBLICATION_NOT_SCHEDULED" };
   }
   if (record.deliveryUncertain) {
@@ -119,6 +126,10 @@ export async function loadShopeeDispatchRecord(
     channelId: publication.channelId,
     marketplace: publication.offer.marketplace,
     publicationStatus: publication.status,
+    publicationMode:
+      typeof metadata.publicationMode === "string"
+        ? metadata.publicationMode
+        : null,
     channelType: publication.channel.type,
     channelEnabled: publication.channel.enabled,
     allowedMarketplaces: strings(publication.channel.allowedMarketplaces),
