@@ -92,4 +92,11 @@ describe("dashboard page migration contract", () => {
     expect(publications).toContain("WhatsAppPublicationStepper");
     expect(publications).not.toContain("whatsapp:web:dispatch-authorized");
   });
+
+  it("exposes final autonomy readiness as read-only operational cards", () => {
+    const operations = source("operacoes/page.tsx");
+    expect(operations).toContain('title="Tracking público"');
+    expect(operations).toContain('title="WhatsApp Runner"');
+    expect(operations).not.toMatch(/onClick=.*(?:dispatch|publish|send)/i);
+  });
 });

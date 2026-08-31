@@ -125,7 +125,10 @@ export function resolveShopeePublicTrackingReadiness(
   environment: NodeJS.ProcessEnv,
 ) {
   const configuredBaseUrl =
-    environment.APP_BASE_URL ?? environment.NEXT_PUBLIC_APP_URL ?? null;
+    environment.PUBLIC_TRACKING_BASE_URL ??
+    environment.APP_BASE_URL ??
+    environment.NEXT_PUBLIC_APP_URL ??
+    null;
   const localBaseUrl = (configuredBaseUrl ?? "http://localhost:3000").replace(
     /\/$/u,
     "",

@@ -95,6 +95,11 @@ business job and external integration. Use `npm run ops:burn-in:preflight` and t
 bounded `npm run ops:burn-in:smoke -- --duration-seconds 60`; the dashboard remains
 read-only. See [Operational reliability and safe burn-in](docs/operational-burn-in.md).
 
+Phase 6A.17 adds the final fail-closed autonomy boundary: stable public tracking,
+shared outbound text/link/message gates and an optional separate WhatsApp
+Automation Runner. Every new production switch defaults to OFF; the main worker
+still never opens Playwright. See [Final production autonomy](docs/final-production-autonomy.md).
+
 Install Chromium explicitly with `npm run whatsapp:web:install-browser`, then use the remaining local commands documented in [docs/whatsapp-groups.md](docs/whatsapp-groups.md). Caption validation resolves an active media surface from preview, media controls, stacking context, geometry and before/after contenteditable fingerprints; it rejects the normal composer. Any failure after click initiation remains `DELIVERY_UNCERTAIN`, blocks the entire channel queue and can be reconciled auditably without resending.
 
 Manual export channels create `EXPORTED` publications. They do not count as external publications and do not update the offer as published.
@@ -149,12 +154,18 @@ Each Offer stores `sourceCategoryId`, `bestSellerPosition`, `sourceHighlightId`,
 
 ## Mercado Livre affiliate links
 
-Link generation remains in the official Mercado Livre Affiliate Portal. The supported import flow does not require or store browser cookies, CSRF values, usernames, passwords, MFA codes or CAPTCHA data. `ManualAffiliateLinkProvider` returns `MANUAL_REQUIRED`; it never fabricates `meli.la` and never substitutes the original product URL.
+The owner-authorized automatic provider uses only the narrowly scoped Affiliate
+Portal session resources listed in `AGENTS.md`; login remains manual and saved
+session material is encrypted server-side and never exposed or logged. When that
+session is connected, discovery can generate or reuse a real `meli.la`. The
+manual batch import remains the fallback. No provider fabricates a link or
+substitutes the original product URL.
 
 Therefore the automatic flow is:
 
 ```text
-discovered -> resolved -> persisted -> READY_FOR_AFFILIATE_LINK
+discovered -> resolved -> generate/reuse meli.la when authorized -> persisted
+-> READY_TO_PUBLISH, or READY_FOR_AFFILIATE_LINK when generation is unavailable
 -> user imports meli.la -> new Offer version -> deterministic validation/score
 -> READY_TO_PUBLISH or a rejection status
 ```

@@ -9,6 +9,8 @@
     "start": "node --env-file=../../.env --import tsx src/index.ts",
     "burn-in": "node --env-file=../../.env --import tsx src/burn-in-entry.ts",
     "whatsapp:web": "tsx src/whatsapp-web-cli.ts",
+    "whatsapp:auto": "node --env-file=../../.env --import tsx src/whatsapp-automation-cli.ts",
+    "production:autonomy": "node --env-file=../../.env --import tsx src/production-autonomy-cli.ts",
     "shopee:dispatch": "node --env-file=../../.env --import tsx src/shopee-dispatch-cli.ts",
     "shopee:production": "node --env-file=../../.env --import tsx src/shopee-production-cli.ts",
     "coupons": "node --env-file=../../.env --import tsx src/coupon-intelligence-cli.ts",
@@ -29,6 +31,7 @@
     "@affiliate/scoring": "0.1.0",
     "@affiliate/shared": "0.1.0",
     "@affiliate/shopee-affiliate": "0.1.0",
+    "@affiliate/tracking": "0.1.0",
     "@affiliate/validation": "0.1.0",
     "tsx": "^4.20.3",
     "vitest": "^3.2.4"

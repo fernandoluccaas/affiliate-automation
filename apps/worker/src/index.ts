@@ -39,7 +39,11 @@ import {
   refreshMercadoLivreOffers,
 } from "@affiliate/marketplace-discovery";
 import { sanitizeMercadoLivreAffiliateError } from "@affiliate/marketplace-connectors";
-import { validateMarketplaceAffiliateUrl } from "@affiliate/validation";
+import {
+  validateMarketplaceAffiliateUrl,
+  validateOutboundMessageIntegrity,
+} from "@affiliate/validation";
+import { resolvePublicTrackingReadiness } from "@affiliate/tracking";
 import {
   evaluateShopeeDispatchGates,
   evaluateShopeeDistributionPolicy,
@@ -387,6 +391,16 @@ function channelPolicy(channel: Channel): ChannelPolicy {
 }
 
 function getBaseUrl() {
+  const publicTracking = resolvePublicTrackingReadiness();
+  if (publicTracking.mode === "LIVE") {
+    if (!publicTracking.ready || !publicTracking.baseUrl) {
+      throw new Error(publicTracking.reason ?? "PUBLIC_TRACKING_NOT_READY");
+    }
+    return publicTracking.baseUrl;
+  }
+  if (publicTracking.configured && publicTracking.ready && publicTracking.baseUrl) {
+    return publicTracking.baseUrl;
+  }
   return (
     process.env.APP_BASE_URL ??
     process.env.NEXT_PUBLIC_APP_URL ??
@@ -517,11 +531,24 @@ async function messagePayloadFor(
       }).message
     : generated.message;
 
+  const outboundGate = validateOutboundMessageIntegrity({
+    marketplace: offer.marketplace,
+    channelType: channel.type,
+    message,
+    trackingUrl: publicationUrl.url,
+    trackingUrlSnapshot: publicationUrl.url,
+    title: offer.title,
+    currentPrice: offer.currentPrice.toString(),
+    affiliateUrlSnapshot: offer.affiliateUrl,
+    affiliateLinks: offer.affiliateLinks,
+  });
+  if (!outboundGate.ok) return null;
+
   return {
     offerId: offer.id,
     channelId: channel.id,
     trackingUrl: publicationUrl.url,
-    message,
+    message: outboundGate.normalizedMessage,
     imageUrl:
       isAssistedWhatsAppGroup(channel) &&
       channelConfiguration(channel).sendImage === false
@@ -937,6 +964,19 @@ export async function createPublicationIdempotently(
   status: "SCHEDULED" | "AWAITING_MANUAL_PUBLICATION" = "SCHEDULED",
   planningRunId?: string,
 ) {
+  const outboundGate = validateOutboundMessageIntegrity({
+    marketplace: offer.marketplace,
+    channelType: channel.type,
+    message: payload.message,
+    trackingUrl: payload.trackingUrl,
+    trackingUrlSnapshot: payload.trackingUrl,
+    title: offer.title,
+    currentPrice: offer.currentPrice.toString(),
+    affiliateUrlSnapshot: offer.affiliateUrl,
+    affiliateLinks: offer.affiliateLinks,
+  });
+  if (!outboundGate.ok) throw new Error(outboundGate.code);
+  payload.message = outboundGate.normalizedMessage;
   const idempotencyKey = `publication:${channel.id}:${offer.id}`;
 
   return tx.publication.upsert({
@@ -1570,11 +1610,63 @@ async function payloadFromPublication(
   return messagePayloadFor(publication.offer, publication.channel);
 }
 
+function stringifyCurrentPriceSnapshot(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  if (typeof value === "number") return value.toString();
+  if (typeof value !== "object" || value === null) return null;
+
+  try {
+    const toString = Reflect.get(value, "toString");
+    if (typeof toString !== "function") return null;
+    const serialized = Reflect.apply(toString, value, []);
+    return typeof serialized === "string" ? serialized : null;
+  } catch {
+    return null;
+  }
+}
+
+function publicationOutboundSnapshots(
+  publication: PublicationWithRelations,
+): {
+  marketplace: string;
+  title: string;
+  currentPrice: string;
+  trackingUrlSnapshot: string;
+  affiliateUrlSnapshot: string | null;
+} | null {
+  const currentPrice = stringifyCurrentPriceSnapshot(
+    publication.currentPriceSnapshot,
+  );
+  if (
+    typeof publication.marketplaceSnapshot !== "string" ||
+    typeof publication.offerTitleSnapshot !== "string" ||
+    currentPrice === null ||
+    typeof publication.trackingUrlSnapshot !== "string" ||
+    (publication.affiliateUrlSnapshot !== null &&
+      publication.affiliateUrlSnapshot !== undefined &&
+      typeof publication.affiliateUrlSnapshot !== "string")
+  ) {
+    return null;
+  }
+
+  return {
+    marketplace: publication.marketplaceSnapshot,
+    title: publication.offerTitleSnapshot,
+    currentPrice,
+    trackingUrlSnapshot: publication.trackingUrlSnapshot,
+    affiliateUrlSnapshot: publication.affiliateUrlSnapshot ?? null,
+  };
+}
+
 function regeneratedPublicationMessage(
   publication: PublicationWithRelations,
   couponSnapshot: CouponSnapshot | null,
   now: Date,
 ) {
+  const currentPrice = stringifyCurrentPriceSnapshot(
+    publication.currentPriceSnapshot,
+  );
+  if (currentPrice === null) throw new Error("OUTBOUND_SNAPSHOT_INVALID");
   const previousPayload =
     publication.messagePayload &&
     typeof publication.messagePayload === "object" &&
@@ -1585,7 +1677,7 @@ function regeneratedPublicationMessage(
     title: publication.offerTitleSnapshot,
     marketplace: publication.marketplaceSnapshot,
     originalPrice: publication.originalPriceSnapshot?.toString() ?? null,
-    currentPrice: publication.currentPriceSnapshot.toString(),
+    currentPrice,
     discountPercentage:
       publication.discountPercentageSnapshot?.toString() ?? null,
     couponCode: couponSnapshot?.code ?? null,
@@ -2144,6 +2236,23 @@ export async function publishScheduledOffers(
         continue;
       }
     }
+    const outboundSnapshots = publicationOutboundSnapshots(publication);
+    if (!outboundSnapshots) {
+      metrics.failed += 1;
+      metrics.publicationsFailed += 1;
+      metrics.skipped += 1;
+      metrics.skipReasons.OUTBOUND_SNAPSHOT_INVALID =
+        (metrics.skipReasons.OUTBOUND_SNAPSHOT_INVALID ?? 0) + 1;
+      await prisma.publication.update({
+        where: { id: publication.id },
+        data: {
+          status: "PUBLICATION_FAILED",
+          errorMessage: "OUTBOUND_SNAPSHOT_INVALID",
+        },
+      });
+      continue;
+    }
+
     const payload = await payloadFromPublication(publication);
     const publisher = (options.publisherFactory ?? publisherForChannel)(
       publication.channel,
@@ -2172,6 +2281,34 @@ export async function publishScheduledOffers(
       });
       continue;
     }
+
+    const outboundGate = validateOutboundMessageIntegrity({
+      marketplace: outboundSnapshots.marketplace,
+      channelType: publication.channel.type,
+      message: payload.message,
+      trackingUrl: payload.trackingUrl,
+      trackingUrlSnapshot: outboundSnapshots.trackingUrlSnapshot,
+      title: outboundSnapshots.title,
+      currentPrice: outboundSnapshots.currentPrice,
+      affiliateUrlSnapshot: outboundSnapshots.affiliateUrlSnapshot,
+      affiliateLinks: publication.offer.affiliateLinks,
+    });
+    if (!outboundGate.ok) {
+      metrics.failed += 1;
+      metrics.publicationsFailed += 1;
+      metrics.skipped += 1;
+      metrics.skipReasons[outboundGate.code] =
+        (metrics.skipReasons[outboundGate.code] ?? 0) + 1;
+      await prisma.publication.update({
+        where: { id: publication.id },
+        data: {
+          status: "PUBLICATION_FAILED",
+          errorMessage: outboundGate.code,
+        },
+      });
+      continue;
+    }
+    payload.message = outboundGate.normalizedMessage;
 
     const attemptNumber = publication.attempts.length + 1;
     const crashSafeTelegram =

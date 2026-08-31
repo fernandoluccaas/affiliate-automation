@@ -25,6 +25,32 @@ $shutdownSeconds = [Math]::Max(3, [int]$shutdownSecondsValue)
 $stableResetValue = if ($env:AFFILIATE_SUPERVISOR_STABLE_RESET_SECONDS) { $env:AFFILIATE_SUPERVISOR_STABLE_RESET_SECONDS } else { "600" }
 $stableResetSeconds = [Math]::Max(5, [int]$stableResetValue)
 
+function Get-SafeConfigurationValue([string]$Name, [string]$Default = "") {
+  $processValue = [Environment]::GetEnvironmentVariable($Name)
+  if ($processValue) { return $processValue }
+  $environmentFile = Join-Path $repoRoot ".env"
+  if (-not (Test-Path -LiteralPath $environmentFile)) { return $Default }
+  $match = Get-Content -LiteralPath $environmentFile -Encoding utf8 |
+    Where-Object { $_ -match "^\s*$([Regex]::Escape($Name))\s*=" } |
+    Select-Object -Last 1
+  if (-not $match) { return $Default }
+  return (($match -replace "^\s*$([Regex]::Escape($Name))\s*=\s*", "").Trim().Trim('"').Trim("'"))
+}
+
+$whatsappAutomationEnabled = (Get-SafeConfigurationValue "WHATSAPP_AUTOMATION_ENABLED" "false") -eq "true"
+$whatsappAutomationMode = Get-SafeConfigurationValue "WHATSAPP_AUTOMATION_MODE" "OFF"
+$cloudflareTunnelEnabled = (Get-SafeConfigurationValue "CLOUDFLARE_NAMED_TUNNEL_ENABLED" "false") -eq "true"
+$cloudflareTunnelName = Get-SafeConfigurationValue "CLOUDFLARE_TUNNEL_NAME" ""
+$cloudflarePublicHostname = (Get-SafeConfigurationValue "CLOUDFLARE_PUBLIC_HOSTNAME" "").ToLowerInvariant()
+$publicTrackingBaseUrl = Get-SafeConfigurationValue "PUBLIC_TRACKING_BASE_URL" ""
+$cloudflareTunnelConfigured = (
+  $cloudflareTunnelEnabled -and
+  $cloudflareTunnelName -match '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$' -and
+  $cloudflarePublicHostname -match '^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$' -and
+  -not $cloudflarePublicHostname.EndsWith('.trycloudflare.com') -and
+  @("https://$cloudflarePublicHostname", "https://$cloudflarePublicHostname/") -contains $publicTrackingBaseUrl
+)
+
 New-Item -ItemType Directory -Force -Path $stateRoot, $logRoot | Out-Null
 $logRetentionValue = if ($env:AFFILIATE_LOG_RETENTION_DAYS) { $env:AFFILIATE_LOG_RETENTION_DAYS } else { "14" }
 $logRetentionDays = [Math]::Max(1, [int]$logRetentionValue)
@@ -135,7 +161,17 @@ function Start-Component([string]$Name, [string]$InstanceId, [bool]$Smoke, [bool
     $command = "`$null='$marker'; Start-Sleep -Seconds $sleepSeconds"
     $process = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-Command", $command) -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
   } else {
-    $script = if ($Name -eq "dashboard") { "production:dashboard" } elseif ($BurnInMode) { "production:worker:burn-in" } else { "production:worker" }
+    $script = if ($Name -eq "dashboard") {
+      "production:dashboard"
+    } elseif ($Name -eq "whatsapp-runner") {
+      "whatsapp:auto:start"
+    } elseif ($Name -eq "cloudflare-tunnel") {
+      "tracking:tunnel:run"
+    } elseif ($BurnInMode) {
+      "production:worker:burn-in"
+    } else {
+      "production:worker"
+    }
     $marker = $script
     $processHost = Join-Path $repoRoot "scripts\ops\process-host.mjs"
     $process = Start-Process -FilePath "node.exe" -ArgumentList @($processHost, "--component", $Name, "--script", $script, "--instance-id", "$InstanceId-$Name", "--repository", $repoRoot, "--stop-file", $componentStopFile) -WorkingDirectory $repoRoot -PassThru -WindowStyle Hidden
@@ -280,6 +316,12 @@ $components = @(
   (Start-Component "dashboard" $instanceId $smoke $BurnIn),
   (Start-Component "worker" $instanceId $smoke $BurnIn)
 )
+if (-not $smoke -and -not $BurnIn -and $whatsappAutomationEnabled -and @("DRY_RUN", "LIVE") -contains $whatsappAutomationMode) {
+  $components += Start-Component "whatsapp-runner" $instanceId $false $false
+}
+if (-not $smoke -and -not $BurnIn -and $cloudflareTunnelConfigured) {
+  $components += Start-Component "cloudflare-tunnel" $instanceId $false $false
+}
 Write-AtomicJson $componentsFile $components
 $deadline = if ($boundedRun) { $startedAt.AddSeconds([Math]::Max(5, $DurationSeconds)) } else { [DateTime]::MaxValue }
 $smokeRestartObserved = $false

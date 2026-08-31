@@ -70,6 +70,28 @@ export default async function OperationsPage() {
           detail={`rate limiter ${status.tracking.rateLimiter} / redirect ${String(status.tracking.redirectAvailable)}`}
         />
         <StatusCard
+          title="Tracking público"
+          value={
+            status.publicTracking.mode === "OFF"
+              ? "OFF"
+              : status.publicTracking.ready
+                ? "READY"
+                : "BLOCKED"
+          }
+          detail={`${status.publicTracking.mode} / URL estável ${String(status.publicTracking.configured)}`}
+        />
+        <StatusCard
+          title="WhatsApp Runner"
+          value={
+            status.whatsappAutomation.runnerSupervised
+              ? "READY"
+              : status.whatsappAutomation.enabled
+                ? "DEGRADED"
+                : "OFF"
+          }
+          detail={`${status.whatsappAutomation.mode} / incertas ${status.whatsappAutomation.deliveryUncertain}`}
+        />
+        <StatusCard
           title="Descoberta multicategoria"
           value={status.multiCategoryDiscovery.enabled ? "ATIVA" : "DESATIVADA"}
           detail={`${status.multiCategoryDiscovery.categoriesConfigured} categorias / ${status.multiCategoryDiscovery.selectionMode}`}
@@ -229,6 +251,8 @@ export default async function OperationsPage() {
                 <th className="px-3 py-2">Ativa</th>
                 <th className="px-3 py-2">Itens</th>
                 <th className="px-3 py-2">Entrega incerta</th>
+                <th className="px-3 py-2">Sessão</th>
+                <th className="px-3 py-2">Bloqueio</th>
                 <th className="sticky right-0 bg-[var(--muted)] px-3 py-2">
                   Pausado
                 </th>
@@ -243,6 +267,10 @@ export default async function OperationsPage() {
                   <td className="px-3 py-2">{queue.activeState ?? "-"}</td>
                   <td className="px-3 py-2">{queue.total}</td>
                   <td className="px-3 py-2">{queue.deliveryUncertain}</td>
+                  <td className="px-3 py-2">{queue.sessionHealth}</td>
+                  <td className="px-3 py-2">
+                    {queue.blockedReason ?? "-"}
+                  </td>
                   <td className="sticky right-0 bg-[var(--surface)] px-3 py-2">
                     {String(queue.paused)}
                   </td>

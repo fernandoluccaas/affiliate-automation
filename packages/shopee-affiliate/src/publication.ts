@@ -12,6 +12,8 @@ import {
   type CouponCandidate,
   type CouponSnapshot,
 } from "@affiliate/shared";
+import { resolvePublicTrackingReadiness } from "@affiliate/tracking";
+import { validateOutboundMessageIntegrity } from "@affiliate/validation";
 import { resolveShopeeAffiliateConfiguration } from "./config";
 import { nextShopeePublicationAt } from "./distribution";
 import { loadShopeeFreshnessSummary } from "./freshness";
@@ -38,7 +40,9 @@ export type ShopeePublicationSkipCode =
   | "SHOPEE_CHANNEL_MIN_DISCOUNT"
   | "SHOPEE_PUBLICATION_DUPLICATE"
   | "SHOPEE_PUBLICATION_LIMIT_REACHED"
-  | "SHOPEE_MESSAGE_ENCODING_INVALID";
+  | "SHOPEE_MESSAGE_ENCODING_INVALID"
+  | "SHOPEE_OUTBOUND_MESSAGE_INVALID"
+  | "OUTBOUND_TEXT_MOJIBAKE";
 
 export type ShopeePublicationOffer = {
   id: string;
@@ -164,6 +168,16 @@ function stringArray(value: unknown) {
 }
 
 function appBaseUrl(environment: NodeJS.ProcessEnv) {
+  const readiness = resolvePublicTrackingReadiness(environment);
+  if (readiness.mode === "LIVE") {
+    if (!readiness.ready || !readiness.baseUrl) {
+      throw new Error(readiness.reason ?? "PUBLIC_TRACKING_NOT_READY");
+    }
+    return readiness.baseUrl;
+  }
+  if (readiness.configured && readiness.ready && readiness.baseUrl) {
+    return readiness.baseUrl;
+  }
   return (
     environment.APP_BASE_URL ??
     environment.NEXT_PUBLIC_APP_URL ??
@@ -455,7 +469,29 @@ export async function planShopeePublications(input: {
         skip(output, offer.id, channel.id, "SHOPEE_MESSAGE_ENCODING_INVALID");
         continue;
       }
-      const message = messageValidation.normalizedMessage;
+      const outboundGate = validateOutboundMessageIntegrity({
+        marketplace: "SHOPEE",
+        channelType: channel.type,
+        message: messageValidation.normalizedMessage,
+        trackingUrl,
+        trackingUrlSnapshot: trackingUrl,
+        title: offer.title,
+        currentPrice: offer.currentPrice,
+        affiliateUrlSnapshot: canonical.destination,
+        affiliateLinks: offer.affiliateLinks,
+      });
+      if (!outboundGate.ok) {
+        skip(
+          output,
+          offer.id,
+          channel.id,
+          outboundGate.code === "OUTBOUND_TEXT_MOJIBAKE"
+            ? "OUTBOUND_TEXT_MOJIBAKE"
+            : "SHOPEE_OUTBOUND_MESSAGE_INVALID",
+        );
+        continue;
+      }
+      const message = outboundGate.normalizedMessage;
       output.planned += 1;
       if (preview) {
         output.decisions.push({

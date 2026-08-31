@@ -384,5 +384,184 @@ export function validateMarketplaceAffiliateUrl(
     };
   }
 
+  if (
+    marketplace === "SHOPEE" &&
+    hostname !== "s.shopee.com.br"
+  ) {
+    return {
+      ok: false,
+      code: "HOST_NOT_ALLOWED",
+      message: "Affiliate URL host is not allowed for Shopee.",
+    };
+  }
+
   return { ok: true, normalizedUrl: url.toString() };
+}
+
+export const OUTBOUND_TEXT_MOJIBAKE = "OUTBOUND_TEXT_MOJIBAKE" as const;
+
+const OUTBOUND_MOJIBAKE_PATTERNS = [
+  /\uFFFD/u,
+  /[\u2500-\u257F]/u,
+  /\u00C3[\u0080-\u00BF\u0152\u0153\u0192\u201A\u201E\u2020\u2021\u2026\u2030\u0160\u2039\u017D]/u,
+  /\u00C2[\u0080-\u00BF]/u,
+  /\u00E2[\u0080-\u00BF\u0152\u0153\u20AC\u2026\u2122]/u,
+  /\u00F0[\u0080-\u00BF\u0178]/u,
+] as const;
+
+export type OutboundTextIntegrityResult =
+  | { ok: true; normalizedText: string }
+  | {
+      ok: false;
+      code: typeof OUTBOUND_TEXT_MOJIBAKE;
+      reason: "MOJIBAKE_SEQUENCE_DETECTED";
+    };
+
+export function validateOutboundTextIntegrity(
+  value: string,
+): OutboundTextIntegrityResult {
+  const normalizedText = value.normalize("NFC");
+  return OUTBOUND_MOJIBAKE_PATTERNS.some((pattern) =>
+    pattern.test(normalizedText),
+  )
+    ? {
+        ok: false,
+        code: OUTBOUND_TEXT_MOJIBAKE,
+        reason: "MOJIBAKE_SEQUENCE_DETECTED",
+      }
+    : { ok: true, normalizedText };
+}
+
+export type AffiliateLinkReadyForPublicationInput = {
+  marketplace: string;
+  active: boolean;
+  destination: string;
+};
+
+export type AffiliateLinkReadyForPublicationResult =
+  | { ok: true; normalizedUrl: string }
+  | {
+      ok: false;
+      code:
+        | "AFFILIATE_LINK_INACTIVE"
+        | "AFFILIATE_LINK_INTERNAL_REDIRECT"
+        | "AFFILIATE_LINK_MARKETPLACE_INVALID"
+        | "AFFILIATE_LINK_INVALID";
+    };
+
+export function validateAffiliateLinkReadyForPublication(
+  input: AffiliateLinkReadyForPublicationInput,
+): AffiliateLinkReadyForPublicationResult {
+  if (!input.active) return { ok: false, code: "AFFILIATE_LINK_INACTIVE" };
+  if (input.marketplace !== "MERCADO_LIVRE" && input.marketplace !== "SHOPEE") {
+    return { ok: false, code: "AFFILIATE_LINK_MARKETPLACE_INVALID" };
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(input.destination);
+  } catch {
+    return { ok: false, code: "AFFILIATE_LINK_INVALID" };
+  }
+  if (parsed.pathname === "/go" || parsed.pathname.startsWith("/go/")) {
+    return { ok: false, code: "AFFILIATE_LINK_INTERNAL_REDIRECT" };
+  }
+  const validation = validateMarketplaceAffiliateUrl(
+    input.marketplace,
+    input.destination,
+  );
+  return validation.ok
+    ? { ok: true, normalizedUrl: validation.normalizedUrl }
+    : { ok: false, code: "AFFILIATE_LINK_INVALID" };
+}
+
+export type OutboundMessageIntegrityInput = {
+  marketplace: string;
+  channelType: string;
+  message: string;
+  trackingUrl: string;
+  trackingUrlSnapshot: string;
+  title: string;
+  currentPrice: string | number;
+  affiliateUrlSnapshot?: string | null;
+  affiliateLinks?: readonly { active: boolean; destination: string }[];
+};
+
+export type OutboundMessageIntegrityResult =
+  | { ok: true; normalizedMessage: string; affiliateUrl: string }
+  | {
+      ok: false;
+      code:
+        | typeof OUTBOUND_TEXT_MOJIBAKE
+        | "OUTBOUND_MESSAGE_EMPTY"
+        | "OUTBOUND_MESSAGE_TOO_LONG"
+        | "OUTBOUND_TRACKING_URL_MISMATCH"
+        | "OUTBOUND_TRACKING_URL_INVALID"
+        | "OUTBOUND_AFFILIATE_LINK_NOT_READY"
+        | "OUTBOUND_SNAPSHOT_INVALID";
+    };
+
+export function validateOutboundMessageIntegrity(
+  input: OutboundMessageIntegrityInput,
+): OutboundMessageIntegrityResult {
+  if (!input.message.trim()) return { ok: false, code: "OUTBOUND_MESSAGE_EMPTY" };
+  const textIntegrity = validateOutboundTextIntegrity(input.message);
+  if (!textIntegrity.ok) return { ok: false, code: textIntegrity.code };
+  const titleIntegrity = validateOutboundTextIntegrity(input.title);
+  const price = Number(input.currentPrice);
+  if (!input.title.trim() || !titleIntegrity.ok || !Number.isFinite(price) || price <= 0) {
+    return { ok: false, code: "OUTBOUND_SNAPSHOT_INVALID" };
+  }
+  const maximumLength = input.channelType === "TELEGRAM" ? 4096 : 65_536;
+  if (textIntegrity.normalizedText.length > maximumLength) {
+    return { ok: false, code: "OUTBOUND_MESSAGE_TOO_LONG" };
+  }
+  if (!input.trackingUrl || input.trackingUrl !== input.trackingUrlSnapshot) {
+    return { ok: false, code: "OUTBOUND_TRACKING_URL_MISMATCH" };
+  }
+  if (!textIntegrity.normalizedText.includes(input.trackingUrl)) {
+    return { ok: false, code: "OUTBOUND_TRACKING_URL_MISMATCH" };
+  }
+  let tracking: URL;
+  try {
+    tracking = new URL(input.trackingUrl);
+  } catch {
+    return { ok: false, code: "OUTBOUND_TRACKING_URL_INVALID" };
+  }
+  if (tracking.username || tracking.password) {
+    return { ok: false, code: "OUTBOUND_TRACKING_URL_INVALID" };
+  }
+  const candidates = [
+    ...(input.marketplace === "MERCADO_LIVRE" && input.affiliateUrlSnapshot
+      ? [{ active: true, destination: input.affiliateUrlSnapshot }]
+      : []),
+    ...(input.affiliateLinks ?? []),
+  ];
+  const ready = candidates
+    .map((link) =>
+      validateAffiliateLinkReadyForPublication({
+        marketplace: input.marketplace,
+        ...link,
+      }),
+    )
+    .find((result) => result.ok);
+  if (!ready?.ok) {
+    return { ok: false, code: "OUTBOUND_AFFILIATE_LINK_NOT_READY" };
+  }
+  if (
+    input.marketplace === "MERCADO_LIVRE" &&
+    input.trackingUrl !== ready.normalizedUrl
+  ) {
+    return { ok: false, code: "OUTBOUND_TRACKING_URL_MISMATCH" };
+  }
+  if (
+    input.marketplace === "SHOPEE" &&
+    (tracking.protocol !== "https:" || !/^\/go\/[^/]+$/u.test(tracking.pathname))
+  ) {
+    return { ok: false, code: "OUTBOUND_TRACKING_URL_INVALID" };
+  }
+  return {
+    ok: true,
+    normalizedMessage: textIntegrity.normalizedText,
+    affiliateUrl: ready.normalizedUrl,
+  };
 }

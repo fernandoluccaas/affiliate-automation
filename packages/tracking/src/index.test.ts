@@ -5,11 +5,39 @@ import {
   createTemporaryFingerprint,
   parseAttributionSubId,
   sanitizeRefererHost,
+  resolvePublicTrackingReadiness,
   trackingConfiguration,
   trackingPreflight,
   trustedClientAddress,
   validateTrackingDestination,
 } from "./index";
+
+describe("public tracking readiness", () => {
+  it("requires an explicitly configured stable public URL in LIVE", () => {
+    expect(resolvePublicTrackingReadiness({ PRODUCTION_AUTONOMY_MODE: "LIVE" })).toMatchObject({
+      ready: false,
+      reason: "PUBLIC_TRACKING_BASE_URL_MISSING",
+    });
+    expect(resolvePublicTrackingReadiness({
+      PRODUCTION_AUTONOMY_MODE: "LIVE",
+      PUBLIC_TRACKING_BASE_URL: "https://tracking.example/",
+    })).toMatchObject({ ready: true, baseUrl: "https://tracking.example" });
+  });
+
+  it.each([
+    "http://tracking.example",
+    "https://localhost:3000",
+    "https://temporary.trycloudflare.com",
+    "https://user:secret@tracking.example",
+    "https://tracking.example/unexpected",
+    "https://tracking.example/#fragment",
+  ])("rejects an unsafe or temporary LIVE base URL: %s", (baseUrl) => {
+    expect(resolvePublicTrackingReadiness({
+      PRODUCTION_AUTONOMY_MODE: "LIVE",
+      PUBLIC_TRACKING_BASE_URL: baseUrl,
+    }).ready).toBe(false);
+  });
+});
 
 const secret = "test-fingerprint-secret-with-32-characters";
 

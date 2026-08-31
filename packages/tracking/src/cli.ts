@@ -9,6 +9,7 @@ import {
   sanitizeFinancialOperationError,
   trackingConfiguration,
   trackingPreflight,
+  resolvePublicTrackingReadiness,
   type FinancialCsvMarketplace,
   type FinancialImportType,
 } from "./index";
@@ -73,7 +74,7 @@ function usage() {
 async function main() {
   const command = process.argv[2] ?? "help";
   if (command === "help" || process.argv.includes("--help")) return output(usage());
-  if (command === "tracking-status") return output({ status: "TRACKING_STATUS", ...trackingConfiguration(), stateModified: false });
+  if (command === "tracking-status") return output({ status: "TRACKING_STATUS", ...trackingConfiguration(), publicTracking: resolvePublicTrackingReadiness(), stateModified: false });
   if (command === "tracking-preflight") return output({ status: "TRACKING_PREFLIGHT", ...(await trackingPreflight()), stateModified: false });
   if (command === "tracking-retention-report") return output(await collectTrackingRetentionReport());
   if (command === "attribution-status") return output({ status: "ATTRIBUTION_STATUS", ...attributionConfiguration(), stateModified: false });

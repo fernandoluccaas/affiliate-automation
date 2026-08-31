@@ -22,8 +22,8 @@ const instanceId = option("--instance-id");
 const repository = resolve(option("--repository") || process.cwd());
 const stopFile = resolve(option("--stop-file") || "");
 
-if (!['dashboard', 'worker'].includes(component) ||
-    !['production:dashboard', 'production:worker', 'production:worker:burn-in'].includes(script) ||
+if (!['dashboard', 'worker', 'whatsapp-runner', 'cloudflare-tunnel'].includes(component) ||
+    !['production:dashboard', 'production:worker', 'production:worker:burn-in', 'whatsapp:auto:start', 'tracking:tunnel:run'].includes(script) ||
     !/^[a-z0-9-]{8,}$/i.test(instanceId || '') ||
     !stopFile.startsWith(join(repository, ".local", "ops"))) {
   process.exitCode = 2;
@@ -126,13 +126,17 @@ let forcedStopTimer = null;
 function stop() {
   if (stopping) return;
   stopping = true;
-  if (script === "production:worker:burn-in" || script === "production:worker") {
+  if (
+    script === "production:worker:burn-in" ||
+    script === "production:worker" ||
+    script === "whatsapp:auto:start"
+  ) {
     forcedStopTimer = setTimeout(() => {
       spawnSync("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
         windowsHide: true,
         stdio: "ignore",
       });
-    }, 7_000);
+    }, script === "whatsapp:auto:start" ? 30_000 : 7_000);
     forcedStopTimer.unref();
     return;
   }

@@ -31,15 +31,16 @@ vi.mock("@affiliate/database", async () => {
 });
 
 vi.mock("@affiliate/ai-copywriter", () => ({
-  generateMessageForOffer: vi.fn().mockResolvedValue({
-    message:
-      "ACHADINHO DO DIA\n\nProduto teste\n\nPor: R$ 345,99\n\nCompre aqui:\nhttps://example.com/go/slug",
-    source: "DETERMINISTIC_FALLBACK",
-    aiProvider: "DETERMINISTIC",
-    aiValidationPassed: false,
-    aiValidationReasons: [],
-    generatedAt: new Date("2026-07-24T12:00:00.000Z"),
-  }),
+  generateMessageForOffer: vi
+    .fn()
+    .mockImplementation(async (input: { trackingUrl: string }) => ({
+      message: `ACHADINHO DO DIA\n\nProduto teste\n\nPor: R$ 345,99\n\nCompre aqui:\n${input.trackingUrl}`,
+      source: "DETERMINISTIC_FALLBACK",
+      aiProvider: "DETERMINISTIC",
+      aiValidationPassed: false,
+      aiValidationReasons: [],
+      generatedAt: new Date("2026-07-24T12:00:00.000Z"),
+    })),
 }));
 
 describe("pre-transport coupon freshness", () => {
@@ -767,7 +768,14 @@ describe("createPublicationIdempotently", () => {
       version: 1,
       collectedAt: now,
       publishedAt: null,
-      affiliateLinks: [],
+      affiliateLinks: [
+        {
+          id: "link-web",
+          slug: "web",
+          destination: "https://meli.la/web",
+          active: true,
+        },
+      ],
     };
     const channel = {
       id: "channel-web",
@@ -902,7 +910,14 @@ describe("createPublicationIdempotently", () => {
       version: 1,
       collectedAt: now,
       publishedAt: null,
-      affiliateLinks: [],
+      affiliateLinks: [
+        {
+          id: "link-queue",
+          slug: "queue",
+          destination: "https://meli.la/queue",
+          active: true,
+        },
+      ],
     };
     const baseChannel = {
       name: "Canal",
@@ -1260,7 +1275,14 @@ describe("createPublicationIdempotently", () => {
       version: 1,
       collectedAt: now,
       publishedAt: null,
-      affiliateLinks: [],
+      affiliateLinks: [
+        {
+          id: "link-isolated",
+          slug: "isolated",
+          destination: "https://meli.la/isolated",
+          active: true,
+        },
+      ],
     };
     const baseChannel = {
       name: "Canal",
@@ -1354,8 +1376,14 @@ describe("createPublicationIdempotently", () => {
     const now = new Date("2026-07-30T12:00:00.000Z");
     const offer = {
       id: "offer-queued",
+      marketplace: "MERCADO_LIVRE",
       imageUrl: null,
-      affiliateLinks: [],
+      affiliateLinks: [
+        {
+          active: true,
+          destination: "https://meli.la/queued",
+        },
+      ],
     };
     const channel = (id: string) => ({
       id,
@@ -1367,11 +1395,16 @@ describe("createPublicationIdempotently", () => {
       offerId: offer.id,
       channelId,
       status: "SCHEDULED",
+      marketplaceSnapshot: "MERCADO_LIVRE",
+      offerTitleSnapshot: "Oferta enfileirada",
+      currentPriceSnapshot: 100,
+      affiliateUrlSnapshot: "https://meli.la/queued",
+      trackingUrlSnapshot: "https://meli.la/queued",
       messagePayload: {
         offerId: offer.id,
         channelId,
         trackingUrl: "https://meli.la/queued",
-        message: "Mensagem",
+        message: "Mensagem https://meli.la/queued",
       },
       offer,
       channel: channel(channelId),
@@ -1400,6 +1433,75 @@ describe("createPublicationIdempotently", () => {
     expect(
       attemptCreate.mock.calls.map(([input]) => input.data.publicationId),
     ).toEqual(["publication-a1", "publication-b1"]);
+  });
+
+  it("fails closed when currentPriceSnapshot is missing", async () => {
+    const actual = await import("@affiliate/database");
+    const now = new Date("2026-07-30T12:00:00.000Z");
+    const publish = vi.fn();
+    const attemptCreate = vi.fn();
+    const publicationUpdate = vi.fn().mockResolvedValue({});
+    Object.assign(actual.prisma, {
+      publication: {
+        findMany: vi.fn().mockResolvedValue([
+          {
+            id: "publication-invalid-snapshot",
+            offerId: "offer-invalid-snapshot",
+            channelId: "channel-invalid-snapshot",
+            status: "SCHEDULED",
+            marketplaceSnapshot: "MERCADO_LIVRE",
+            offerTitleSnapshot: "Oferta sem snapshot de preco",
+            currentPriceSnapshot: undefined,
+            affiliateUrlSnapshot: "https://meli.la/invalid-snapshot",
+            trackingUrlSnapshot: "https://meli.la/invalid-snapshot",
+            messagePayload: {
+              trackingUrl: "https://meli.la/invalid-snapshot",
+              message: "Oferta sem snapshot https://meli.la/invalid-snapshot",
+            },
+            offer: {
+              id: "offer-invalid-snapshot",
+              marketplace: "MERCADO_LIVRE",
+              imageUrl: null,
+              affiliateLinks: [
+                {
+                  active: true,
+                  destination: "https://meli.la/invalid-snapshot",
+                },
+              ],
+            },
+            channel: {
+              id: "channel-invalid-snapshot",
+              type: "MANUAL_EXPORT",
+              configuration: null,
+            },
+            attempts: [],
+          },
+        ]),
+        update: publicationUpdate,
+      },
+      publicationAttempt: { create: attemptCreate },
+    });
+
+    const metrics = await publishScheduledOffers(now, {
+      publisherFactory: () => ({
+        publish,
+        validateCredentials: vi.fn(),
+        getPublicationStatus: vi.fn(),
+        retry: vi.fn(),
+        healthCheck: vi.fn(),
+      }),
+    });
+
+    expect(metrics.skipReasons.OUTBOUND_SNAPSHOT_INVALID).toBe(1);
+    expect(publish).not.toHaveBeenCalled();
+    expect(attemptCreate).not.toHaveBeenCalled();
+    expect(publicationUpdate).toHaveBeenCalledWith({
+      where: { id: "publication-invalid-snapshot" },
+      data: {
+        status: "PUBLICATION_FAILED",
+        errorMessage: "OUTBOUND_SNAPSHOT_INVALID",
+      },
+    });
   });
 
   it("never dispatches a stale Shopee Publication", async () => {
@@ -1609,9 +1711,14 @@ describe("createPublicationIdempotently", () => {
             channelId: "telegram-shopee",
             status: "SCHEDULED",
             scheduledAt: new Date("2026-08-24T12:00:00.000Z"),
+            marketplaceSnapshot: "SHOPEE",
+            offerTitleSnapshot: "Oferta Shopee segura",
+            currentPriceSnapshot: 100,
+            affiliateUrlSnapshot: "https://s.shopee.com.br/AbCdEf",
             messagePayload: {
               trackingUrl: "https://affiliate.test/go/shopee",
-              message: "Mensagem segura",
+              message:
+                "Mensagem segura https://affiliate.test/go/shopee",
             },
             trackingUrlSnapshot: "https://affiliate.test/go/shopee",
             metadata: null,
@@ -1716,16 +1823,27 @@ describe("createPublicationIdempotently", () => {
             offerId: "offer-429",
             channelId: "channel-429",
             status: "SCHEDULED",
+            marketplaceSnapshot: "MERCADO_LIVRE",
+            offerTitleSnapshot: "Oferta com Retry-After",
+            currentPriceSnapshot: 100,
+            affiliateUrlSnapshot: "https://meli.la/retry",
+            trackingUrlSnapshot: "https://meli.la/retry",
             messagePayload: {
               offerId: "offer-429",
               channelId: "channel-429",
               trackingUrl: "https://meli.la/retry",
-              message: "Mensagem",
+              message: "Mensagem https://meli.la/retry",
             },
             offer: {
               id: "offer-429",
+              marketplace: "MERCADO_LIVRE",
               imageUrl: null,
-              affiliateLinks: [],
+              affiliateLinks: [
+                {
+                  active: true,
+                  destination: "https://meli.la/retry",
+                },
+              ],
             },
             channel: {
               id: "channel-429",
@@ -1776,16 +1894,23 @@ describe("createPublicationIdempotently", () => {
       couponCode: "PROMO10",
       couponExpiration: new Date("2026-07-24T12:00:00.000Z"),
       freeShipping: true,
-      affiliateUrl: "https://example.com/affiliate",
+      affiliateUrl: "https://s.shopee.com.br/fixture",
       version: 1,
-      affiliateLinks: [],
+      affiliateLinks: [
+        {
+          id: "link-1",
+          slug: "slug",
+          destination: "https://s.shopee.com.br/fixture",
+          active: true,
+        },
+      ],
     } as unknown as Offer & { affiliateLinks: [] };
     const channel = { id: "channel-1" } as Channel;
     const payload = {
       offerId: "offer-1",
       channelId: "channel-1",
       trackingUrl: "https://example.com/go/slug",
-      message: "Mensagem",
+      message: "Mensagem https://example.com/go/slug",
       messageSource: "DETERMINISTIC_FALLBACK" as const,
       aiProvider: "DETERMINISTIC" as const,
       aiValidationPassed: false,
@@ -1824,7 +1949,7 @@ describe("createPublicationIdempotently", () => {
       offerId: "offer-1",
       channelId: "channel-1",
       trackingUrl: "https://example.com/go/slug",
-      message: "Mensagem",
+      message: "Mensagem https://example.com/go/slug",
       messageSource: "DETERMINISTIC_FALLBACK" as const,
       aiProvider: "DETERMINISTIC" as const,
       aiValidationPassed: false,
@@ -1840,7 +1965,15 @@ describe("createPublicationIdempotently", () => {
       currentPrice: 40,
       discountPercentage: 60,
       freeShipping: false,
-      affiliateLinks: [],
+      affiliateUrl: "https://s.shopee.com.br/fixture",
+      affiliateLinks: [
+        {
+          id: "link-1",
+          slug: "slug",
+          destination: "https://s.shopee.com.br/fixture",
+          active: true,
+        },
+      ],
     };
 
     await createPublicationIdempotently(

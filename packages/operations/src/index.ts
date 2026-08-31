@@ -24,6 +24,7 @@ import {
 import { getRedisHealth } from "@affiliate/redis";
 import {
   collectTrackingOperationalState,
+  resolvePublicTrackingReadiness,
   trackingConfiguration,
   trackingPreflight,
 } from "@affiliate/tracking";
@@ -140,7 +141,7 @@ export function structuredLog(input: {
 }
 
 export type SupervisorComponentState = {
-  component: "dashboard" | "worker";
+  component: "dashboard" | "worker" | "whatsapp-runner" | "cloudflare-tunnel";
   pid: number;
   instanceId: string;
   startedAt: string;
@@ -865,7 +866,9 @@ async function localComponentStatus(workspaceRoot: string) {
       return {
         component:
           component.component === "dashboard" ||
-          component.component === "worker"
+          component.component === "worker" ||
+          component.component === "whatsapp-runner" ||
+          component.component === "cloudflare-tunnel"
             ? component.component
             : "unknown",
         status,
@@ -909,6 +912,14 @@ export async function collectOperationalStatus(
       mode: redis.mode,
     }),
   });
+  const publicTracking = resolvePublicTrackingReadiness(process.env);
+  const configuredWhatsAppAutomationMode =
+    process.env.WHATSAPP_AUTOMATION_MODE;
+  const whatsappAutomationMode =
+    configuredWhatsAppAutomationMode === "DRY_RUN" ||
+    configuredWhatsAppAutomationMode === "LIVE"
+      ? configuredWhatsAppAutomationMode
+      : "OFF";
   const trackingOperations =
     database === "OK"
       ? await collectTrackingOperationalState(client, now)
@@ -1018,6 +1029,8 @@ export async function collectOperationalStatus(
     total: number;
     deliveryUncertain: number;
     paused: boolean;
+    sessionHealth: string;
+    blockedReason: string | null;
   }>;
   for (const channel of channels) {
     const configuration = asRecord(channel.configuration);
@@ -1029,6 +1042,14 @@ export async function collectOperationalStatus(
       total: queue.total,
       deliveryUncertain: queue.deliveryUncertainCount,
       paused: configuration.webAutomationPaused === true,
+      sessionHealth:
+        typeof configuration.automationSessionHealth === "string"
+          ? configuration.automationSessionHealth
+          : "OFF",
+      blockedReason:
+        typeof configuration.automationBlockedReason === "string"
+          ? configuration.automationBlockedReason
+          : null,
     });
   }
   const buildReady = existsSync(
@@ -1067,6 +1088,28 @@ export async function collectOperationalStatus(
       readyForWrites: tracking.readyForTrackingWrites,
       redirectAvailable: tracking.redirectAvailable,
       ...trackingOperations,
+    },
+    publicTracking,
+    whatsappAutomation: {
+      enabled: process.env.WHATSAPP_AUTOMATION_ENABLED === "true",
+      mode: whatsappAutomationMode,
+      readyForLive:
+        process.env.WHATSAPP_AUTOMATION_ENABLED === "true" &&
+        whatsappAutomationMode === "LIVE" &&
+        process.env.WHATSAPP_GROUPS_WEB_EXPERIMENTAL_ENABLED === "true" &&
+        process.env.WHATSAPP_WEB_DRY_RUN === "false" &&
+        publicTracking.ready,
+      runnerSupervised: components.some(
+        (component) =>
+          component.component === "whatsapp-runner" &&
+          component.status === "RUNNING",
+      ),
+      deliveryUncertain: queues.reduce(
+        (total, queue) => total + queue.deliveryUncertain,
+        0,
+      ),
+      blockedReason:
+        queues.find((queue) => queue.blockedReason)?.blockedReason ?? null,
     },
     multiCategoryDiscovery: {
       enabled:
@@ -1282,12 +1325,34 @@ export async function collectStateAudit(
     workerContext,
   });
   const tracking = trackingConfiguration(process.env);
+  const publicTracking = resolvePublicTrackingReadiness(process.env);
   const trackingOperations = await collectTrackingOperationalState(client, now);
   if (tracking.enabled && !tracking.fingerprintSecretConfigured) {
     findings.push({
       code: "TRACKING_FINGERPRINT_SECRET_MISSING",
       severity: "WARNING",
       action: "CONFIGURE_TRACKING_FINGERPRINT_SECRET",
+    });
+  }
+  if (publicTracking.mode === "LIVE" && !publicTracking.ready) {
+    findings.push({
+      code: publicTracking.reason ?? "PUBLIC_TRACKING_NOT_READY",
+      severity: "CRITICAL",
+      action: "CONFIGURE_STABLE_PUBLIC_TRACKING_BEFORE_LIVE",
+    });
+  }
+  if (
+    process.env.WHATSAPP_AUTOMATION_ENABLED === "true" &&
+    !components.some(
+      (component) =>
+        component.component === "whatsapp-runner" &&
+        component.status === "RUNNING",
+    )
+  ) {
+    findings.push({
+      code: "WHATSAPP_AUTOMATION_RUNNER_NOT_RUNNING",
+      severity: "WARNING",
+      action: "REVIEW_SUPERVISOR_AND_RUNNER_CONFIGURATION",
     });
   }
   if (trackingOperations.unattributedConversions > 0) {
@@ -1448,12 +1513,23 @@ function whatsappOperationalMetadata(value: unknown) {
     "sendClickStartedAt",
     "deliveryUncertain",
     "retryBlocked",
+    "sendAuthorizationMode",
+    "sendAuthorizationMarketplace",
   ];
-  return Object.fromEntries(
+  const operational = Object.fromEntries(
     keys
       .filter((key) => metadata[key] !== undefined)
       .map((key) => [key, metadata[key]]),
   );
+  return {
+    ...operational,
+    ...(typeof metadata.sendAuthorizationRunnerInstanceId === "string"
+      ? {
+          sendAuthorizationRunnerInstanceId:
+            metadata.sendAuthorizationRunnerInstanceId.slice(0, 12),
+        }
+      : {}),
+  };
 }
 
 export async function captureBusinessStateSnapshot(

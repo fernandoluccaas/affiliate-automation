@@ -7,6 +7,7 @@ import { basename, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { prisma } from "@affiliate/database";
 import { acquireLock, getRedisKeyFingerprint } from "@affiliate/redis";
+import { resolvePublicTrackingReadiness } from "@affiliate/tracking";
 import {
   auditShopeeProductionStatus,
   loadShopeeProductionStatus,
@@ -186,13 +187,50 @@ async function preflight(input: { burnIn?: boolean; print?: boolean } = {}) {
       ...(process.env[name] ? {} : { action: `CONFIGURE_${name}` }),
     });
   }
+  const whatsappAutomationLive =
+    process.env.WHATSAPP_AUTOMATION_ENABLED === "true" &&
+    process.env.WHATSAPP_AUTOMATION_MODE === "LIVE";
+  const whatsappDryRunExpected = !whatsappAutomationLive;
   checks.push({
     name: "env:WHATSAPP_WEB_DRY_RUN",
-    status: process.env.WHATSAPP_WEB_DRY_RUN === "true" ? "READY" : "NOT_READY",
-    ...(process.env.WHATSAPP_WEB_DRY_RUN === "true"
+    status:
+      (process.env.WHATSAPP_WEB_DRY_RUN === "true") === whatsappDryRunExpected
+        ? "READY"
+        : "NOT_READY",
+    ...((process.env.WHATSAPP_WEB_DRY_RUN === "true") ===
+    whatsappDryRunExpected
       ? {}
-      : { action: "RESTORE_WHATSAPP_WEB_DRY_RUN_TRUE" }),
+      : {
+          action: whatsappAutomationLive
+            ? "SET_WHATSAPP_WEB_DRY_RUN_FALSE_FOR_EXPLICIT_LIVE"
+            : "RESTORE_WHATSAPP_WEB_DRY_RUN_TRUE",
+        }),
   });
+  const publicTracking = resolvePublicTrackingReadiness(process.env);
+  if (publicTracking.mode === "LIVE") {
+    checks.push({
+      name: "public-tracking",
+      status: publicTracking.ready ? "READY" : "NOT_READY",
+      ...(publicTracking.ready
+        ? {}
+        : {
+            action:
+              publicTracking.reason ?? "CONFIGURE_STABLE_PUBLIC_TRACKING",
+          }),
+    });
+  }
+  if (whatsappAutomationLive) {
+    checks.push({
+      name: "whatsapp-automation-live",
+      status:
+        process.env.WHATSAPP_GROUPS_WEB_EXPERIMENTAL_ENABLED === "true"
+          ? "READY"
+          : "NOT_READY",
+      ...(process.env.WHATSAPP_GROUPS_WEB_EXPERIMENTAL_ENABLED === "true"
+        ? {}
+        : { action: "ENABLE_WHATSAPP_WEB_EXPERIMENT_EXPLICITLY" }),
+    });
+  }
   checks.push({
     name: "env:WORKER_REQUIRE_REDIS",
     status: process.env.WORKER_REQUIRE_REDIS === "true" ? "READY" : "NOT_READY",

@@ -23,6 +23,7 @@ import {
   resolveShopeeAffiliateConfiguration,
   type ShopeeDispatchRecord,
 } from "@affiliate/shopee-affiliate";
+import { validateOutboundMessageIntegrity } from "@affiliate/validation";
 
 const ACTOR = "LOCAL_REPOSITORY_OWNER_CLI";
 
@@ -557,15 +558,27 @@ export function createAuthorizedDispatchDependencies(): AuthorizedDispatchDepend
       const payload = record(publication.messagePayload);
       const publicationMetadata = record(publication.metadata);
       const message = text(payload.message);
-      const affiliateUrl = publication.affiliateUrlSnapshot || "";
-      if (!message || !affiliateUrl)
+      const trackingUrl = text(payload.trackingUrl);
+      if (!message || !trackingUrl)
         throw new Error("PUBLICATION_SNAPSHOT_INVALID");
+      const outboundGate = validateOutboundMessageIntegrity({
+        marketplace: publication.marketplaceSnapshot,
+        channelType: publication.channel.type,
+        message,
+        trackingUrl,
+        trackingUrlSnapshot: publication.trackingUrlSnapshot,
+        title: publication.offerTitleSnapshot,
+        currentPrice: publication.currentPriceSnapshot.toString(),
+        affiliateUrlSnapshot: publication.affiliateUrlSnapshot,
+        affiliateLinks: publication.offer.affiliateLinks,
+      });
+      if (!outboundGate.ok) throw new Error(outboundGate.code);
       const input: WhatsAppWebPublicationInput = {
         publicationId: publication.id,
         offerId: publication.offerId,
         destinationType: "GROUP",
-        message,
-        affiliateUrl,
+        message: outboundGate.normalizedMessage,
+        affiliateUrl: outboundGate.affiliateUrl,
         title: publication.offerTitleSnapshot,
         currentPrice: publication.currentPriceSnapshot.toString(),
         imageUrl: publication.imageUrlSnapshot,

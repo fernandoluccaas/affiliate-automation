@@ -641,6 +641,9 @@ export async function authorizeWhatsAppWebSend(
     publicationId: string;
     actorId: string;
     expiresInMinutes: number;
+    authorizationMode?: "MANUAL" | "AUTO";
+    runnerInstanceId?: string;
+    marketplace?: string;
     now?: Date;
   },
 ) {
@@ -707,6 +710,11 @@ export async function authorizeWhatsAppWebSend(
       sendAuthorizationCreatedAt: now.toISOString(),
       sendAuthorizationExpiresAt: expiresAt.toISOString(),
       sendAuthorizationCreatedBy: input.actorId,
+      sendAuthorizationMode: input.authorizationMode ?? "MANUAL",
+      sendAuthorizationRunnerInstanceId:
+        input.authorizationMode === "AUTO" ? input.runnerInstanceId ?? null : null,
+      sendAuthorizationMarketplace:
+        input.authorizationMode === "AUTO" ? input.marketplace ?? null : null,
       sendAuthorizationStatus: "ACTIVE",
       sendAuthorizationPublicationId: publication.id,
       sendAuthorizationChannelId: publication.channelId,

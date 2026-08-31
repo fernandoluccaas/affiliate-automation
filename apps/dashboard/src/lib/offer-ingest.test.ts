@@ -98,7 +98,7 @@ function validOffer(overrides: Partial<OfferFormValues> = {}): OfferFormValues {
     category: "Casa",
     imageUrl: "https://example.com/image.jpg",
     productUrl: "https://example.com/product",
-    affiliateUrl: "https://example.com/affiliate",
+    affiliateUrl: "https://s.shopee.com.br/TestAffiliateDefault",
     affiliateEligibility: "UNKNOWN",
     originalPrice: 100,
     currentPrice: 40,
@@ -431,7 +431,7 @@ describe("ingestOfferInTransaction", () => {
       validOffer({
         externalProductId: "sku-2",
         productUrl: "https://example.com/product-2",
-        affiliateUrl: "https://example.com/affiliate-2",
+        affiliateUrl: "https://s.shopee.com.br/TestAffiliateProduct2",
       }),
     );
 
@@ -515,11 +515,11 @@ describe("ingestOfferInTransaction", () => {
 
     await ingestWithFake(
       tx,
-      validOffer({ affiliateUrl: "https://example.com/affiliate-a" }),
+      validOffer({ affiliateUrl: "https://s.shopee.com.br/TestAffiliateA" }),
     );
     await ingestWithFake(
       tx,
-      validOffer({ affiliateUrl: "https://example.com/affiliate-b" }),
+      validOffer({ affiliateUrl: "https://s.shopee.com.br/TestAffiliateB" }),
     );
 
     expect(tx.offers).toHaveLength(2);
@@ -567,23 +567,25 @@ describe("ingestOfferInTransaction", () => {
 
     await ingestWithFake(
       tx,
-      validOffer({ affiliateUrl: "https://example.com/affiliate-v1" }),
+      validOffer({ affiliateUrl: "https://s.shopee.com.br/TestAffiliateV1" }),
     );
     const v1Link = tx.affiliateLinks[0]!;
     await ingestWithFake(
       tx,
       validOffer({
         currentPrice: 35,
-        affiliateUrl: "https://example.com/affiliate-v2",
+        affiliateUrl: "https://s.shopee.com.br/TestAffiliateV2",
       }),
     );
 
     expect(tx.offers).toHaveLength(2);
     expect(tx.affiliateLinks).toHaveLength(2);
-    expect(v1Link.destination).toBe("https://example.com/affiliate-v1");
+    expect(v1Link.destination).toBe(
+      "https://s.shopee.com.br/TestAffiliateV1",
+    );
     expect(tx.affiliateLinks[1]?.offerId).toBe(tx.offers[1]?.id);
     expect(tx.affiliateLinks[1]?.destination).toBe(
-      "https://example.com/affiliate-v2",
+      "https://s.shopee.com.br/TestAffiliateV2",
     );
   });
 

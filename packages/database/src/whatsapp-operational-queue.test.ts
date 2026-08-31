@@ -244,20 +244,35 @@ describe("WhatsApp Web controlled operations", () => {
     const [authorized, repeated] = await Promise.all([
       authorizeWhatsAppWebSend(database.client, {
         publicationId: "first",
-        actorId: "owner",
+        actorId: "AUTO_WHATSAPP_RUNNER:runner-fixture",
         expiresInMinutes: 15,
+        authorizationMode: "AUTO",
+        runnerInstanceId: "runner-fixture",
+        marketplace: "MERCADO_LIVRE",
         now,
       }),
       authorizeWhatsAppWebSend(database.client, {
         publicationId: "first",
-        actorId: "owner",
+        actorId: "AUTO_WHATSAPP_RUNNER:runner-fixture",
         expiresInMinutes: 15,
+        authorizationMode: "AUTO",
+        runnerInstanceId: "runner-fixture",
+        marketplace: "MERCADO_LIVRE",
         now,
       }),
     ]);
     expect(authorized.authorizationId).toBe(repeated.authorizationId);
     expect([authorized.idempotent, repeated.idempotent]).toContain(true);
     expect(authorized).toMatchObject({ browserOpened: false, sendCalled: false });
+    expect(
+      database.publications.find((item) => item.id === "first")?.metadata,
+    ).toMatchObject({
+      sendAuthorizationMode: "AUTO",
+      sendAuthorizationRunnerInstanceId: "runner-fixture",
+      sendAuthorizationMarketplace: "MERCADO_LIVRE",
+      sendAuthorizationPublicationId: "first",
+      sendAuthorizationChannelId: "channel-web",
+    });
 
     const revoked = await revokeWhatsAppWebSendAuthorization(database.client, {
       publicationId: "first",

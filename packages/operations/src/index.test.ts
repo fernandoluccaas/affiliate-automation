@@ -68,6 +68,22 @@ function auditInput() {
 }
 
 describe("local supervisor policy", () => {
+  it("keeps optional graphical components behind explicit supervisor flags", async () => {
+    const root = resolve(process.cwd(), "../..");
+    const [supervisor, processHost, tunnel] = await Promise.all([
+      readFile(join(root, "scripts/ops/supervisor.ps1"), "utf8"),
+      readFile(join(root, "scripts/ops/process-host.mjs"), "utf8"),
+      readFile(join(root, "scripts/ops/cloudflare-named-tunnel.ps1"), "utf8"),
+    ]);
+    expect(supervisor).toContain("WHATSAPP_AUTOMATION_ENABLED");
+    expect(supervisor).toContain("CLOUDFLARE_NAMED_TUNNEL_ENABLED");
+    expect(supervisor).toContain("-not $smoke -and -not $BurnIn");
+    expect(processHost).toContain("whatsapp-runner");
+    expect(processHost).toContain("cloudflare-tunnel");
+    expect(tunnel).toContain("cloudflared.Source tunnel run $tunnelName");
+    expect(tunnel.toLowerCase()).not.toContain("cloudflare_api_token=");
+  });
+
   it.each([
     ["recent online", "ONLINE", "2026-08-05T11:59:59.000Z", "ONLINE"],
     ["exact boundary", "ONLINE", "2026-08-05T11:58:30.000Z", "ONLINE"],

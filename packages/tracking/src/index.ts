@@ -68,6 +68,7 @@ export async function trackingPreflight(
   dependencies: { redisHealth?: typeof getRedisHealth } = {},
 ) {
   const configuration = trackingConfiguration(env);
+  const publicTracking = resolvePublicTrackingReadiness(env);
   const redis = await (dependencies.redisHealth ?? getRedisHealth)();
   const blockers = [
     ...(!configuration.enabled ? ["TRACKING_DISABLED"] : []),
@@ -75,12 +76,16 @@ export async function trackingPreflight(
       ? ["TRACKING_FINGERPRINT_SECRET_MISSING_OR_INVALID"]
       : []),
     ...(redis.status !== "ok" ? ["TRACKING_REDIS_UNAVAILABLE"] : []),
+    ...(publicTracking.mode === "LIVE" && !publicTracking.ready
+      ? [publicTracking.reason ?? "PUBLIC_TRACKING_NOT_READY"]
+      : []),
   ];
   return {
     ...configuration,
     redis: redis.status === "ok" ? "AVAILABLE" : "UNAVAILABLE",
     readyForTrackingWrites: blockers.length === 0,
     redirectAvailable: true,
+    publicTracking,
     blockers,
   };
 }
@@ -222,6 +227,164 @@ export function redisSafeKeyPart(value: string) {
 
 export function buildTrackingPath(slug: string) {
   return `/go/${encodeURIComponent(slug)}`;
+}
+
+export type ProductionAutonomyMode = "OFF" | "READY" | "LIVE";
+
+export type PublicTrackingReadiness = {
+  mode: ProductionAutonomyMode;
+  configured: boolean;
+  stableRequired: boolean;
+  ready: boolean;
+  baseUrl: string | null;
+  reason:
+    | null
+    | "PUBLIC_TRACKING_BASE_URL_MISSING"
+    | "PUBLIC_TRACKING_BASE_URL_INVALID"
+    | "PUBLIC_TRACKING_HTTPS_REQUIRED"
+    | "PUBLIC_TRACKING_CREDENTIALS_FORBIDDEN"
+    | "PUBLIC_TRACKING_HOST_NOT_PUBLIC"
+    | "PUBLIC_TRACKING_TEMPORARY_HOST_FORBIDDEN"
+    | "PUBLIC_TRACKING_BASE_PATH_INVALID";
+};
+
+function productionAutonomyMode(value: string | undefined): ProductionAutonomyMode {
+  return value === "READY" || value === "LIVE" ? value : "OFF";
+}
+
+function publicTrackingHost(hostname: string) {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (
+    !host ||
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host.endsWith(".local")
+  ) {
+    return false;
+  }
+  if (isIP(host) === 4) {
+    const parts = host.split(".").map(Number);
+    const [first, second, third] = parts;
+    return !(
+      first === 0 ||
+      first === 10 ||
+      first === 127 ||
+      (first === 100 && second !== undefined && second >= 64 && second <= 127) ||
+      (first === 169 && second === 254) ||
+      (first === 172 && second !== undefined && second >= 16 && second <= 31) ||
+      (first === 192 && second === 168) ||
+      (first === 192 && second === 0 && (third === 0 || third === 2)) ||
+      (first === 198 && (second === 18 || second === 19)) ||
+      (first === 198 && second === 51 && third === 100) ||
+      (first === 203 && second === 0 && third === 113) ||
+      (first !== undefined && first >= 224)
+    );
+  }
+  if (isIP(host) === 6) {
+    return !(
+      host === "::" ||
+      host === "::1" ||
+      host.startsWith("fc") ||
+      host.startsWith("fd") ||
+      /^fe[89ab]/u.test(host)
+    );
+  }
+  return host.includes(".");
+}
+
+export function resolvePublicTrackingReadiness(
+  env: NodeJS.ProcessEnv = process.env,
+): PublicTrackingReadiness {
+  const mode = productionAutonomyMode(env.PRODUCTION_AUTONOMY_MODE);
+  const stableRequired =
+    mode === "LIVE" || env.PUBLIC_TRACKING_REQUIRE_STABLE_URL !== "false";
+  const configuredValue = env.PUBLIC_TRACKING_BASE_URL?.trim() || null;
+  if (!configuredValue) {
+    const developmentFallback =
+      mode !== "LIVE"
+        ? env.APP_BASE_URL?.trim() || env.NEXT_PUBLIC_APP_URL?.trim() || null
+        : null;
+    if (developmentFallback && !stableRequired) {
+      try {
+        const url = new URL(developmentFallback);
+        if (
+          (url.protocol !== "http:" && url.protocol !== "https:") ||
+          url.username ||
+          url.password
+        ) {
+          throw new Error("PUBLIC_TRACKING_DEVELOPMENT_FALLBACK_INVALID");
+        }
+        return {
+          mode,
+          configured: false,
+          stableRequired,
+          ready: true,
+          baseUrl: url.origin,
+          reason: null,
+        };
+      } catch {
+        // Fall through to the fail-closed result.
+      }
+    }
+    return {
+      mode,
+      configured: false,
+      stableRequired,
+      ready: mode === "OFF",
+      baseUrl: null,
+      reason: "PUBLIC_TRACKING_BASE_URL_MISSING",
+    };
+  }
+  let url: URL;
+  try {
+    url = new URL(configuredValue);
+  } catch {
+    return {
+      mode,
+      configured: true,
+      stableRequired,
+      ready: false,
+      baseUrl: null,
+      reason: "PUBLIC_TRACKING_BASE_URL_INVALID",
+    };
+  }
+  let reason: PublicTrackingReadiness["reason"] = null;
+  if (url.protocol !== "https:") reason = "PUBLIC_TRACKING_HTTPS_REQUIRED";
+  else if (url.username || url.password)
+    reason = "PUBLIC_TRACKING_CREDENTIALS_FORBIDDEN";
+  else if (!publicTrackingHost(url.hostname))
+    reason = "PUBLIC_TRACKING_HOST_NOT_PUBLIC";
+  else if (
+    url.hostname.toLowerCase() === "trycloudflare.com" ||
+    url.hostname.toLowerCase().endsWith(".trycloudflare.com")
+  ) {
+    reason = "PUBLIC_TRACKING_TEMPORARY_HOST_FORBIDDEN";
+  } else if (
+    (url.pathname !== "/" && url.pathname !== "") ||
+    url.search ||
+    url.hash
+  ) {
+    reason = "PUBLIC_TRACKING_BASE_PATH_INVALID";
+  }
+  return {
+    mode,
+    configured: true,
+    stableRequired,
+    ready: reason === null,
+    baseUrl: reason === null ? url.origin : null,
+    reason,
+  };
+}
+
+export function buildPublicTrackingUrl(
+  slug: string,
+  env: NodeJS.ProcessEnv = process.env,
+) {
+  const readiness = resolvePublicTrackingReadiness(env);
+  if (!readiness.ready || !readiness.baseUrl) {
+    throw new Error(readiness.reason ?? "PUBLIC_TRACKING_NOT_READY");
+  }
+  return `${readiness.baseUrl}${buildTrackingPath(slug)}`;
 }
 
 export type ClickContext = {

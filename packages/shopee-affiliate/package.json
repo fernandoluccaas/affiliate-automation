@@ -29,6 +29,8 @@
     "@affiliate/publication": "0.1.0",
     "@affiliate/redis": "0.1.0",
     "@affiliate/shared": "0.1.0",
+    "@affiliate/tracking": "0.1.0",
+    "@affiliate/validation": "0.1.0",
     "csv-parse": "^6.1.0",
     "tsx": "^4.20.3",
     "zod": "^4.0.5"

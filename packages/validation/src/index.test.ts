@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   calculateValidatedDiscount,
   sanitizeOperationalErrorMessage,
+  validateAffiliateLinkReadyForPublication,
   validateAffiliateUrl,
   validateMarketplaceAffiliateUrl,
+  validateOutboundMessageIntegrity,
+  validateOutboundTextIntegrity,
   validateOfferFacts,
 } from "./index";
 
@@ -147,13 +150,94 @@ describe("validateMarketplaceAffiliateUrl", () => {
     );
   });
 
-  it("preserves generic safe HTTPS validation for other marketplaces", () => {
+  it("accepts only the canonical Shopee short-link host", () => {
     expect(
       validateMarketplaceAffiliateUrl(
         "SHOPEE",
-        "https://affiliate.example/link",
+        "https://s.shopee.com.br/fixture",
       ),
     ).toMatchObject({ ok: true });
+    expect(
+      validateMarketplaceAffiliateUrl("SHOPEE", "https://affiliate.example/link"),
+    ).toMatchObject({ ok: false, code: "HOST_NOT_ALLOWED" });
+  });
+});
+
+describe("outbound production gates", () => {
+  it("fails closed for replacement, Latin-1 mojibake and box drawing", () => {
+    expect(validateOutboundTextIntegrity("Produto válido")).toMatchObject({ ok: true });
+    for (const value of [
+      "Produto \uFFFD",
+      "Pre\u00C3\u00A7o",
+      "Port\u251C\u00A1til El\u251C\u00AEtrica",
+    ]) {
+      expect(validateOutboundTextIntegrity(value)).toMatchObject({
+        ok: false,
+        code: "OUTBOUND_TEXT_MOJIBAKE",
+      });
+    }
+  });
+
+  it("requires an active canonical affiliate destination", () => {
+    expect(
+      validateAffiliateLinkReadyForPublication({
+        marketplace: "SHOPEE",
+        active: true,
+        destination: "https://s.shopee.com.br/fixture",
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      validateAffiliateLinkReadyForPublication({
+        marketplace: "SHOPEE",
+        active: true,
+        destination: "https://app.example/go/fixture",
+      }),
+    ).toMatchObject({ ok: false });
+    expect(
+      validateAffiliateLinkReadyForPublication({
+        marketplace: "MERCADO_LIVRE",
+        active: false,
+        destination: "https://meli.la/fixture",
+      }),
+    ).toMatchObject({ ok: false, code: "AFFILIATE_LINK_INACTIVE" });
+    expect(
+      validateAffiliateLinkReadyForPublication({
+        marketplace: "SHOPEE",
+        active: true,
+        destination: "https://s.shopee.com.br.evil.example/fixture",
+      }),
+    ).toMatchObject({ ok: false, code: "AFFILIATE_LINK_INVALID" });
+  });
+
+  it("validates the immutable outbound message contract", () => {
+    const input = {
+      marketplace: "SHOPEE",
+      channelType: "TELEGRAM",
+      message: "Oferta válida https://app.example/go/fixture",
+      trackingUrl: "https://app.example/go/fixture",
+      trackingUrlSnapshot: "https://app.example/go/fixture",
+      title: "Produto válido",
+      currentPrice: "99.90",
+      affiliateLinks: [
+        { active: true, destination: "https://s.shopee.com.br/fixture" },
+      ],
+    };
+    expect(validateOutboundMessageIntegrity(input)).toMatchObject({ ok: true });
+    expect(
+      validateOutboundMessageIntegrity({
+        ...input,
+        trackingUrl: "https://app.example/go/changed",
+      }),
+    ).toMatchObject({ ok: false, code: "OUTBOUND_TRACKING_URL_MISMATCH" });
+    for (const channelType of ["TELEGRAM", "WHATSAPP_GROUPS"]) {
+      expect(
+        validateOutboundMessageIntegrity({
+          ...input,
+          channelType,
+          message: `Port\u251C\u00A1til https://app.example/go/fixture`,
+        }),
+      ).toMatchObject({ ok: false, code: "OUTBOUND_TEXT_MOJIBAKE" });
+    }
   });
 });
 
