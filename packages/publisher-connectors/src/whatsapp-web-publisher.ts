@@ -662,6 +662,7 @@ export class WhatsAppGroupsWebPublisher implements WhatsAppGroupsWebPublisherCon
             try {
               draftMutationAttempted = true;
               if (media.path) {
+                await adapter.captureMediaEditorBaseline();
                 const attachment = await adapter.attachImage(media.path);
                 Object.assign(diagnostics, attachment);
                 progress.mediaPrepared = true;

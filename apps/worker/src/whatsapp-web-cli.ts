@@ -28,6 +28,7 @@ import {
   type WhatsAppWebSendStateUpdate,
 } from "@affiliate/publisher-connectors";
 import { dispatchAuthorizedWhatsAppPublication } from "./whatsapp-authorized-dispatch";
+import { whatsappWebDryRunExitCode } from "./whatsapp-web-cli-exit-code";
 
 function option(name: string) {
   const index = process.argv.indexOf(name);
@@ -550,6 +551,7 @@ async function main() {
       },
     });
     process.stdout.write(`${JSON.stringify(result)}\n`);
+    process.exitCode = whatsappWebDryRunExitCode(result.status);
     return;
   }
 

@@ -780,9 +780,50 @@ describe("WhatsAppGroupsWebPublisher dry run", () => {
         draftCleared: true,
       },
     });
+    expect(page.captureMediaEditorBaseline).toHaveBeenCalledOnce();
     expect(page.attachImage).toHaveBeenCalledOnce();
     expect(page.fillCaption).toHaveBeenCalledOnce();
     expect(page.clickSendTrigger).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when no media caption candidate is resolved", async () => {
+    const value = input();
+    value.channel.sendImage = true;
+    value.imageUrl = "https://cdn.example/image.jpg";
+    const page = adapter({
+      fillCaption: vi.fn().mockRejectedValue(
+        new WhatsAppWebStageError(
+          "CAPTION_TARGET_NOT_RESOLVED",
+          {
+            currentOrigin: "https://web.whatsapp.com",
+            captionCandidateCount: 2,
+            captionOverlayScoped: false,
+          },
+          "WHATSAPP_WEB_DRAFT_VALIDATION_FAILED",
+        ),
+      ),
+    });
+    const result = await new WhatsAppGroupsWebPublisher({
+      config: config(),
+      launcher: launcher(page),
+      profileLock: lock(),
+      prepareImage: vi.fn().mockResolvedValue({
+        bytes: new Uint8Array([1]),
+        contentType: "image/jpeg",
+        filename: "offer.jpg",
+      }),
+    }).dryRun(value);
+
+    expect(result).toMatchObject({
+      status: "FAILED",
+      stage: "CAPTION_TARGET_NOT_RESOLVED",
+      errorCode: "WHATSAPP_WEB_DRAFT_VALIDATION_FAILED",
+      sendCalled: false,
+      draftCleared: true,
+    });
+    expect(page.captureMediaEditorBaseline).toHaveBeenCalledOnce();
+    expect(page.clickSendTrigger).not.toHaveBeenCalled();
+    expect(page.clearDraft).toHaveBeenCalledOnce();
   });
 
   it("returns FILE_NOT_FOUND_ON_DISK when the written temp file is absent", async () => {

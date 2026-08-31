@@ -83,6 +83,52 @@ describe("active WhatsApp media editor surface", () => {
     });
   });
 
+  it("selects the current media caption without requiring direct DOM containment", () => {
+    const selected = selectWhatsAppMediaCaptionCandidate([
+      evidence({
+        index: 0,
+        existedBeforePreview: false,
+        changedSurfaceAfterPreview: false,
+        sameTopLevelSurfaceAsPreview: true,
+        sameStackingContextAsPreview: true,
+        sameStackingContextAsSend: true,
+        sameTopLevelSurfaceAsSend: false,
+        overlapsPreview: false,
+        verticallyAdjacentToPreview: true,
+        horizontallyAlignedWithPreview: true,
+        insideViewport: true,
+        topmostAtCenter: true,
+      }),
+      evidence({
+        index: 1,
+        existedBeforePreview: true,
+        changedSurfaceAfterPreview: false,
+        sameTopLevelSurfaceAsPreview: false,
+        sameStackingContextAsPreview: false,
+        sameStackingContextAsSend: false,
+        sameTopLevelSurfaceAsSend: false,
+        topmostAtCenter: false,
+      }),
+    ]);
+
+    expect(selected).toMatchObject({
+      status: "LAYOUT_INSPECTION_READY",
+      selectedIndex: 0,
+      decisions: [
+        {
+          index: 0,
+          accepted: true,
+          reason: "ACTIVE_MEDIA_CAPTION_CANDIDATE",
+        },
+        {
+          index: 1,
+          accepted: false,
+          reason: "NORMAL_CHAT_COMPOSER_BEHIND_OVERLAY",
+        },
+      ],
+    });
+  });
+
   it("rejects a nearby candidate in another stacking context", () => {
     expect(
       classifyWhatsAppMediaCaptionCandidate(
