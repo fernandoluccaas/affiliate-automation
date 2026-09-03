@@ -24,6 +24,38 @@ function getAuthSecret() {
   return new TextEncoder().encode(secret);
 }
 
+function firstForwardedValue(value: string | null) {
+  return value
+    ?.split(",")[0]
+    ?.trim() || null;
+}
+
+export function loginRedirectUrl(request: NextRequest) {
+  const forwardedHost = firstForwardedValue(
+    request.headers.get("x-forwarded-host"),
+  );
+
+  const forwardedProto = firstForwardedValue(
+    request.headers.get("x-forwarded-proto"),
+  );
+
+  if (
+    forwardedHost &&
+    (forwardedProto === "https" || forwardedProto === "http")
+  ) {
+    try {
+      return new URL(
+        "/login",
+        `${forwardedProto}://${forwardedHost}`,
+      );
+    } catch {
+      // Fall back to the request URL below.
+    }
+  }
+
+  return new URL("/login", request.url);
+}
+
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
@@ -35,14 +67,14 @@ export async function middleware(request: NextRequest) {
   const token = request.cookies.get(sessionCookieName)?.value;
 
   if (!secret || !token) {
-    return NextResponse.redirect(new URL("/login", request.url));
+    return NextResponse.redirect(loginRedirectUrl(request));
   }
 
   try {
     await jwtVerify(token, secret);
     return NextResponse.next();
   } catch {
-    return NextResponse.redirect(new URL("/login", request.url));
+    return NextResponse.redirect(loginRedirectUrl(request));
   }
 }
 
